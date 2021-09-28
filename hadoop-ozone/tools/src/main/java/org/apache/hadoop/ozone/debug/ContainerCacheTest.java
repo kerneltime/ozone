@@ -21,20 +21,27 @@ import org.apache.hadoop.hdds.cli.GenericCli;
 import org.apache.hadoop.hdds.cli.HddsVersionProvider;
 import org.apache.hadoop.hdds.cli.SubcommandWithParent;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
+import org.apache.hadoop.hdds.utils.db.TableConfig;
 import org.apache.hadoop.ozone.OzoneConfigKeys;
 import org.apache.hadoop.ozone.container.common.utils.ContainerCache;
 import org.apache.hadoop.ozone.container.common.utils.ReferenceCountedDB;
 import org.apache.hadoop.ozone.container.metadata.DatanodeStore;
 import org.apache.hadoop.ozone.container.metadata.DatanodeStoreSchemaOneImpl;
-
 import org.kohsuke.MetaInfServices;
-import picocli.CommandLine.Spec;
-import picocli.CommandLine.Model.CommandSpec;
-
+import org.rocksdb.ColumnFamilyDescriptor;
+import org.rocksdb.ColumnFamilyHandle;
+import org.rocksdb.ColumnFamilyOptions;
+import org.rocksdb.DBOptions;
+import org.rocksdb.RocksDB;
+import org.rocksdb.WriteOptions;
 import picocli.CommandLine;
+import picocli.CommandLine.Model.CommandSpec;
+import picocli.CommandLine.Spec;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Random;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
@@ -117,6 +124,37 @@ public class ContainerCacheTest extends GenericCli
     return OzoneDebug.class;
   }
 
+  public static void runRawRocks(String storagePaths,
+                                 int numDb,
+                                 int cacheSize,
+                                 int iter,
+                                 int numThreads,
+                                 int numKeysPerIter,
+                                 boolean skipDBCreation) throws Exception {
+    String[] paths = storagePaths.split(",");
+    int numPaths = paths.length;
+    for (int i = 0; i < numPaths; i++) {
+      File root = new File(paths[i]);
+      root.mkdirs();
+    }
+    if (!skipDBCreation) {
+      for (int i = 0; i < numDb; i++) {
+        File root = new File(paths[i % numPaths]);
+        File containerDir1 = new File(root, "cont" + i);
+        DBOptions options = new DBOptions()
+            .setCreateIfMissing(true)
+            .setCreateMissingColumnFamilies(true);
+        ColumnFamilyOptions columnFamilyOptions = new ColumnFamilyOptions();
+        WriteOptions writeOptions = new WriteOptions().setSync(false);
+        List<ColumnFamilyDescriptor> columnFamilyDescriptors = new ArrayList<>();
+        List<ColumnFamilyHandle> columnFamilyHandles = new ArrayList<>();
+        TableConfig tableConfig = new TableConfig("default", columnFamilyOptions);
+        columnFamilyDescriptors.add(tableConfig.getDescriptor());
+        RocksDB db = RocksDB.open(options, root.getAbsolutePath(), columnFamilyDescriptors, columnFamilyHandles);
+        System.out.println("Created DB " + (i + 1));
+      }
+    }
+  }
   public static void run(OzoneConfiguration conf,
                                             String storagePaths,
                                             int numDb,
@@ -160,20 +198,21 @@ public class ContainerCacheTest extends GenericCli
         try {
           refcountedDB = cache.getDB(1, "RocksDB",
             containerDir1.getPath(), SCHEMA_V1, conf);
-          DatanodeStore store = refcountedDB.getStore();
-/*          for (int j = 0; j < numKeysPerIter; j++) {
+/*          DatanodeStore store = refcountedDB.getStore();
+          for (int j = 0; j < numKeysPerIter; j++) {
             store.getMetadataTable().put(String.valueOf(System.currentTimeMillis()), (long) j);
           }
-          store.flushLog(true);
+          //store.flushLog(true);
           for (int j = 0; j < 10; j++) {
             store.getMetadataTable().put(String.valueOf(System.currentTimeMillis()), (long) j);
           }
-          store.flushLog(true);*/
+          //store.flushLog(true);*/
           System.out.println("Count = " + count.incrementAndGet());
         } catch (IOException e) {
           e.printStackTrace();
         } finally {
           if (refcountedDB != null) {
+            System.out.println("No writes Refcounted DB:" + refcountedDB.getStore().getStore().getDbLocation() + " value:" + refcountedDB.getReferenceCount());
             refcountedDB.close();
           }
         }

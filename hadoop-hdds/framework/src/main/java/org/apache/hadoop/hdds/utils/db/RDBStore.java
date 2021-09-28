@@ -43,6 +43,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.apache.hadoop.hdds.utils.HddsServerUtil.toIOException;
 
@@ -64,7 +65,7 @@ public class RDBStore implements DBStore {
   private List<ColumnFamilyHandle> columnFamilyHandles;
   private RDBMetrics rdbMetrics;
   private List<ColumnFamilyDescriptor> columnFamilyDescriptors;
-
+  private final static AtomicBoolean closed = new AtomicBoolean();
   @VisibleForTesting
   public RDBStore(File dbFile, DBOptions options,
                   Set<TableConfig> families) throws IOException {
@@ -76,6 +77,7 @@ public class RDBStore implements DBStore {
       WriteOptions writeOptions, Set<TableConfig> families,
                   CodecRegistry registry, boolean readOnly)
       throws IOException {
+    closed.set(false);
     Preconditions.checkNotNull(dbFile, "DB file location cannot be null");
     Preconditions.checkNotNull(families);
     Preconditions.checkArgument(!families.isEmpty());
@@ -153,8 +155,12 @@ public class RDBStore implements DBStore {
     }
   }
 
-  @Override
-  public void close() throws IOException {
+  private synchronized void singleThreadedClose() throws IOException {
+    if (closed.getAndSet(true)) {
+      throw new IOException("This DB was already closed");
+    } else {
+      System.out.println("Closing DB:" + this.dbLocation);
+    }
     for (final ColumnFamilyHandle handle : handleTable.values()) {
       handle.close();
     }
@@ -175,6 +181,10 @@ public class RDBStore implements DBStore {
     for (ColumnFamilyDescriptor c : columnFamilyDescriptors) {
       c.getOptions().close();
     }
+  }
+  @Override
+  public void close() throws IOException {
+    singleThreadedClose();
   }
 
   @Override
