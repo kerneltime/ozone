@@ -18,6 +18,7 @@
 package org.apache.hadoop.ozone.container.metadata;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
 import org.apache.hadoop.hdds.StringUtils;
 import org.apache.hadoop.hdds.annotation.InterfaceAudience;
 import org.apache.hadoop.hdds.conf.ConfigurationSource;
@@ -129,6 +130,7 @@ public abstract class AbstractDatanodeStore implements DatanodeStore {
 
   @Override
   public void stop() throws Exception {
+    Preconditions.checkArgument(store != null);
     if (this.deletedBlocksTable != null) {
       this.deletedBlocksTable.close();
     }
@@ -138,9 +140,8 @@ public abstract class AbstractDatanodeStore implements DatanodeStore {
     if (this.metadataTable != null) {
       this.metadataTable.close();
     }
-    if (store != null) {
-      store.close();
-    }
+    store.close();
+    store = null;
   }
 
   @Override

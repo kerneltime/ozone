@@ -55,8 +55,8 @@ public class RDBStore implements DBStore {
       LoggerFactory.getLogger(RDBStore.class);
   private RocksDB db;
   private File dbLocation;
-  private final WriteOptions writeOptions;
-  private final DBOptions dbOptions;
+  private WriteOptions writeOptions;
+  private DBOptions dbOptions;
   private final CodecRegistry codecRegistry;
   private final Map<String, ColumnFamilyHandle> handleTable;
   private ObjectName statMBeanName;
@@ -65,7 +65,7 @@ public class RDBStore implements DBStore {
   private List<ColumnFamilyHandle> columnFamilyHandles;
   private RDBMetrics rdbMetrics;
   private List<ColumnFamilyDescriptor> columnFamilyDescriptors;
-  private final static AtomicBoolean closed = new AtomicBoolean();
+  private final AtomicBoolean closed = new AtomicBoolean();
   @VisibleForTesting
   public RDBStore(File dbFile, DBOptions options,
                   Set<TableConfig> families) throws IOException {
@@ -132,7 +132,7 @@ public class RDBStore implements DBStore {
           e.getClass().getCanonicalName() + " " + e.getMessage() :
           e.getCause().getClass().getCanonicalName() + " " +
               e.getCause().getMessage());
-
+      close();
       throw toIOException(msg, e);
     }
 
@@ -157,27 +157,41 @@ public class RDBStore implements DBStore {
 
   private synchronized void singleThreadedClose() throws IOException {
     if (closed.getAndSet(true)) {
-      throw new IOException("This DB was already closed");
+      System.out.println("Closing already closed DB:" + this.dbLocation);
+      System.exit(-1);
     } else {
       System.out.println("Closing DB:" + this.dbLocation);
+    }
+    try {
+      if (db != null) {
+        db.pauseBackgroundWork();
+      }
+    } catch (Exception e) {
+      LOG.warn("Hit exception during pause of background work {}", e);
     }
     for (final ColumnFamilyHandle handle : handleTable.values()) {
       handle.close();
     }
+    handleTable.clear();
     if (this.checkPointManager != null) {
       this.checkPointManager.close();
     }
 
     if (db != null) {
       db.close();
-    }
-    if (dbOptions != null) {
-      dbOptions.close();
+      db = null;
     }
 
     if (writeOptions != null) {
       writeOptions.close();
+      writeOptions = null;
     }
+
+    if (dbOptions != null) {
+      dbOptions.close();
+      dbOptions = null;
+    }
+
     for (ColumnFamilyDescriptor c : columnFamilyDescriptors) {
       c.getOptions().close();
     }

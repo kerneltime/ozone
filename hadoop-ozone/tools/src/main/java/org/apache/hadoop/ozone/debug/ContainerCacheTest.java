@@ -103,6 +103,10 @@ public class ContainerCacheTest extends GenericCli
       defaultValue = "10",
       description = "")
   private int numKeysPerIter;
+  @CommandLine.Option(names = {"--runRaw"},
+      defaultValue = "false",
+      description = "")
+  private boolean runRaw;
 
   @Spec
   private CommandSpec spec;
@@ -110,6 +114,10 @@ public class ContainerCacheTest extends GenericCli
   @Override
   public Void call() throws Exception {
     OzoneConfiguration conf = createOzoneConfiguration();
+    if (runRaw) {
+      runRawRocks(storagePath, numDb, iter, numThreads, numKeysPerIter, skipDBCreation, timeout);
+      return null;
+    }
     run(conf, storagePath, numDb, cacheSize, stripes, iter, timeout,
         numThreads, numKeysPerIter, skipDBCreation);
     return null;
@@ -126,21 +134,33 @@ public class ContainerCacheTest extends GenericCli
 
   public static void runRawRocks(String storagePaths,
                                  int numDb,
-                                 int cacheSize,
                                  int iter,
                                  int numThreads,
                                  int numKeysPerIter,
-                                 boolean skipDBCreation) throws Exception {
-    String[] paths = storagePaths.split(",");
+                                 boolean skipDBCreation,
+                                 int timeout) throws Exception {
+    String[] paths = new String[42];
+    for (int i=0; i <42; i++) {
+      int index = i + 1;
+      paths[i] = "/data/disk"+index+"/hadoop-ozone/datanode/cache-test-3";
+    }
     int numPaths = paths.length;
+    final AtomicInteger count = new AtomicInteger();
+    final AtomicInteger opened = new AtomicInteger();
+    final AtomicInteger collided = new AtomicInteger();
     for (int i = 0; i < numPaths; i++) {
       File root = new File(paths[i]);
       root.mkdirs();
     }
-    if (!skipDBCreation) {
-      for (int i = 0; i < numDb; i++) {
-        File root = new File(paths[i % numPaths]);
-        File containerDir1 = new File(root, "cont" + i);
+    ExecutorService executorService = Executors.newFixedThreadPool(numThreads);
+    for (int i = 0; i < iter; i++) {
+      if (i%10000 == 0) {
+        System.out.println("Iteration "+i);
+      }
+      executorService.execute(() -> {
+        int cont = new Random().nextInt(numDb);
+        File root = new File(paths[cont % numPaths]);
+        File containerDir = new File(root, "cont" + cont);
         DBOptions options = new DBOptions()
             .setCreateIfMissing(true)
             .setCreateMissingColumnFamilies(true);
@@ -150,10 +170,43 @@ public class ContainerCacheTest extends GenericCli
         List<ColumnFamilyHandle> columnFamilyHandles = new ArrayList<>();
         TableConfig tableConfig = new TableConfig("default", columnFamilyOptions);
         columnFamilyDescriptors.add(tableConfig.getDescriptor());
-        RocksDB db = RocksDB.open(options, root.getAbsolutePath(), columnFamilyDescriptors, columnFamilyHandles);
-        System.out.println("Created DB " + (i + 1));
-      }
+        RocksDB db = null;
+        try {
+          db = RocksDB.open(options, containerDir.getAbsolutePath(), columnFamilyDescriptors, columnFamilyHandles);
+          opened.incrementAndGet();
+        } catch (Exception e) {
+          collided.incrementAndGet();
+        }
+        try {
+          if (db != null) {
+            db.pauseBackgroundWork();
+          }
+          if (db != null) {
+            db.close();
+          }
+
+          if (writeOptions != null) {
+            writeOptions.close();
+          }
+
+          if (options != null) {
+            options.close();
+          }
+
+          for (ColumnFamilyDescriptor c : columnFamilyDescriptors) {
+            c.getOptions().close();
+          }
+        } catch (Exception e) {
+          System.out.println("Hit exception during pause background work " + e);
+        }
+        if (count.get()%1000 == 0) {
+          System.out.println("Done " + count.incrementAndGet() + " open:" + opened.get() +" collided:"+collided.get());
+        }
+      });
     }
+    executorService.shutdown();
+    executorService.awaitTermination(timeout, TimeUnit.MINUTES);
+    System.out.println("Done open:" + opened.get() +" collided:"+collided.get());
   }
   public static void run(OzoneConfiguration conf,
                                             String storagePaths,
@@ -167,8 +220,11 @@ public class ContainerCacheTest extends GenericCli
     conf.setInt(OzoneConfigKeys.OZONE_CONTAINER_CACHE_LOCK_STRIPES, stripes);
     ContainerCache cache = ContainerCache.getInstance(conf);
     cache.clear();
-
-    String[] paths = storagePaths.split(",");
+    String[] paths = new String[42];
+    for (int i=0; i <42; i++) {
+      int index = i + 1;
+      paths[i] = "/data/disk"+index+"/hadoop-ozone/datanode/cache-test-3";
+    }
     int numPaths = paths.length;
     for (int i = 0; i < numPaths; i ++) {
       File root = new File(paths[i]);

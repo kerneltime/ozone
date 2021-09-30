@@ -20,6 +20,7 @@ package org.apache.hadoop.ozone.container.common.utils;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import com.google.common.util.concurrent.Striped;
 import org.apache.commons.collections.MapIterator;
 import org.apache.commons.collections.map.LRUMap;
 import org.apache.hadoop.hdds.conf.ConfigurationSource;
@@ -27,6 +28,7 @@ import org.apache.hadoop.ozone.OzoneConfigKeys;
 import org.apache.hadoop.ozone.container.keyvalue.helpers.BlockUtils;
 import org.apache.hadoop.ozone.container.metadata.DatanodeStore;
 import org.apache.hadoop.util.Time;
+import org.rocksdb.RocksDB;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,17 +45,20 @@ public final class ContainerCache extends LRUMap {
   private final Lock lock = new ReentrantLock();
   private static ContainerCache cache;
   private static final float LOAD_FACTOR = 0.75f;
+  private final Striped<Lock> rocksDBLock;
+  private static ContainerCacheMetrics metrics;
   /**
    * Constructs a cache that holds DBHandle references.
    */
   private ContainerCache(int maxSize, int stripes, float loadFactor, boolean
       scanUntilRemovable) {
     super(maxSize, loadFactor, scanUntilRemovable);
+    rocksDBLock = Striped.lazyWeakLock(stripes);
   }
 
   @VisibleForTesting
   public ContainerCacheMetrics getMetrics() {
-    return null;
+    return metrics;
   }
 
   /**
@@ -66,13 +71,14 @@ public final class ContainerCache extends LRUMap {
   public static synchronized ContainerCache getInstance(
       ConfigurationSource conf) {
     if (cache == null) {
+      RocksDB.loadLibrary();
       int cacheSize = conf.getInt(OzoneConfigKeys.OZONE_CONTAINER_CACHE_SIZE,
           OzoneConfigKeys.OZONE_CONTAINER_CACHE_DEFAULT);
       int stripes = conf.getInt(
           OzoneConfigKeys.OZONE_CONTAINER_CACHE_LOCK_STRIPES,
           OzoneConfigKeys.OZONE_CONTAINER_CACHE_LOCK_STRIPES_DEFAULT);
       cache = new ContainerCache(cacheSize, stripes, LOAD_FACTOR, true);
-      //metrics = ContainerCacheMetrics.create();
+      metrics = ContainerCacheMetrics.create();
     }
     return cache;
   }
@@ -106,6 +112,7 @@ public final class ContainerCache extends LRUMap {
     ReferenceCountedDB db = (ReferenceCountedDB) entry.getValue();
     lock.lock();
     try {
+      metrics.incNumCacheEvictions();
       return cleanupDb(db);
     } finally {
       lock.unlock();
@@ -130,57 +137,57 @@ public final class ContainerCache extends LRUMap {
     Preconditions.checkState(containerID >= 0,
         "Container ID cannot be negative.");
     ReferenceCountedDB db;
-    lock.lock();
+    Lock containerLock = rocksDBLock.get(containerDBPath);
+    containerLock.lock();
+    metrics.incNumDbGetOps();
     try {
-      db = (ReferenceCountedDB) this.get(containerDBPath);
-      if (db != null) {
-        db.incrementReference();
-        return db;
-      } else {
-      }
-    } finally {
-      lock.unlock();
-    }
-
-    Boolean cleanupDb = true;
-    try {
-      long start = Time.monotonicNow();
-      DatanodeStore store = BlockUtils.getUncachedDatanodeStore(containerID,
-          containerDBPath, schemaVersion, conf, false);
-      db = new ReferenceCountedDB(store, containerDBPath);
       lock.lock();
       try {
-        // increment the reference before returning the object
-        ReferenceCountedDB existingDb =
-            (ReferenceCountedDB) this.putIfAbsent(containerDBPath, db);
-        if (existingDb != null) {
-          existingDb.incrementReference();
-          return existingDb;
+        db = (ReferenceCountedDB) this.get(containerDBPath);
+        if (db != null) {
+          metrics.incNumCacheHits();
+          db.incrementReference();
+          return db;
+        } else {
+          metrics.incNumCacheMisses();
         }
-        db.incrementReference();
-        cleanupDb = false;
-        return db;
       } finally {
-        if (cleanupDb) {
-          db.close();
-        }
         lock.unlock();
       }
-    } catch (Exception e) {
-      LOG.warn("Hit exception while opening DB {} {} {}",
-          containerID, containerDBPath, e);
+
+      try {
+        long start = Time.monotonicNow();
+        DatanodeStore store = BlockUtils.getUncachedDatanodeStore(containerID,
+            containerDBPath, schemaVersion, conf, false);
+        db = new ReferenceCountedDB(store, containerDBPath);
+        metrics.incDbOpenLatency(Time.monotonicNow() - start);
+      } catch (Exception e) {
+        LOG.error("Error opening DB. Container:{} ContainerPath:{}",
+            containerID, containerDBPath, e);
+        throw e;
+      }
+
       lock.lock();
       try {
         ReferenceCountedDB currentDB =
             (ReferenceCountedDB) this.get(containerDBPath);
         if (currentDB != null) {
+          // increment the reference before returning the object
           currentDB.incrementReference();
+          // clean the db created in previous step
+          cleanupDb(db);
           return currentDB;
+        } else {
+          // increment the reference before returning the object
+          db.incrementReference();
+          this.put(containerDBPath, db);
+          return db;
         }
       } finally {
         lock.unlock();
       }
-      throw e;
+    } finally {
+      containerLock.unlock();
     }
   }
 
@@ -204,7 +211,11 @@ public final class ContainerCache extends LRUMap {
   }
 
   private boolean cleanupDb(ReferenceCountedDB db) {
+    long time = Time.monotonicNow();
     boolean ret = db.cleanup();
+    if (ret) {
+      metrics.incDbCloseLatency(Time.monotonicNow() - time);
+    }
     return ret;
   }
 
@@ -217,8 +228,7 @@ public final class ContainerCache extends LRUMap {
   public void addDB(String containerDBPath, ReferenceCountedDB db) {
     lock.lock();
     try {
-      Object existingDb = this.putIfAbsent(containerDBPath, db);
-      Preconditions.checkArgument(existingDb == null);
+      this.putIfAbsent(containerDBPath, db);
     } finally {
       lock.unlock();
     }

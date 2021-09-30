@@ -70,7 +70,8 @@ public class ReferenceCountedDB implements Closeable {
   }
 
   public boolean cleanup() {
-    if (referenceCount.get() == 0 && store != null) {
+    Preconditions.checkArgument(store != null);
+    if (referenceCount.get() == 0) {
       if (LOG.isDebugEnabled()) {
         LOG.debug("Close {} refCnt {}", containerDBPath,
             referenceCount.get());
