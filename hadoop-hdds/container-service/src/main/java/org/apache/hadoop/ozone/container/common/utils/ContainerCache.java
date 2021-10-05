@@ -134,61 +134,18 @@ public final class ContainerCache extends LRUMap {
                                   String schemaVersion,
                                   ConfigurationSource conf)
       throws IOException {
-    Preconditions.checkState(containerID >= 0,
-        "Container ID cannot be negative.");
-    ReferenceCountedDB db;
-    Lock containerLock = rocksDBLock.get(containerDBPath);
-    containerLock.lock();
-    metrics.incNumDbGetOps();
-    try {
-      lock.lock();
+      ReferenceCountedDB db=null;
       try {
-        db = (ReferenceCountedDB) this.get(containerDBPath);
-        if (db != null) {
-          metrics.incNumCacheHits();
-          db.incrementReference();
-          return db;
-        } else {
-          metrics.incNumCacheMisses();
-        }
-      } finally {
-        lock.unlock();
-      }
-
-      try {
-        long start = Time.monotonicNow();
         DatanodeStore store = BlockUtils.getUncachedDatanodeStore(containerID,
             containerDBPath, schemaVersion, conf, false);
         db = new ReferenceCountedDB(store, containerDBPath);
-        metrics.incDbOpenLatency(Time.monotonicNow() - start);
+        db.incrementReference();
       } catch (Exception e) {
         LOG.error("Error opening DB. Container:{} ContainerPath:{}",
             containerID, containerDBPath, e);
         throw e;
       }
-
-      lock.lock();
-      try {
-        ReferenceCountedDB currentDB =
-            (ReferenceCountedDB) this.get(containerDBPath);
-        if (currentDB != null) {
-          // increment the reference before returning the object
-          currentDB.incrementReference();
-          // clean the db created in previous step
-          cleanupDb(db);
-          return currentDB;
-        } else {
-          // increment the reference before returning the object
-          db.incrementReference();
-          this.put(containerDBPath, db);
-          return db;
-        }
-      } finally {
-        lock.unlock();
-      }
-    } finally {
-      containerLock.unlock();
-    }
+      return db;
   }
 
   /**

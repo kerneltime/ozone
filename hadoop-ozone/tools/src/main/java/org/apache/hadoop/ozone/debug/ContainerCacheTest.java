@@ -139,16 +139,21 @@ public class ContainerCacheTest extends GenericCli
                                  int numKeysPerIter,
                                  boolean skipDBCreation,
                                  int timeout) throws Exception {
-    String[] paths = new String[42];
+/*    String[] paths = new String[42];
     for (int i=0; i <42; i++) {
       int index = i + 1;
       paths[i] = "/data/disk"+index+"/hadoop-ozone/datanode/cache-test-3";
-    }
+    }*/
+    String[] paths = storagePaths.split(",");
     int numPaths = paths.length;
-    final AtomicInteger count = new AtomicInteger();
-    final AtomicInteger opened = new AtomicInteger();
-    final AtomicInteger collided = new AtomicInteger();
     for (int i = 0; i < numPaths; i++) {
+      File root = new File(paths[i]);
+      root.mkdirs();
+    }
+
+    for (int i = 0; i <    final AtomicInteger count = new AtomicInteger();
+    final AtomicInteger opened = new AtomicInteger();
+    final AtomicInteger collided = new AtomicInteger(); numPaths; i++) {
       File root = new File(paths[i]);
       root.mkdirs();
     }
@@ -220,11 +225,12 @@ public class ContainerCacheTest extends GenericCli
     conf.setInt(OzoneConfigKeys.OZONE_CONTAINER_CACHE_LOCK_STRIPES, stripes);
     ContainerCache cache = ContainerCache.getInstance(conf);
     cache.clear();
-    String[] paths = new String[42];
+    String[] paths = storagePaths.split(",");
+/*    String[] paths = new String[42];
     for (int i=0; i <42; i++) {
       int index = i + 1;
       paths[i] = "/data/disk"+index+"/hadoop-ozone/datanode/cache-test-3";
-    }
+    }*/
     int numPaths = paths.length;
     for (int i = 0; i < numPaths; i ++) {
       File root = new File(paths[i]);
@@ -254,21 +260,20 @@ public class ContainerCacheTest extends GenericCli
         try {
           refcountedDB = cache.getDB(1, "RocksDB",
             containerDir1.getPath(), SCHEMA_V1, conf);
-/*          DatanodeStore store = refcountedDB.getStore();
+          DatanodeStore store = refcountedDB.getStore();
           for (int j = 0; j < numKeysPerIter; j++) {
             store.getMetadataTable().put(String.valueOf(System.currentTimeMillis()), (long) j);
           }
-          //store.flushLog(true);
+          store.flushLog(true);
           for (int j = 0; j < 10; j++) {
             store.getMetadataTable().put(String.valueOf(System.currentTimeMillis()), (long) j);
           }
-          //store.flushLog(true);*/
+          store.flushLog(true);
           System.out.println("Count = " + count.incrementAndGet());
         } catch (IOException e) {
           e.printStackTrace();
         } finally {
           if (refcountedDB != null) {
-            System.out.println("No writes Refcounted DB:" + refcountedDB.getStore().getStore().getDbLocation() + " value:" + refcountedDB.getReferenceCount());
             refcountedDB.close();
           }
         }

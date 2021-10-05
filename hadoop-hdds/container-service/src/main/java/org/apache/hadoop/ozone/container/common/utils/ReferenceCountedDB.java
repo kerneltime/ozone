@@ -19,13 +19,14 @@
 package org.apache.hadoop.ozone.container.common.utils;
 
 import com.google.common.base.Preconditions;
-
 import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.apache.hadoop.ozone.container.metadata.DatanodeStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.Closeable;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -41,6 +42,14 @@ public class ReferenceCountedDB implements Closeable {
   private final AtomicInteger referenceCount;
   private final DatanodeStore store;
   private final String containerDBPath;
+  private static final Map<String, DatanodeStore> datanodeCache = new ConcurrentHashMap<>();
+
+  public static DatanodeStore getStore(String path) {
+    return datanodeCache.get(path);
+  }
+  public static void putStore(String path, DatanodeStore store) {
+    Preconditions.checkArgument(getStore(path) == null);
+  }
 
   public ReferenceCountedDB(DatanodeStore store, String containerDBPath) {
     this.referenceCount = new AtomicInteger(0);
@@ -95,5 +104,6 @@ public class ReferenceCountedDB implements Closeable {
   @Override
   public void close() {
     decrementReference();
+    cleanup();
   }
 }

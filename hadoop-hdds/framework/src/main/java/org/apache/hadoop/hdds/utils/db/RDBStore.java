@@ -169,22 +169,17 @@ public class RDBStore implements DBStore {
     } catch (Exception e) {
       LOG.warn("Hit exception during pause of background work {}", e);
     }
+    if (this.checkPointManager != null) {
+      this.checkPointManager.close();
+    }
     for (final ColumnFamilyHandle handle : handleTable.values()) {
       handle.close();
     }
     handleTable.clear();
-    if (this.checkPointManager != null) {
-      this.checkPointManager.close();
-    }
 
     if (db != null) {
       db.close();
       db = null;
-    }
-
-    if (writeOptions != null) {
-      writeOptions.close();
-      writeOptions = null;
     }
 
     if (dbOptions != null) {
@@ -195,6 +190,12 @@ public class RDBStore implements DBStore {
     for (ColumnFamilyDescriptor c : columnFamilyDescriptors) {
       c.getOptions().close();
     }
+
+    if (writeOptions != null) {
+      writeOptions.close();
+      writeOptions = null;
+    }
+
   }
   @Override
   public void close() throws IOException {
