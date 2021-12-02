@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -166,6 +167,71 @@ public class TestContainerStateMachineFailures {
   public static void shutdown() {
     if (cluster != null) {
       cluster.shutdown();
+    }
+  }
+
+  @Test
+  public void testContainerStateMachineTransitionOnUnhealthyReplicas()
+      throws Exception {
+    // Test if replicas of a container fail, the surviving replica is marked
+    // as quasi closed.
+    OzoneOutputStream key =
+        objectStore.getVolume(volumeName).getBucket(bucketName)
+            .createKey("ratis", 1024, ReplicationType.RATIS,
+                ReplicationFactor.THREE, new HashMap<>());
+    key.write("ratis".getBytes(UTF_8));
+    key.flush();
+    key.write("ratis".getBytes(UTF_8));
+    KeyOutputStream groupOutputStream = (KeyOutputStream) key.
+        getOutputStream();
+    List<OmKeyLocationInfo> locationInfoList =
+        groupOutputStream.getLocationInfoList();
+
+    Assert.assertEquals(1, locationInfoList.size());
+
+    OmKeyLocationInfo omKeyLocationInfo = locationInfoList.get(0);
+
+    Set<HddsDatanodeService> datanodeSet =
+        TestHelper.getDatanodeServices(cluster,
+            omKeyLocationInfo.getPipeline());
+    UUID leader = omKeyLocationInfo.getPipeline().getLeaderId();
+    for (HddsDatanodeService dn : datanodeSet) {
+      UUID dnUuid = dn.getDatanodeDetails().getUuid();
+      if (!dnUuid.equals(leader)) {
+
+        ContainerData containerData =
+            dn.getDatanodeStateMachine()
+                .getContainer().getContainerSet()
+                .getContainer(omKeyLocationInfo.getContainerID())
+                .getContainerData();
+        Assert.assertTrue(containerData instanceof KeyValueContainerData);
+        KeyValueContainerData keyValueContainerData =
+            (KeyValueContainerData) containerData;
+        FileUtil.fullyDelete(new File(keyValueContainerData.getChunksPath()));
+        break;
+      }
+    }
+    try {
+      key.close();
+    } catch (Exception ioe) {
+      Assert.fail("Exception " + ioe.getMessage());
+    }
+    for (HddsDatanodeService dn : datanodeSet) {
+      long containerID = omKeyLocationInfo.getContainerID();
+      ContainerProtos.ContainerDataProto.State state = dn.getDatanodeStateMachine()
+          .getContainer().getContainerSet().getContainer(containerID)
+          .getContainerState();
+      // Make sure the container is marked unhealthy
+      UUID dnUuid = dn.getDatanodeDetails().getUuid();
+      if (dnUuid.equals(leader)) {
+        Assert.assertTrue(
+            state
+                == ContainerProtos.ContainerDataProto.State.QUASI_CLOSED);
+        continue;
+      }
+      Assert.assertTrue(
+          state
+              == ContainerProtos.ContainerDataProto.State.UNHEALTHY);
     }
   }
 
