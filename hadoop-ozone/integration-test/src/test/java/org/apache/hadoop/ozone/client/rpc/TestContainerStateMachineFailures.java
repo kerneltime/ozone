@@ -54,6 +54,7 @@ import org.apache.hadoop.ozone.client.ObjectStore;
 import org.apache.hadoop.ozone.client.OzoneClient;
 import org.apache.hadoop.ozone.client.OzoneClientFactory;
 import org.apache.hadoop.ozone.client.io.KeyOutputStream;
+import org.apache.hadoop.ozone.client.io.OzoneInputStream;
 import org.apache.hadoop.ozone.client.io.OzoneOutputStream;
 import org.apache.hadoop.ozone.container.ContainerTestHelper;
 import org.apache.hadoop.ozone.container.TestHelper;
@@ -142,7 +143,7 @@ public class TestContainerStateMachineFailures {
     raftClientConfig.setRpcWatchRequestTimeout(Duration.ofSeconds(10));
     conf.setFromObject(raftClientConfig);
 
-    conf.setLong(OzoneConfigKeys.DFS_RATIS_SNAPSHOT_THRESHOLD_KEY, 1);
+    conf.setLong(OzoneConfigKeys.DFS_RATIS_SNAPSHOT_THRESHOLD_KEY, 1000);
     conf.setQuietMode(false);
     cluster =
         MiniOzoneCluster.newBuilder(conf).setNumDatanodes(10).setHbInterval(200)
@@ -179,9 +180,17 @@ public class TestContainerStateMachineFailures {
         objectStore.getVolume(volumeName).getBucket(bucketName)
             .createKey("ratis", 1024, ReplicationType.RATIS,
                 ReplicationFactor.THREE, new HashMap<>());
+
+    System.out.println();
+    System.out.println("write key");
+    System.out.println();
     key.write("ratis".getBytes(UTF_8));
     key.flush();
     key.write("ratis".getBytes(UTF_8));
+    key.write("ratis".getBytes(UTF_8));
+    System.out.println();
+    System.out.println("write key done");
+    System.out.println();
     KeyOutputStream groupOutputStream = (KeyOutputStream) key.
         getOutputStream();
     List<OmKeyLocationInfo> locationInfoList =
@@ -195,10 +204,11 @@ public class TestContainerStateMachineFailures {
         TestHelper.getDatanodeServices(cluster,
             omKeyLocationInfo.getPipeline());
     UUID leader = omKeyLocationInfo.getPipeline().getLeaderId();
+    UUID selectedDN = null;
     for (HddsDatanodeService dn : datanodeSet) {
       UUID dnUuid = dn.getDatanodeDetails().getUuid();
       if (!dnUuid.equals(leader)) {
-
+        selectedDN = dnUuid;
         ContainerData containerData =
             dn.getDatanodeStateMachine()
                 .getContainer().getContainerSet()
@@ -212,27 +222,65 @@ public class TestContainerStateMachineFailures {
       }
     }
     try {
+      System.out.println();
+      System.out.println("Flush key");
+      System.out.println();
+      //key.flush();
+      System.out.println();
+      System.out.println();
+      System.out.println("Close key");
+      System.out.println();
+      System.out.println();
       key.close();
+      System.out.println();
+      System.out.println();
+      System.out.println("Close key done");
+      System.out.println();
+      System.out.println();
     } catch (Exception ioe) {
-      Assert.fail("Exception " + ioe.getMessage());
+      //Assert.fail("Exception " + ioe.getMessage());
     }
+
+//    OzoneInputStream
+//        o = objectStore.getVolume(volumeName).getBucket(bucketName).readKey("ratis");
+//    byte[] buffer = new byte[1024];
+//    o.read(buffer,0,1024);
+
     for (HddsDatanodeService dn : datanodeSet) {
       long containerID = omKeyLocationInfo.getContainerID();
       ContainerProtos.ContainerDataProto.State state = dn.getDatanodeStateMachine()
           .getContainer().getContainerSet().getContainer(containerID)
           .getContainerState();
+      System.out.println(state);
       // Make sure the container is marked unhealthy
       UUID dnUuid = dn.getDatanodeDetails().getUuid();
-      if (dnUuid.equals(leader)) {
+      Assert.assertNotNull(selectedDN);
+      if (dnUuid.equals(selectedDN)) {
         Assert.assertTrue(
             state
-                == ContainerProtos.ContainerDataProto.State.QUASI_CLOSED);
+                == ContainerProtos.ContainerDataProto.State.UNHEALTHY);
         continue;
       }
       Assert.assertTrue(
           state
-              == ContainerProtos.ContainerDataProto.State.UNHEALTHY);
+              == ContainerProtos.ContainerDataProto.State.QUASI_CLOSED);
     }
+    key =
+        objectStore.getVolume(volumeName).getBucket(bucketName)
+            .createKey("ratis", 1024, ReplicationType.RATIS,
+                ReplicationFactor.THREE, new HashMap<>());
+
+    System.out.println();
+    System.out.println("write key");
+    System.out.println();
+    key.write("ratis".getBytes(UTF_8));
+    key.flush();
+    key.write("ratis".getBytes(UTF_8));
+    key.write("ratis".getBytes(UTF_8));
+    System.out.println();
+    System.out.println("write key done");
+    System.out.println();
+    key.close();
   }
 
   @Test

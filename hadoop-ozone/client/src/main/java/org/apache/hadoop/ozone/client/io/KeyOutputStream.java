@@ -336,7 +336,7 @@ public class KeyOutputStream extends OutputStream {
     streamEntry.cleanup(retryFailure);
 
     // discard all subsequent blocks the containers and pipelines which
-    // are in the exclude list so that, the very next retry should never
+    // are in the excluded list so that, the very next retry should never
     // write data on the  closed container/pipeline
     if (containerExclusionException) {
       // discard subsequent pre allocated blocks from the streamEntries list
