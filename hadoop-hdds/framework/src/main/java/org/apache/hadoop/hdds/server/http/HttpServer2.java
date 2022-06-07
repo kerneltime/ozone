@@ -71,6 +71,7 @@ import org.apache.hadoop.security.authentication.server.AuthenticationFilter;
 import org.apache.hadoop.security.authentication.util.SignerSecretProvider;
 import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.security.ssl.SSLFactory;
+import org.apache.hadoop.thirdparty.protobuf.MapEntry;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.util.StringUtils;
@@ -195,6 +196,9 @@ public final class HttpServer2 implements FilterContainer {
   private final SignerSecretProvider secretProvider;
   private XFrameOption xFrameOption;
   private boolean xFrameOptionIsEnabled;
+  private boolean setHSTSHeader;
+  private int hstsDuration;
+  private boolean hstsIncludeSubdomains;
   public static final String HTTP_HEADER_PREFIX = "hadoop.http.header.";
   private static final String HTTP_HEADER_REGEX =
       "hadoop\\.http\\.header\\.([a-zA-Z\\-_]+)";
@@ -205,6 +209,11 @@ public final class HttpServer2 implements FilterContainer {
   private static final String X_FRAME_OPTIONS = "X-FRAME-OPTIONS";
   private static final Pattern PATTERN_HTTP_HEADER_REGEX =
       Pattern.compile(HTTP_HEADER_REGEX);
+  private static final String STRICT_TRANSPORT_SECURITY
+      = "Strict-Transport-Security";
+  private static final String HSTS_INCLUDE_SUBDOMAINS =
+      "; includeSubDomains";
+  private static final String HSTS_MAX_AGE = "max-age=";
   /**
    * Class to construct instances of HTTP server with specific options.
    */
@@ -241,6 +250,10 @@ public final class HttpServer2 implements FilterContainer {
 
     private boolean xFrameEnabled;
     private XFrameOption xFrameOption = XFrameOption.SAMEORIGIN;
+
+    private boolean setHSTSHeader = true;
+    private int hstsDuration = 63072000; // 2 years
+    private boolean hstsIncludeSubdomains = true;
 
     public Builder setName(String serverName) {
       this.name = serverName;
@@ -372,6 +385,30 @@ public final class HttpServer2 implements FilterContainer {
     public Builder configureXFrame(boolean enabled) {
       this.xFrameEnabled = enabled;
       return this;
+    }
+
+    /**
+     * Sets the HSTS header on response. Defaults to true.
+     * @param setHSTSHeader set to true will enable HSTS header.
+     */
+    public void setSetHSTSHeader(boolean setHSTSHeader) {
+      this.setHSTSHeader = setHSTSHeader;
+    }
+
+    /**
+     * Sets the duration in seconds to remember the HSTS header for the client.
+     * @param hstsDuration duration in seconds.
+     */
+    public void setHstsDuration(int hstsDuration) {
+      this.hstsDuration = hstsDuration;
+    }
+
+    /**
+     * Sets if the HSTS header applies to subdomains.
+     * @param hstsIncludeSubdomains Set to true includes subdomains.
+     */
+    public void setHstsIncludeSubdomains(boolean hstsIncludeSubdomains) {
+      this.hstsIncludeSubdomains = hstsIncludeSubdomains;
     }
 
     /**
@@ -567,6 +604,9 @@ public final class HttpServer2 implements FilterContainer {
     this.handlers = new HandlerCollection();
     this.webAppContext = createWebAppContext(b, adminsAcl, appDir);
     this.xFrameOptionIsEnabled = b.xFrameEnabled;
+    this.setHSTSHeader = b.setHSTSHeader;
+    this.hstsDuration = b.hstsDuration;
+    this.hstsIncludeSubdomains = b.hstsIncludeSubdomains;
     this.xFrameOption = b.xFrameOption;
 
     try {
@@ -622,8 +662,8 @@ public final class HttpServer2 implements FilterContainer {
     addDefaultApps(contexts, appDir, conf);
     webServer.setHandler(handlers);
 
-    Map<String, String> xFrameParams = setHeaders(conf);
-    addGlobalFilter("safety", QuotingInputFilter.class.getName(), xFrameParams);
+    Map<String, String> headers = setHeaders(conf);
+    addGlobalFilter("safety", QuotingInputFilter.class.getName(), headers);
     final FilterInitializer[] initializers = getFilterInitializers(conf);
     if (initializers != null) {
       conf.set(BIND_ADDRESS, hostName);
@@ -1675,7 +1715,16 @@ public final class HttpServer2 implements FilterContainer {
       } else if (mime.startsWith("application/xml")) {
         httpResponse.setContentType("text/xml; charset=utf-8");
       }
+      for (String header: httpResponse.getHeaderNames()) {
+        LOG.warn("Headers before {} {} ", header, httpResponse.getHeader(header));
+      }
+      for (Map.Entry<String, String> entry: headerMap.entrySet()) {
+        LOG.warn("MapEntry {} {}", entry.getKey(), entry.getValue());
+      }
       headerMap.forEach((k, v) -> httpResponse.addHeader(k, v));
+      for (String header: httpResponse.getHeaderNames()) {
+        LOG.warn("Headers after {} {} {}", header, httpResponse.getHeader(header), ((HttpServletRequest) request).getRequestURI());
+      }
       chain.doFilter(quoted, httpResponse);
     }
 
@@ -1700,8 +1749,13 @@ public final class HttpServer2 implements FilterContainer {
         Matcher m = PATTERN_HTTP_HEADER_REGEX.matcher(key);
         if (m.matches()) {
           String headerKey = m.group(1);
-          headerMap.put(headerKey, config.getInitParameter(key));
+          String value = config.getInitParameter(key);
+          LOG.warn("Putting {} {}", headerKey, value);
+          headerMap.put(headerKey, value);
         }
+      }
+      for (Map.Entry<String, String> entry: headerMap.entrySet()) {
+        LOG.warn("Map Entry {} {}", entry.getKey(), entry.getValue() );
       }
     }
   }
@@ -1743,15 +1797,27 @@ public final class HttpServer2 implements FilterContainer {
     }
   }
 
+  private String getHSTSHeader() {
+      StringBuilder b = new StringBuilder();
+      b.append(HSTS_MAX_AGE);
+      b.append(hstsDuration);
+      if (hstsIncludeSubdomains) {
+        b.append(HSTS_INCLUDE_SUBDOMAINS);
+      }
+      return b.toString();
+  }
   private Map<String, String> setHeaders(ConfigurationSource conf) {
-    Map<String, String> xFrameParams = new HashMap<>();
+    Map<String, String> headers = new HashMap<>();
 
-    xFrameParams.putAll(getDefaultHeaders());
+    headers.putAll(getDefaultHeaders());
+    if (hstsIncludeSubdomains) {
+      headers.put(HTTP_HEADER_PREFIX+STRICT_TRANSPORT_SECURITY, getHSTSHeader());
+    }
     if (this.xFrameOptionIsEnabled) {
-      xFrameParams.put(HTTP_HEADER_PREFIX + X_FRAME_OPTIONS,
+      headers.put(HTTP_HEADER_PREFIX + X_FRAME_OPTIONS,
           this.xFrameOption.toString());
     }
-    return xFrameParams;
+    return headers;
   }
 
   private Map<String, String> getDefaultHeaders() {
