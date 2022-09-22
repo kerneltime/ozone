@@ -1,0 +1,4 @@
+---
+linux_distro: ['bionic', 'el7', 'el8', 'focal', 'sles12']
+additional_jars: ['*']
+exclude_jars: ['log4j*']

@@ -1,0 +1,6 @@
+docker_images:
+  ozone-parcel-image: ozone-parcel-image
+
+registry: __REGISTRY__
+docker_image_tag:
+  build_tag: REPLACE_TAG
