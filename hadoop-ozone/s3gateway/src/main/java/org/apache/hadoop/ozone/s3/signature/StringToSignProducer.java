@@ -291,15 +291,7 @@ public final class StringToSignProducer {
       throws OS3Exception {
     switch (header) {
     case HOST:
-      try {
-        URI hostUri = new URI(schema + "://" + headerValue);
-        InetAddress.getByName(hostUri.getHost());
-        // TODO: Validate if current request is coming from same host.
-      } catch (UnknownHostException | URISyntaxException e) {
-        LOG.error("Host value mentioned in signed header is not valid. " +
-            "Host:{}", headerValue);
-        throw S3_AUTHINFO_CREATION_ERROR;
-      }
+      // TODO: Placeholder for any host validations.
       break;
     case X_AMAZ_DATE:
       LocalDate date = LocalDate.parse(headerValue, TIME_FORMATTER);
