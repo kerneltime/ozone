@@ -293,11 +293,12 @@ class CopyAndModifyData(object):
 
 class WriteMetadata(object):
 
-    def __init__(self, scratch_dir, stack_version, gbn):
+    def __init__(self, scratch_dir, stack_version, gbn, ozone_jar_version):
         self._scratch_dir = scratch_dir
         self._meta_dir = os.path.join(self._scratch_dir, "meta")
         self._gbn = gbn
         self._version = stack_version + "-1.ozone" + stack_version + ".p0." + self._gbn
+        self._ozone_jar_version = ozone_jar_version
 
     def _write_parcel_json(self):
         parcel = {
@@ -312,8 +313,8 @@ class WriteMetadata(object):
                 {
                     "name": "ozone\n",
                     "pkg_release": self._gbn,
-                    "pkg_version": "na\n",
-                    "version": "na\n",
+                    "pkg_version": self._ozone_jar_version,
+                    "version": self._ozone_jar_version,
                 }
             ],
             "packages": [
@@ -413,13 +414,14 @@ class WriteMetadata(object):
         self._write_alternatives_json()
 
 class Archive(object):
-    def __init__(self, out_dir, linux_distro, stack_version, gbn):
+    def __init__(self, out_dir, linux_distro, stack_version, gbn, ozone_jar_version):
         self._out_dir = out_dir
         self._scratch_dir = os.path.join(self._out_dir, "scratch_dir")
         self._gbn = gbn
         self._version = stack_version + "-1.ozone" + stack_version + ".p0." + self._gbn
         self._folder_name = "OZONE-" + self._version
         self._parcel_name = self._folder_name + "-" + linux_distro + ".parcel"
+        self._ozone_jar_version = ozone_jar_version
 
     def _archive_parcel(self):
         try:
@@ -448,10 +450,10 @@ class Archive(object):
         distro = {
             "components": [
                 {
-                    "pkg_version": "na\n",
+                    "pkg_version": self._ozone_jar_version,
                     "pkg_release": self._gbn,
                     "name": "ozone\n",
-                    "version": "na\n"
+                    "version": self._ozone_jar_version
                 }
             ],
             "description": "Ozone Runtime",
@@ -485,6 +487,7 @@ def parse_args():
     parser.add_argument('-id', '--input-directory', required=True, help="Directory containing input files.")
     parser.add_argument('-od', '--output-directory', required=True, help="Directory to store output files. Will be created if not already.")
     parser.add_argument('-sv', '--stack-version', dest="stack_version", required=True, help="Stack Version")
+    parser.add_argument('-ov', '--ozone-jar-version', dest="ozone_jar_version", required=True, help="Ozone Jar Version")
     parser.add_argument('-gb', dest="gbn", required=True, help="GBN")
     parser.add_argument("-pc", "--parcel-config", dest="parcel_config", default="cloudera/configs/parcel_config.yaml", nargs="?", const="cloudera/configs/parcel_config.yaml", help="Parcel related config for setting up the parcel")
     parser.add_argument('-fc','--force-clean', dest='force_clean', default=0, nargs="?", help="Whether to delete contents of the output/scratch directory beforehand.")
@@ -532,6 +535,7 @@ def parcel_main(args, configs):
 
     stack_version = str(args.stack_version)
     gbn = str(args.gbn)
+    ozone_jar_version = str(args.ozone_jar_version)
 
     logging.info("Stack Version %s", stack_version)
     logging.info("GBN %s", gbn)
@@ -539,11 +543,11 @@ def parcel_main(args, configs):
     c = CopyAndModifyData(in_dir, scratch_dir, configs)
     c.copy_and_modify()
 
-    m = WriteMetadata(scratch_dir, stack_version, gbn)
+    m = WriteMetadata(scratch_dir, stack_version, gbn, ozone_jar_version)
     m.write_metadata()
 
     for linux_distro in configs['linux_distro']:
-        a = Archive(out_dir, linux_distro, stack_version, gbn)
+        a = Archive(out_dir, linux_distro, stack_version, gbn, ozone_jar_version)
         a.archive_parcel_wrapper()
 
 def main():
