@@ -404,6 +404,9 @@ public class KeyManagerImpl implements KeyManager {
         value = getOmKeyInfoFSO(volumeName, bucketName, keyName);
       } else {
         value = getOmKeyInfoDirectoryAware(volumeName, bucketName, keyName);
+        if (bucketLayout.isLegacy() && !value.isFile()) {
+          value = null; // Legacy buckets do not report key info for directories
+        }
       }
     } catch (IOException ex) {
       if (ex instanceof OMException) {
