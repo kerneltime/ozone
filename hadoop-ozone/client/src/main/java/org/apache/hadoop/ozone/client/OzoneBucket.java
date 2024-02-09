@@ -87,7 +87,7 @@ public class OzoneBucket extends WithMetadata {
   /**
    * Default replication factor to be used while creating keys.
    */
-  private ReplicationConfig defaultReplication;
+  private final ReplicationConfig defaultReplication;
 
   /**
    * Type of storage to be used for this bucket.
