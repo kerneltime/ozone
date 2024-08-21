@@ -19,6 +19,7 @@ package org.apache.hadoop.ozone.om;
 import org.apache.hadoop.metrics2.MetricsSystem;
 import org.apache.hadoop.metrics2.annotation.Metric;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
+import org.apache.hadoop.metrics2.lib.MutableGaugeFloat;
 import org.apache.hadoop.metrics2.lib.MutableRate;
 
 /**
@@ -108,10 +109,16 @@ public class OMPerformanceMetrics {
   private MutableRate createRatisRequestLatencyNs;
 
   @Metric(about = "Convert ratis response to om response nano seconds")
-  private MutableRate createOmResoonseLatencyNs;
+  private MutableRate createOmResponseLatencyNs;
 
   @Metric(about = "Ratis local command execution latency in nano seconds")
-  private MutableRate validateAndUpdateCacneLatencyNs;
+  private MutableRate validateAndUpdateCacheLatencyNs;
+
+  @Metric(about = "average pagination for listKeys")
+  private MutableRate listKeysAveragePagination;
+
+  @Metric(about = "ops per second for listKeys")
+  private MutableGaugeFloat listKeysOpsPerSec;
 
   @Metric(about = "ACLs check latency in listKeys")
   private MutableRate listKeysAclCheckLatencyNs;
@@ -119,24 +126,42 @@ public class OMPerformanceMetrics {
   @Metric(about = "resolveBucketLink latency in listKeys")
   private MutableRate listKeysResolveBucketLatencyNs;
 
+  @Metric(about = "deleteKeyFailure latency in nano seconds")
+  private MutableRate deleteKeyFailureLatencyNs;
+
+  @Metric(about = "deleteKeySuccess latency in nano seconds")
+  private MutableRate deleteKeySuccessLatencyNs;
+
+  @Metric(about = "resolveBucketLink latency in deleteKeys")
+  private MutableRate deleteKeysResolveBucketLatencyNs;
+
+  @Metric(about = "ACLs check latency in deleteKeys")
+  private MutableRate deleteKeysAclCheckLatencyNs;
+
+  @Metric(about = "resolveBucketLink and ACLs check latency in deleteKey")
+  private MutableRate deleteKeyResolveBucketAndAclCheckLatencyNs;
+  
+  @Metric(about = "readFromRockDb latency in listKeys")
+  private MutableRate listKeysReadFromRocksDbLatencyNs;
+
   public void addLookupLatency(long latencyInNs) {
     lookupLatencyNs.add(latencyInNs);
   }
 
-  public MutableRate getLookupRefreshLocationLatencyNs() {
+  MutableRate getLookupRefreshLocationLatencyNs() {
     return lookupRefreshLocationLatencyNs;
   }
 
 
-  public MutableRate getLookupGenerateBlockTokenLatencyNs() {
+  MutableRate getLookupGenerateBlockTokenLatencyNs() {
     return lookupGenerateBlockTokenLatencyNs;
   }
 
-  public MutableRate getLookupReadKeyInfoLatencyNs() {
+  MutableRate getLookupReadKeyInfoLatencyNs() {
     return lookupReadKeyInfoLatencyNs;
   }
 
-  public MutableRate getLookupAclCheckLatencyNs() {
+  MutableRate getLookupAclCheckLatencyNs() {
     return lookupAclCheckLatencyNs;
   }
 
@@ -144,7 +169,7 @@ public class OMPerformanceMetrics {
     s3VolumeContextLatencyNs.add(latencyInNs);
   }
 
-  public MutableRate getLookupResolveBucketLatencyNs() {
+  MutableRate getLookupResolveBucketLatencyNs() {
     return lookupResolveBucketLatencyNs;
   }
 
@@ -152,27 +177,27 @@ public class OMPerformanceMetrics {
     getKeyInfoLatencyNs.add(value);
   }
 
-  public MutableRate getGetKeyInfoAclCheckLatencyNs() {
+  MutableRate getGetKeyInfoAclCheckLatencyNs() {
     return getKeyInfoAclCheckLatencyNs;
   }
 
-  public MutableRate getGetKeyInfoGenerateBlockTokenLatencyNs() {
+  MutableRate getGetKeyInfoGenerateBlockTokenLatencyNs() {
     return getKeyInfoGenerateBlockTokenLatencyNs;
   }
 
-  public MutableRate getGetKeyInfoReadKeyInfoLatencyNs() {
+  MutableRate getGetKeyInfoReadKeyInfoLatencyNs() {
     return getKeyInfoReadKeyInfoLatencyNs;
   }
 
-  public MutableRate getGetKeyInfoRefreshLocationLatencyNs() {
+  MutableRate getGetKeyInfoRefreshLocationLatencyNs() {
     return getKeyInfoRefreshLocationLatencyNs;
   }
 
-  public MutableRate getGetKeyInfoResolveBucketLatencyNs() {
+  MutableRate getGetKeyInfoResolveBucketLatencyNs() {
     return getKeyInfoResolveBucketLatencyNs;
   }
 
-  public MutableRate getGetKeyInfoSortDatanodesLatencyNs() {
+  MutableRate getGetKeyInfoSortDatanodesLatencyNs() {
     return getKeyInfoSortDatanodesLatencyNs;
   }
 
@@ -209,18 +234,50 @@ public class OMPerformanceMetrics {
   }
 
   public MutableRate getCreateOmResponseLatencyNs() {
-    return createOmResoonseLatencyNs;
+    return createOmResponseLatencyNs;
   }
 
-  public MutableRate getValidateAndUpdateCacneLatencyNs() {
-    return validateAndUpdateCacneLatencyNs;
+  public MutableRate getValidateAndUpdateCacheLatencyNs() {
+    return validateAndUpdateCacheLatencyNs;
   }
 
-  public MutableRate getListKeysAclCheckLatencyNs() {
+  public void setListKeysAveragePagination(long keyCount) {
+    listKeysAveragePagination.add(keyCount);
+  }
+
+  public void setListKeysOpsPerSec(float opsPerSec) {
+    listKeysOpsPerSec.set(opsPerSec);
+  }
+  
+  MutableRate getListKeysAclCheckLatencyNs() {
     return listKeysAclCheckLatencyNs;
   }
 
-  public MutableRate getListKeysResolveBucketLatencyNs() {
+  MutableRate getListKeysResolveBucketLatencyNs() {
     return listKeysResolveBucketLatencyNs;
+  }
+
+  public void setDeleteKeyFailureLatencyNs(long latencyInNs) {
+    deleteKeyFailureLatencyNs.add(latencyInNs);
+  }
+
+  public void setDeleteKeySuccessLatencyNs(long latencyInNs) {
+    deleteKeySuccessLatencyNs.add(latencyInNs);
+  }
+
+  public void setDeleteKeysResolveBucketLatencyNs(long latencyInNs) {
+    deleteKeysResolveBucketLatencyNs.add(latencyInNs);
+  }
+
+  public void setDeleteKeysAclCheckLatencyNs(long latencyInNs) {
+    deleteKeysAclCheckLatencyNs.add(latencyInNs);
+  }
+
+  public MutableRate getDeleteKeyResolveBucketAndAclCheckLatencyNs() {
+    return deleteKeyResolveBucketAndAclCheckLatencyNs;
+  }
+    
+  public void addListKeysReadFromRocksDbLatencyNs(long latencyInNs) {
+    listKeysReadFromRocksDbLatencyNs.add(latencyInNs);
   }
 }

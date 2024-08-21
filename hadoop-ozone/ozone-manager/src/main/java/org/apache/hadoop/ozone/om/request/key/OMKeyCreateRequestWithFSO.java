@@ -29,7 +29,6 @@ import org.apache.hadoop.ozone.om.exceptions.OMException;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.helpers.OmDirectoryInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
-import org.apache.hadoop.ozone.om.helpers.OzoneFSUtils;
 import org.apache.hadoop.ozone.om.helpers.BucketLayout;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfo;
 import org.apache.hadoop.ozone.om.request.file.OMDirectoryCreateRequestWithFSO;
@@ -54,7 +53,6 @@ import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.NOT_
 import static org.apache.hadoop.ozone.om.lock.OzoneManagerLock.Resource.BUCKET_LOCK;
 import static org.apache.hadoop.ozone.om.request.file.OMFileRequest.OMDirectoryResult.DIRECTORY_EXISTS;
 import static org.apache.hadoop.ozone.om.request.file.OMFileRequest.OMDirectoryResult.FILE_EXISTS_IN_GIVENPATH;
-import static org.apache.hadoop.ozone.om.request.file.OMFileRequest.getParentId;
 
 /**
  * Handles CreateKey request layout version1.
@@ -122,6 +120,7 @@ public class OMKeyCreateRequestWithFSO extends OMKeyCreateRequest {
         dbFileInfo = OMFileRequest.getOmKeyInfoFromFileTable(false,
                 omMetadataManager, dbFileKey, keyName);
       }
+      validateAtomicRewrite(dbFileInfo, keyArgs);
 
       // Check if a file or directory exists with same key name.
       if (pathInfoFSO.getDirectoryResult() == DIRECTORY_EXISTS) {
@@ -159,6 +158,8 @@ public class OMKeyCreateRequestWithFSO extends OMKeyCreateRequest {
               pathInfoFSO.getLeafNodeObjectId(),
               ozoneManager.isRatisEnabled(), repConfig);
 
+      validateEncryptionKeyInfo(bucketInfo, keyArgs);
+
       long openVersion = omFileInfo.getLatestVersionLocations().getVersion();
       long clientID = createKeyRequest.getClientID();
       String dbOpenFileName = omMetadataManager
@@ -186,7 +187,7 @@ public class OMKeyCreateRequestWithFSO extends OMKeyCreateRequest {
       // Even if bucket gets deleted, when commitKey we shall identify if
       // bucket gets deleted.
       OMFileRequest.addOpenFileTableCacheEntry(omMetadataManager,
-              dbOpenFileName, omFileInfo, pathInfoFSO.getLeafNodeName(),
+              dbOpenFileName, omFileInfo, pathInfoFSO.getLeafNodeName(), keyName,
               trxnLogIndex);
 
       // Add cache entries for the prefix directories.
@@ -227,7 +228,7 @@ public class OMKeyCreateRequestWithFSO extends OMKeyCreateRequest {
     }
 
     // Audit Log outside the lock
-    auditLog(ozoneManager.getAuditLogger(), buildAuditMessage(
+    markForAudit(ozoneManager.getAuditLogger(), buildAuditMessage(
             OMAction.ALLOCATE_KEY, auditMap, exception,
             getOmRequest().getUserInfo()));
 
@@ -253,16 +254,6 @@ public class OMKeyCreateRequestWithFSO extends OMKeyCreateRequest {
                                          String keyName, String uploadID,
                                          OMMetadataManager omMetadataManager)
       throws IOException {
-
-    final long volumeId = omMetadataManager.getVolumeId(volumeName);
-    final long bucketId = omMetadataManager.getBucketId(volumeName,
-            bucketName);
-    long parentId =
-        getParentId(omMetadataManager, volumeName, bucketName, keyName);
-
-    String fileName = OzoneFSUtils.getFileName(keyName);
-
-    return omMetadataManager.getMultipartKey(volumeId, bucketId, parentId,
-            fileName, uploadID);
+    return omMetadataManager.getMultipartKeyFSO(volumeName, bucketName, keyName, uploadID);
   }
 }

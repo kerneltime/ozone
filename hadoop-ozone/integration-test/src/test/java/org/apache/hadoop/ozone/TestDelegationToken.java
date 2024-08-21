@@ -31,12 +31,12 @@ import java.util.UUID;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.scm.HddsTestUtils;
 import org.apache.hadoop.hdds.scm.ScmConfig;
+import org.apache.hadoop.hdds.scm.client.ScmTopologyClient;
 import org.apache.hadoop.hdds.scm.ha.HASecurityUtils;
 import org.apache.hadoop.hdds.scm.server.SCMHTTPServerConfig;
 import org.apache.hadoop.hdds.scm.server.SCMStorageConfig;
 import org.apache.hadoop.hdds.scm.server.StorageContainerManager;
 import org.apache.hadoop.hdds.security.SecurityConfig;
-import org.apache.hadoop.hdds.security.x509.certificate.authority.DefaultCAServer;
 import org.apache.hadoop.hdds.security.x509.certificate.client.CertificateClientTestImpl;
 import org.apache.hadoop.hdds.security.x509.keys.HDDSKeyGenerator;
 import org.apache.hadoop.hdds.security.x509.keys.KeyCodec;
@@ -46,6 +46,7 @@ import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.minikdc.MiniKdc;
 import org.apache.hadoop.ozone.om.OMStorage;
 import org.apache.hadoop.ozone.om.OzoneManager;
+import org.apache.hadoop.ozone.om.ScmBlockLocationTestingClient;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
 import org.apache.hadoop.ozone.om.protocolPB.OmTransportFactory;
 import org.apache.hadoop.ozone.om.protocolPB.OzoneManagerProtocolClientSideTranslatorPB;
@@ -86,11 +87,11 @@ import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.INVA
 import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.TOKEN_ERROR_OTHER;
 import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.VOLUME_NOT_FOUND;
 import static org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod.KERBEROS;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertFalse;
+
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.slf4j.event.Level.INFO;
 
 import org.junit.jupiter.api.AfterEach;
@@ -250,7 +251,6 @@ public final class TestDelegationToken {
   }
 
   private void initSCM() throws IOException {
-    DefaultCAServer.setTestSecureFlag(true);
     SCMStorageConfig scmStore = new SCMStorageConfig(conf);
     scmStore.setClusterId(clusterId);
     scmStore.setScmId(scmId);
@@ -312,6 +312,8 @@ public final class TestDelegationToken {
     try {
       // Start OM
       om.setCertClient(new CertificateClientTestImpl(conf));
+      om.setScmTopologyClient(new ScmTopologyClient(
+          new ScmBlockLocationTestingClient(null, null, 0)));
       om.start();
       UserGroupInformation ugi = UserGroupInformation.getCurrentUser();
       String username = ugi.getUserName();
@@ -323,8 +325,8 @@ public final class TestDelegationToken {
           RandomStringUtils.randomAscii(5));
 
       // Assert if auth was successful via Kerberos
-      assertFalse(logs.getOutput().contains(
-          "Auth successful for " + username + " (auth:KERBEROS)"));
+      assertThat(logs.getOutput()).doesNotContain(
+          "Auth successful for " + username + " (auth:KERBEROS)");
 
       // Case 1: Test successful delegation token.
       Token<OzoneTokenIdentifier> token = omClient
@@ -332,7 +334,7 @@ public final class TestDelegationToken {
 
       // Case 2: Test successful token renewal.
       long renewalTime = omClient.renewDelegationToken(token);
-      assertTrue(renewalTime > 0);
+      assertThat(renewalTime).isGreaterThan(0);
 
       // Check if token is of right kind and renewer is running om instance
       assertNotNull(token);
@@ -358,13 +360,12 @@ public final class TestDelegationToken {
       });
 
       // Case 3: Test Client can authenticate using token.
-      assertFalse(logs.getOutput().contains(
-          "Auth successful for " + username + " (auth:TOKEN)"));
+      assertThat(logs.getOutput()).doesNotContain(
+          "Auth successful for " + username + " (auth:TOKEN)");
       OzoneTestUtils.expectOmException(VOLUME_NOT_FOUND,
           () -> omClient.deleteVolume("vol1"));
-      assertTrue(logs.getOutput().contains("Auth successful for "
-              + username + " (auth:TOKEN)"),
-          "Log file doesn't contain successful auth for user " + username);
+      assertThat(logs.getOutput())
+          .contains("Auth successful for " + username + " (auth:TOKEN)");
 
       // Case 4: Test failure of token renewal.
       // Call to renewDelegationToken will fail but it will confirm that
@@ -374,8 +375,8 @@ public final class TestDelegationToken {
       OMException ex = assertThrows(OMException.class,
           () -> omClient.renewDelegationToken(token));
       assertEquals(INVALID_AUTH_METHOD, ex.getResult());
-      assertTrue(logs.getOutput().contains(
-          "Auth successful for " + username + " (auth:TOKEN)"));
+      assertThat(logs.getOutput()).contains(
+          "Auth successful for " + username + " (auth:TOKEN)");
       omLogs.clearOutput();
       //testUser.setAuthenticationMethod(AuthMethod.KERBEROS);
       omClient.close();
@@ -391,7 +392,7 @@ public final class TestDelegationToken {
       // Wait for client to timeout
       Thread.sleep(CLIENT_TIMEOUT);
 
-      assertFalse(logs.getOutput().contains("Auth failed for"));
+      assertThat(logs.getOutput()).doesNotContain("Auth failed for");
 
       // Case 6: Test failure of token cancellation.
       // Get Om client, this time authentication using Token will fail as
@@ -402,8 +403,8 @@ public final class TestDelegationToken {
       ex = assertThrows(OMException.class,
           () -> omClient.cancelDelegationToken(token));
       assertEquals(TOKEN_ERROR_OTHER, ex.getResult());
-      assertTrue(ex.getMessage().contains("Cancel delegation token failed"));
-      assertTrue(logs.getOutput().contains("Auth failed for"));
+      assertThat(ex.getMessage()).contains("Cancel delegation token failed");
+      assertThat(logs.getOutput()).contains("Auth failed for");
     } finally {
       om.stop();
       om.join();

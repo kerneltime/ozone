@@ -34,10 +34,8 @@ import org.apache.hadoop.ozone.ClientVersion;
 import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.common.BlockGroup;
 import org.apache.hadoop.ozone.lock.BootstrapStateHandler;
-import org.apache.hadoop.ozone.om.IOmMetadataReader;
 import org.apache.hadoop.ozone.om.OMConfigKeys;
 import org.apache.hadoop.ozone.om.OmMetadataManagerImpl;
-import org.apache.hadoop.ozone.om.KeyManagerImpl;
 import org.apache.hadoop.ozone.om.OmSnapshot;
 import org.apache.hadoop.ozone.om.OmSnapshotManager;
 import org.apache.hadoop.ozone.om.OzoneManager;
@@ -52,7 +50,6 @@ import org.apache.hadoop.ozone.om.helpers.RepeatedOmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.SnapshotInfo;
 import org.apache.hadoop.ozone.om.ratis.OzoneManagerRatisServer;
 import org.apache.hadoop.ozone.om.snapshot.ReferenceCounted;
-import org.apache.hadoop.ozone.om.snapshot.SnapshotCache;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.PurgePathRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.SnapshotMoveDeletedKeysRequest;
@@ -78,7 +75,6 @@ import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_SNAPSHOT_KEY_DELETIN
 import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_SNAPSHOT_KEY_DELETING_LIMIT_PER_TASK_DEFAULT;
 import static org.apache.hadoop.ozone.om.OMConfigKeys.SNAPSHOT_DELETING_LIMIT_PER_TASK;
 import static org.apache.hadoop.ozone.om.OMConfigKeys.SNAPSHOT_DELETING_LIMIT_PER_TASK_DEFAULT;
-import static org.apache.hadoop.ozone.om.OmSnapshotManager.getSnapshotPrefix;
 
 /**
  * Background Service to clean-up deleted snapshot and reclaim space.
@@ -143,10 +139,8 @@ public class SnapshotDeletingService extends AbstractKeyDeletingService {
 
       getRunCount().incrementAndGet();
 
-      ReferenceCounted<IOmMetadataReader, SnapshotCache> rcOmSnapshot =
-          null;
-      ReferenceCounted<IOmMetadataReader, SnapshotCache> rcOmPreviousSnapshot =
-          null;
+      ReferenceCounted<OmSnapshot> rcOmSnapshot = null;
+      ReferenceCounted<OmSnapshot> rcOmPreviousSnapshot = null;
 
       Table<String, SnapshotInfo> snapshotInfoTable =
           ozoneManager.getMetadataManager().getSnapshotInfoTable();
@@ -158,23 +152,19 @@ public class SnapshotDeletingService extends AbstractKeyDeletingService {
 
         while (iterator.hasNext() && snapshotLimit > 0) {
           SnapshotInfo snapInfo = iterator.next().getValue();
-          boolean isSstFilteringServiceEnabled =
-              ((KeyManagerImpl) ozoneManager.getKeyManager())
-                  .isSstFilteringSvcEnabled();
 
           // Only Iterate in deleted snapshot
-          if (shouldIgnoreSnapshot(snapInfo, isSstFilteringServiceEnabled)) {
+          if (shouldIgnoreSnapshot(snapInfo)) {
             continue;
           }
 
           // Note: Can refactor this to use try-with-resources.
           // Handling RC decrements manually for now to minimize conflicts.
-          rcOmSnapshot = omSnapshotManager.checkForSnapshot(
+          rcOmSnapshot = omSnapshotManager.getSnapshot(
               snapInfo.getVolumeName(),
               snapInfo.getBucketName(),
-              getSnapshotPrefix(snapInfo.getName()),
-              true);
-          OmSnapshot omSnapshot = (OmSnapshot) rcOmSnapshot.get();
+              snapInfo.getName());
+          OmSnapshot omSnapshot = rcOmSnapshot.get();
 
           Table<String, RepeatedOmKeyInfo> snapshotDeletedTable =
               omSnapshot.getMetadataManager().getDeletedTable();
@@ -226,12 +216,11 @@ public class SnapshotDeletingService extends AbstractKeyDeletingService {
           // Split RepeatedOmKeyInfo and update current snapshot deletedKeyTable
           // and next snapshot deletedKeyTable.
           if (previousSnapshot != null) {
-            rcOmPreviousSnapshot = omSnapshotManager.checkForSnapshot(
+            rcOmPreviousSnapshot = omSnapshotManager.getSnapshot(
                 previousSnapshot.getVolumeName(),
                 previousSnapshot.getBucketName(),
-                getSnapshotPrefix(previousSnapshot.getName()),
-                true);
-            omPreviousSnapshot = (OmSnapshot) rcOmPreviousSnapshot.get();
+                previousSnapshot.getName());
+            omPreviousSnapshot = rcOmPreviousSnapshot.get();
 
             previousKeyTable = omPreviousSnapshot
                 .getMetadataManager().getKeyTable(bucketInfo.getBucketLayout());
@@ -598,11 +587,10 @@ public class SnapshotDeletingService extends AbstractKeyDeletingService {
     }
   }
 
-  public static boolean shouldIgnoreSnapshot(SnapshotInfo snapInfo,
-      boolean isSstFilteringServiceEnabled) {
+  @VisibleForTesting
+  boolean shouldIgnoreSnapshot(SnapshotInfo snapInfo) {
     SnapshotInfo.SnapshotStatus snapshotStatus = snapInfo.getSnapshotStatus();
-    return !(snapshotStatus == SnapshotInfo.SnapshotStatus.SNAPSHOT_DELETED)
-        || (isSstFilteringServiceEnabled && !snapInfo.isSstFiltered());
+    return snapshotStatus != SnapshotInfo.SnapshotStatus.SNAPSHOT_DELETED;
   }
 
   // TODO: Move this util class.

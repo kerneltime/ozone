@@ -28,10 +28,9 @@ import org.apache.hadoop.hdds.security.x509.keys.HDDSKeyGenerator;
 import org.apache.hadoop.hdds.security.x509.keys.KeyCodec;
 import org.apache.hadoop.ozone.OzoneSecurityUtil;
 import org.apache.hadoop.security.ssl.KeyStoreTestUtil;
-import org.apache.ozone.test.GenericTestUtils;
-import org.bouncycastle.cert.X509CertificateHolder;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -42,7 +41,6 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.KeyPair;
 import java.security.cert.X509Certificate;
-import java.util.UUID;
 import java.util.stream.Stream;
 
 import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_METADATA_DIR_NAME;
@@ -63,6 +61,7 @@ public class TestDnCertificateClientInit {
   private String certSerialId = "3284792342234";
   private DNCertificateClient dnCertificateClient;
   private HDDSKeyGenerator keyGenerator;
+  @TempDir
   private Path metaDirPath;
   private SecurityConfig securityConfig;
   private KeyCodec dnKeyCodec;
@@ -85,9 +84,6 @@ public class TestDnCertificateClientInit {
   @BeforeEach
   public void setUp() throws Exception {
     OzoneConfiguration config = new OzoneConfiguration();
-    final String path = GenericTestUtils
-        .getTempPath(UUID.randomUUID().toString());
-    metaDirPath = Paths.get(path, "test");
     config.set(HDDS_METADATA_DIR_NAME, metaDirPath.toString());
     securityConfig = new SecurityConfig(config);
     keyGenerator = new HDDSKeyGenerator(securityConfig);
@@ -107,7 +103,6 @@ public class TestDnCertificateClientInit {
   public void tearDown() throws IOException {
     dnCertificateClient.close();
     dnCertificateClient = null;
-    FileUtils.deleteQuietly(metaDirPath.toFile());
   }
 
 
@@ -134,10 +129,8 @@ public class TestDnCertificateClientInit {
     }
 
     if (certPresent) {
-      CertificateCodec codec = new CertificateCodec(securityConfig,
-          DN_COMPONENT);
-      codec.writeCertificate(new X509CertificateHolder(
-          x509Certificate.getEncoded()));
+      CertificateCodec codec = new CertificateCodec(securityConfig, DN_COMPONENT);
+      codec.writeCertificate(x509Certificate);
     } else {
       FileUtils.deleteQuietly(Paths.get(
           securityConfig.getKeyLocation(DN_COMPONENT).toString(),

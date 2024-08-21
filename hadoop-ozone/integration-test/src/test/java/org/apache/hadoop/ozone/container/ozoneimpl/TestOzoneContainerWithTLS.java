@@ -38,17 +38,21 @@ import org.apache.hadoop.hdds.scm.XceiverClientSpi;
 import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
 import org.apache.hadoop.ozone.container.common.ContainerTestUtils;
 import org.apache.hadoop.ozone.container.common.statemachine.StateContext;
+import org.apache.hadoop.ozone.container.common.utils.StorageVolumeUtil;
+import org.apache.hadoop.ozone.container.common.volume.MutableVolumeSet;
 import org.apache.hadoop.ozone.container.replication.SimpleContainerDownloader;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
 import org.apache.ozone.test.GenericTestUtils.LogCapturer;
-import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.event.Level;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -80,13 +84,15 @@ import static org.apache.hadoop.ozone.container.ContainerTestHelper.getCreateCon
 import static org.apache.hadoop.ozone.container.ContainerTestHelper.getTestContainerID;
 import static org.apache.hadoop.ozone.container.replication.CopyContainerCompression.NO_COMPRESSION;
 import static org.apache.ozone.test.GenericTestUtils.LogCapturer.captureLogs;
+import static org.apache.ozone.test.GenericTestUtils.setLogLevel;
 import static org.apache.ozone.test.GenericTestUtils.waitFor;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.slf4j.LoggerFactory.getLogger;
 
@@ -138,6 +144,9 @@ public class TestOzoneContainerWithTLS {
 
     dn = aDatanode();
     pipeline = createPipeline(singletonList(dn));
+
+    Logger logger = LoggerFactory.getLogger(ClientTrustManager.class);
+    setLogLevel(logger, Level.DEBUG);
   }
 
   @Test
@@ -257,7 +266,7 @@ public class TestOzoneContainerWithTLS {
         while (e.getCause() != null) {
           e = e.getCause();
         }
-        assertTrue((e instanceof CertificateExpiredException));
+        assertInstanceOf(CertificateExpiredException.class, e);
       } finally {
         clientManager.releaseClient(client, true);
       }
@@ -288,10 +297,12 @@ public class TestOzoneContainerWithTLS {
   }
 
   private void assertClientTrustManagerFailedAndRetried(LogCapturer logs) {
-    assertTrue(logs.getOutput().contains("trying to re-fetch rootCA"),
-        "Check client failed first, and initiates a reload.");
-    assertTrue(logs.getOutput().contains("Loading certificates for client."),
-        "Check client loaded certificates.");
+    assertThat(logs.getOutput())
+        .withFailMessage("Check client failed first, and initiates a reload.")
+        .contains("trying to re-fetch rootCA");
+    assertThat(logs.getOutput())
+        .withFailMessage("Check client loaded certificates.")
+        .contains("Loading certificates for client.");
     logs.clearOutput();
   }
 
@@ -301,6 +312,9 @@ public class TestOzoneContainerWithTLS {
       StateContext stateContext = ContainerTestUtils.getMockContext(dn, conf);
       container = new OzoneContainer(
           dn, conf, stateContext, caClient, keyClient);
+      MutableVolumeSet volumeSet = container.getVolumeSet();
+      StorageVolumeUtil.getHddsVolumesList(volumeSet.getVolumesList())
+          .forEach(hddsVolume -> hddsVolume.setDbParentDir(tempFolder.toFile()));
       container.start(clusterID);
     } catch (Throwable e) {
       if (container != null) {
@@ -320,8 +334,8 @@ public class TestOzoneContainerWithTLS {
         sourceDatanodes, tempFolder.resolve("tmp"), NO_COMPRESSION);
     downloader.close();
     assertNull(file);
-    assertTrue(logCapture.getOutput().contains(
-        "java.security.cert.CertificateExpiredException"));
+    assertThat(logCapture.getOutput())
+        .contains("java.security.cert.CertificateExpiredException");
   }
 
   private void assertDownloadContainerWorks(List<Long> containers,
@@ -352,20 +366,15 @@ public class TestOzoneContainerWithTLS {
   }
 
   private long createAndCloseContainer(
-      XceiverClientSpi client, boolean useToken) {
+      XceiverClientSpi client, boolean useToken) throws IOException {
     long id = getTestContainerID();
-    try {
-      Token<ContainerTokenIdentifier>
-          token = createContainer(client, useToken, id);
+    Token<ContainerTokenIdentifier> token = createContainer(client, useToken, id);
 
-      ContainerCommandRequestProto request =
-          getCloseContainer(client.getPipeline(), id, token);
-      ContainerCommandResponseProto response = client.sendCommand(request);
-      assertNotNull(response);
-      assertSame(response.getResult(), ContainerProtos.Result.SUCCESS);
-    } catch (Exception e) {
-      Assertions.fail(e);
-    }
+    ContainerCommandRequestProto request =
+        getCloseContainer(client.getPipeline(), id, token);
+    ContainerCommandResponseProto response = client.sendCommand(request);
+    assertNotNull(response);
+    assertSame(response.getResult(), ContainerProtos.Result.SUCCESS);
     return id;
   }
 

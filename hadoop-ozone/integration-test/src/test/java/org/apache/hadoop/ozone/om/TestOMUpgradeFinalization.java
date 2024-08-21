@@ -20,6 +20,7 @@ package org.apache.hadoop.ozone.om;
 import static org.apache.hadoop.ozone.OzoneConsts.LAYOUT_VERSION_KEY;
 import static org.apache.hadoop.ozone.om.OMUpgradeTestUtils.assertClusterPrepared;
 import static org.apache.hadoop.ozone.om.OMUpgradeTestUtils.waitForFinalization;
+import static org.apache.hadoop.ozone.om.OmUpgradeConfig.ConfigStrings.OZONE_OM_INIT_DEFAULT_LAYOUT_VERSION;
 import static org.apache.hadoop.ozone.om.upgrade.OMLayoutFeature.INITIAL_VERSION;
 import static org.apache.hadoop.ozone.om.upgrade.OMLayoutVersionManager.maxLayoutVersion;
 import static org.apache.ozone.test.GenericTestUtils.waitFor;
@@ -35,12 +36,17 @@ import java.util.concurrent.TimeoutException;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.ozone.MiniOzoneCluster;
 import org.apache.hadoop.ozone.MiniOzoneHAClusterImpl;
+import org.apache.hadoop.ozone.audit.AuditEventStatus;
+import org.apache.hadoop.ozone.audit.AuditLogTestUtils;
+import org.apache.hadoop.ozone.audit.OMAction;
 import org.apache.hadoop.ozone.client.OzoneClient;
 import org.apache.hadoop.ozone.om.protocol.OzoneManagerProtocol;
 import org.apache.hadoop.ozone.om.ratis.OzoneManagerStateMachine;
 import org.apache.hadoop.ozone.upgrade.UpgradeFinalizer.StatusAndMessages;
 
 import org.apache.ratis.util.LifeCycle;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -48,7 +54,18 @@ import org.junit.jupiter.api.Test;
  * TODO: can be merged into class with other OM tests with per-method cluster
  */
 class TestOMUpgradeFinalization {
+  static {
+    AuditLogTestUtils.enableAuditLog();
+  }
 
+  @BeforeEach
+  public void setup() throws Exception {
+    AuditLogTestUtils.truncateAuditLogFile();
+  }
+  @AfterAll
+  public static void shutdown() {
+    AuditLogTestUtils.deleteAuditLogFile();
+  }
   @Test
   void testOMUpgradeFinalizationWithOneOMDown() throws Exception {
     OzoneConfiguration conf = new OzoneConfiguration();
@@ -69,11 +86,14 @@ class TestOMUpgradeFinalization {
         // OMs.
         long prepareIndex = omClient.prepareOzoneManager(120L, 5L);
         assertClusterPrepared(prepareIndex, runningOms);
+        AuditLogTestUtils.verifyAuditLog(OMAction.UPGRADE_PREPARE, AuditEventStatus.SUCCESS);
 
         omClient.cancelOzoneManagerPrepare();
+        AuditLogTestUtils.verifyAuditLog(OMAction.UPGRADE_CANCEL, AuditEventStatus.SUCCESS);
         StatusAndMessages response =
             omClient.finalizeUpgrade("finalize-test");
         System.out.println("Finalization Messages : " + response.msgs());
+        AuditLogTestUtils.verifyAuditLog(OMAction.UPGRADE_FINALIZE, AuditEventStatus.SUCCESS);
 
         waitForFinalization(omClient);
         cluster.restartOzoneManager(downedOM, true);
@@ -103,14 +123,12 @@ class TestOMUpgradeFinalization {
 
   private static MiniOzoneHAClusterImpl newCluster(OzoneConfiguration conf)
       throws IOException {
-    return (MiniOzoneHAClusterImpl) MiniOzoneCluster.newOMHABuilder(conf)
-        .setClusterId(UUID.randomUUID().toString())
-        .setScmId(UUID.randomUUID().toString())
-        .setOMServiceId(UUID.randomUUID().toString())
+    conf.setInt(OZONE_OM_INIT_DEFAULT_LAYOUT_VERSION, INITIAL_VERSION.layoutVersion());
+    MiniOzoneHAClusterImpl.Builder builder = MiniOzoneCluster.newHABuilder(conf);
+    builder.setOMServiceId(UUID.randomUUID().toString())
         .setNumOfOzoneManagers(3)
-        .setNumDatanodes(1)
-        .setOmLayoutVersion(INITIAL_VERSION.layoutVersion())
-        .build();
+        .setNumDatanodes(1);
+    return builder.build();
   }
 
 }

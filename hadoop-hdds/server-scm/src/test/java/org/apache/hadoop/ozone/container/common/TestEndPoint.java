@@ -100,6 +100,9 @@ public class TestEndPoint {
   private static DatanodeLayoutStorage layoutStorage;
   private static DatanodeDetails dnDetails;
 
+  @TempDir
+  private File tempDir;
+
   @AfterAll
   public static void tearDown() throws Exception {
     if (scmServer != null) {
@@ -110,7 +113,7 @@ public class TestEndPoint {
   @BeforeAll
   static void setUp() throws Exception {
     serverAddress = SCMTestUtils.getReuseableAddress();
-    ozoneConf = SCMTestUtils.getConf();
+    ozoneConf = SCMTestUtils.getConf(testDir);
     scmServerImpl = new ScmTestMock();
     dnDetails = randomDatanodeDetails();
     layoutStorage = new DatanodeLayoutStorage(ozoneConf,
@@ -128,7 +131,7 @@ public class TestEndPoint {
   @Test
   public void testGetVersion() throws Exception {
     try (EndpointStateMachine rpcEndPoint =
-        createEndpoint(SCMTestUtils.getConf(),
+        createEndpoint(SCMTestUtils.getConf(tempDir),
             serverAddress, 1000)) {
       SCMVersionResponseProto responseProto = rpcEndPoint.getEndPoint()
           .getVersion(null);
@@ -148,10 +151,10 @@ public class TestEndPoint {
     try (EndpointStateMachine rpcEndPoint = createEndpoint(ozoneConf,
         serverAddress, 1000)) {
       ozoneConf.setBoolean(
-          OzoneConfigKeys.DFS_CONTAINER_RATIS_DATASTREAM_ENABLED,
+          OzoneConfigKeys.HDDS_CONTAINER_RATIS_DATASTREAM_ENABLED,
           true);
       ozoneConf.setBoolean(
-          OzoneConfigKeys.DFS_CONTAINER_RATIS_DATASTREAM_RANDOM_PORT, true);
+          OzoneConfigKeys.HDDS_CONTAINER_RATIS_DATASTREAM_RANDOM_PORT, true);
       OzoneContainer ozoneContainer = new OzoneContainer(dnDetails,
           ozoneConf, ContainerTestUtils.getMockContext(dnDetails, ozoneConf));
       rpcEndPoint.setState(EndpointStateMachine.EndPointStates.GETVERSION);
@@ -176,14 +179,14 @@ public class TestEndPoint {
    */
   @Test
   public void testDeletedContainersClearedOnStartup() throws Exception {
-    ozoneConf.setBoolean(OzoneConfigKeys.DFS_CONTAINER_IPC_RANDOM_PORT,
+    ozoneConf.setBoolean(OzoneConfigKeys.HDDS_CONTAINER_IPC_RANDOM_PORT,
         true);
-    ozoneConf.setBoolean(OzoneConfigKeys.DFS_CONTAINER_RATIS_IPC_RANDOM_PORT,
+    ozoneConf.setBoolean(OzoneConfigKeys.HDDS_CONTAINER_RATIS_IPC_RANDOM_PORT,
         true);
     ozoneConf.setFromObject(new ReplicationConfig().setPort(0));
+    OzoneContainer ozoneContainer = createVolume(ozoneConf);
     try (EndpointStateMachine rpcEndPoint = createEndpoint(ozoneConf,
         serverAddress, 1000)) {
-      OzoneContainer ozoneContainer = createVolume(ozoneConf);
       HddsVolume hddsVolume = (HddsVolume) ozoneContainer.getVolumeSet()
           .getVolumesList().get(0);
       KeyValueContainer kvContainer = addContainer(ozoneConf, hddsVolume);
@@ -209,17 +212,19 @@ public class TestEndPoint {
           hddsVolume.getDeletedContainerDir().listFiles();
       assertNotNull(leftoverContainers);
       assertEquals(0, leftoverContainers.length);
+    } finally {
+      ozoneContainer.stop();
     }
   }
 
   @Test
   public void testCheckVersionResponse() throws Exception {
-    ozoneConf.setBoolean(OzoneConfigKeys.DFS_CONTAINER_IPC_RANDOM_PORT,
+    ozoneConf.setBoolean(OzoneConfigKeys.HDDS_CONTAINER_IPC_RANDOM_PORT,
         true);
-    ozoneConf.setBoolean(OzoneConfigKeys.DFS_CONTAINER_RATIS_IPC_RANDOM_PORT,
+    ozoneConf.setBoolean(OzoneConfigKeys.HDDS_CONTAINER_RATIS_IPC_RANDOM_PORT,
         true);
     ozoneConf.setBoolean(
-        OzoneConfigKeys.DFS_CONTAINER_RATIS_DATASTREAM_RANDOM_PORT, true);
+        OzoneConfigKeys.HDDS_CONTAINER_RATIS_DATASTREAM_RANDOM_PORT, true);
     ozoneConf.setFromObject(new ReplicationConfig().setPort(0));
     try (EndpointStateMachine rpcEndPoint = createEndpoint(ozoneConf,
         serverAddress, 1000)) {
@@ -264,7 +269,7 @@ public class TestEndPoint {
    */
   @Test
   public void testDnLayoutVersionFile() throws Exception {
-    ozoneConf.setBoolean(OzoneConfigKeys.DFS_CONTAINER_RATIS_IPC_RANDOM_PORT,
+    ozoneConf.setBoolean(OzoneConfigKeys.HDDS_CONTAINER_RATIS_IPC_RANDOM_PORT,
         true);
     try (EndpointStateMachine rpcEndPoint = createEndpoint(ozoneConf,
         serverAddress, 1000)) {
@@ -316,7 +321,7 @@ public class TestEndPoint {
    */
   @Test
   public void testGetVersionToInvalidEndpoint() throws Exception {
-    OzoneConfiguration conf = SCMTestUtils.getConf();
+    OzoneConfiguration conf = SCMTestUtils.getConf(tempDir);
     InetSocketAddress nonExistentServerAddress = SCMTestUtils
         .getReuseableAddress();
     try (EndpointStateMachine rpcEndPoint = createEndpoint(conf,
@@ -344,7 +349,7 @@ public class TestEndPoint {
   public void testGetVersionAssertRpcTimeOut() throws Exception {
     final long rpcTimeout = 1000;
     final long tolerance = 100;
-    OzoneConfiguration conf = SCMTestUtils.getConf();
+    OzoneConfiguration conf = SCMTestUtils.getConf(tempDir);
 
     try (EndpointStateMachine rpcEndPoint = createEndpoint(conf,
         serverAddress, (int) rpcTimeout)) {
@@ -369,7 +374,7 @@ public class TestEndPoint {
   public void testRegister() throws Exception {
     DatanodeDetails nodeToRegister = randomDatanodeDetails();
     try (EndpointStateMachine rpcEndPoint = createEndpoint(
-        SCMTestUtils.getConf(), serverAddress, 1000)) {
+        SCMTestUtils.getConf(tempDir), serverAddress, 1000)) {
       SCMRegisteredResponseProto responseProto = rpcEndPoint.getEndPoint()
           .register(nodeToRegister.getExtendedProtoBufMessage(), HddsTestUtils
                   .createNodeReport(
@@ -400,14 +405,8 @@ public class TestEndPoint {
         null);
   }
 
-  private EndpointStateMachine registerTaskHelper(InetSocketAddress scmAddress,
-      int rpcTimeout, boolean clearDatanodeDetails
-  ) throws Exception {
-    OzoneConfiguration conf = SCMTestUtils.getConf();
-    EndpointStateMachine rpcEndPoint =
-        createEndpoint(conf,
-            scmAddress, rpcTimeout);
-    rpcEndPoint.setState(EndpointStateMachine.EndPointStates.REGISTER);
+  private RegisterEndpointTask getRegisterEndpointTask(boolean clearDatanodeDetails, OzoneConfiguration conf,
+                                                       EndpointStateMachine rpcEndPoint) throws Exception {
     OzoneContainer ozoneContainer = mock(OzoneContainer.class);
     UUID datanodeID = UUID.randomUUID();
     when(ozoneContainer.getNodeReport()).thenReturn(HddsTestUtils
@@ -432,6 +431,16 @@ public class TestEndPoint {
       DatanodeDetails datanodeDetails = randomDatanodeDetails();
       endpointTask.setDatanodeDetails(datanodeDetails);
     }
+    return endpointTask;
+  }
+
+  private EndpointStateMachine registerTaskHelper(InetSocketAddress scmAddress,
+      int rpcTimeout, boolean clearDatanodeDetails
+  ) throws Exception {
+    OzoneConfiguration conf = SCMTestUtils.getConf(tempDir);
+    EndpointStateMachine rpcEndPoint = createEndpoint(conf, scmAddress, rpcTimeout);
+    rpcEndPoint.setState(EndpointStateMachine.EndPointStates.REGISTER);
+    RegisterEndpointTask endpointTask = getRegisterEndpointTask(clearDatanodeDetails, conf, rpcEndPoint);
     endpointTask.call();
     return rpcEndPoint;
   }
@@ -467,21 +476,30 @@ public class TestEndPoint {
 
   @Test
   public void testRegisterRpcTimeout() throws Exception {
-    final long rpcTimeout = 1000;
-    final long tolerance = 200;
-    scmServerImpl.setRpcResponseDelay(1500);
-    long start = Time.monotonicNow();
-    registerTaskHelper(serverAddress, 1000, false).close();
-    long end = Time.monotonicNow();
-    scmServerImpl.setRpcResponseDelay(0);
-    assertThat(end - start).isLessThanOrEqualTo(rpcTimeout + tolerance);
+    final int rpcTimeout = 1000;
+    final int tolerance = 200;
+    scmServerImpl.setRpcResponseDelay(rpcTimeout + tolerance * 2);
+    OzoneConfiguration conf = SCMTestUtils.getConf(tempDir);
+
+    try (EndpointStateMachine rpcEndPoint = createEndpoint(conf, serverAddress, rpcTimeout)) {
+      rpcEndPoint.setState(EndpointStateMachine.EndPointStates.REGISTER);
+      RegisterEndpointTask endpointTask = getRegisterEndpointTask(false, conf, rpcEndPoint);
+      long start = Time.monotonicNow();
+      endpointTask.call();
+      long end = Time.monotonicNow();
+      assertThat(end - start)
+          .isGreaterThanOrEqualTo(rpcTimeout)
+          .isLessThanOrEqualTo(rpcTimeout + tolerance);
+    } finally {
+      scmServerImpl.setRpcResponseDelay(0);
+    }
   }
 
   @Test
   public void testHeartbeat() throws Exception {
     DatanodeDetails dataNode = randomDatanodeDetails();
     try (EndpointStateMachine rpcEndPoint =
-        createEndpoint(SCMTestUtils.getConf(),
+        createEndpoint(SCMTestUtils.getConf(tempDir),
             serverAddress, 1000)) {
       SCMHeartbeatRequestProto request = SCMHeartbeatRequestProto.newBuilder()
           .setDatanodeDetails(dataNode.getProtoBufMessage())
@@ -501,7 +519,7 @@ public class TestEndPoint {
   public void testHeartbeatWithCommandStatusReport() throws Exception {
     DatanodeDetails dataNode = randomDatanodeDetails();
     try (EndpointStateMachine rpcEndPoint =
-        createEndpoint(SCMTestUtils.getConf(),
+        createEndpoint(SCMTestUtils.getConf(tempDir),
             serverAddress, 1000)) {
       // Add some scmCommands for heartbeat response
       addScmCommands();
@@ -572,11 +590,11 @@ public class TestEndPoint {
       InetSocketAddress scmAddress,
       int rpcTimeout
   ) throws Exception {
-    OzoneConfiguration conf = SCMTestUtils.getConf();
+    OzoneConfiguration conf = SCMTestUtils.getConf(tempDir);
     // Mini Ozone cluster will not come up if the port is not true, since
     // Ratis will exit if the server port cannot be bound. We can remove this
     // hard coding once we fix the Ratis default behaviour.
-    conf.setBoolean(OzoneConfigKeys.DFS_CONTAINER_RATIS_IPC_RANDOM_PORT, true);
+    conf.setBoolean(OzoneConfigKeys.HDDS_CONTAINER_RATIS_IPC_RANDOM_PORT, true);
 
     // Create a datanode state machine for stateConext used by endpoint task
     try (DatanodeStateMachine stateMachine = new DatanodeStateMachine(

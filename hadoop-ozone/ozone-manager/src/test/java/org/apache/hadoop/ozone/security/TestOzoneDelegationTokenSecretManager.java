@@ -26,6 +26,7 @@ import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.Signature;
 import java.security.cert.CertPath;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.HashMap;
 import java.util.Map;
@@ -69,7 +70,6 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import org.apache.ratis.protocol.RaftPeerId;
-import org.bouncycastle.jcajce.provider.asymmetric.x509.CertificateFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -106,9 +106,9 @@ public class TestOzoneDelegationTokenSecretManager {
     serviceRpcAdd = new Text("localhost");
     final Map<String, S3SecretValue> s3Secrets = new HashMap<>();
     s3Secrets.put("testuser1",
-        new S3SecretValue("testuser1", "dbaksbzljandlkandlsd"));
+        S3SecretValue.of("testuser1", "dbaksbzljandlkandlsd"));
     s3Secrets.put("abc",
-        new S3SecretValue("abc", "djakjahkd"));
+        S3SecretValue.of("abc", "djakjahkd"));
     om = mock(OzoneManager.class);
     OMMetadataManager metadataManager = new OmMetadataManagerImpl(conf, om);
     when(om.getMetadataManager()).thenReturn(metadataManager);
@@ -143,10 +143,8 @@ public class TestOzoneDelegationTokenSecretManager {
   private OMCertificateClient setupCertificateClient() throws Exception {
     KeyPair keyPair = KeyStoreTestUtil.generateKeyPair("RSA");
     CertificateFactory fact = CertificateCodec.getCertFactory();
-    X509Certificate singleCert = KeyStoreTestUtil
-        .generateCertificate("CN=OzoneMaster", keyPair, 30, "SHA256withRSA");
-    CertPath certPath = fact.engineGenerateCertPath(
-        ImmutableList.of(singleCert));
+    X509Certificate singleCert = KeyStoreTestUtil.generateCertificate("CN=OzoneMaster", keyPair, 30, "SHA256withRSA");
+    CertPath certPath = fact.generateCertPath(ImmutableList.of(singleCert));
 
     OMStorage omStorage = mock(OMStorage.class);
     when(omStorage.getOmCertSerialId()).thenReturn(null);
@@ -321,7 +319,9 @@ public class TestOzoneDelegationTokenSecretManager {
     IOException ioException =
         assertThrows(IOException.class,
             () -> secretManager.renewToken(token, TEST_USER.toString()));
-    assertThat(ioException.getMessage()).contains("is expired");
+    String errorMessage = ioException.getMessage();
+    assertTrue(errorMessage.contains("is expired") || errorMessage.contains("can't be found in cache"),
+        "\nExpecting:\n" + errorMessage + "\n to contain \"is expired\" or \"can't be found in cache\"");
   }
 
   @Test

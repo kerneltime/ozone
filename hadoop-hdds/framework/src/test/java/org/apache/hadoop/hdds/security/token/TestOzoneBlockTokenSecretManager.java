@@ -31,12 +31,13 @@ import org.apache.hadoop.hdds.security.symmetric.SecretKeyVerifierClient;
 import org.apache.hadoop.hdds.security.symmetric.SecretKeyTestUtil;
 import org.apache.hadoop.hdds.security.SecurityConfig;
 import org.apache.hadoop.security.token.Token;
-import org.apache.ozone.test.GenericTestUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
+import java.io.File;
 import java.security.NoSuchAlgorithmException;
 import java.util.EnumSet;
 import java.util.UUID;
@@ -52,7 +53,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -61,8 +62,8 @@ import static org.mockito.Mockito.when;
  */
 public class TestOzoneBlockTokenSecretManager {
 
-  private static final String BASEDIR = GenericTestUtils
-      .getTempPath(TestOzoneBlockTokenSecretManager.class.getSimpleName());
+  @TempDir
+  private File baseDir;
   private static final String ALGORITHM = "HmacSHA256";
 
   private OzoneBlockTokenSecretManager secretManager;
@@ -77,7 +78,7 @@ public class TestOzoneBlockTokenSecretManager {
     pipeline = MockPipeline.createPipeline(3);
 
     OzoneConfiguration conf = new OzoneConfiguration();
-    conf.set(HddsConfigKeys.OZONE_METADATA_DIRS, BASEDIR);
+    conf.set(HddsConfigKeys.OZONE_METADATA_DIRS, baseDir.getPath());
     conf.setBoolean(HddsConfigKeys.HDDS_BLOCK_TOKEN_ENABLED, true);
     SecurityConfig securityConfig = new SecurityConfig(conf);
 
@@ -151,7 +152,7 @@ public class TestOzoneBlockTokenSecretManager {
         .build();
 
     // THEN
-    tokenVerifier.verify("testUser", token, putBlockCommand);
+    tokenVerifier.verify(token, putBlockCommand);
   }
 
   @Test
@@ -171,7 +172,7 @@ public class TestOzoneBlockTokenSecretManager {
 
     // THEN
     BlockTokenException e = assertThrows(BlockTokenException.class,
-        () -> tokenVerifier.verify("testUser", token, writeChunkRequest));
+        () -> tokenVerifier.verify(token, writeChunkRequest));
 
     assertThat(e.getMessage()).contains("Token for ID: " +
         OzoneBlockTokenIdentifier.getTokenService(blockID) +
@@ -199,12 +200,12 @@ public class TestOzoneBlockTokenSecretManager {
         pipeline, putBlockCommand.getPutBlock());
 
     BlockTokenException e = assertThrows(BlockTokenException.class,
-        () -> tokenVerifier.verify(testUser1, token, putBlockCommand));
+        () -> tokenVerifier.verify(token, putBlockCommand));
 
     assertThat(e.getMessage())
         .contains("doesn't have WRITE permission");
 
-    tokenVerifier.verify(testUser1, token, getBlockCommand);
+    tokenVerifier.verify(token, getBlockCommand);
   }
 
   @Test
@@ -222,10 +223,10 @@ public class TestOzoneBlockTokenSecretManager {
     ContainerCommandRequestProto readChunkRequest =
         getReadChunkRequest(pipeline, writeChunkRequest.getWriteChunk());
 
-    tokenVerifier.verify(testUser2, token, writeChunkRequest);
+    tokenVerifier.verify(token, writeChunkRequest);
 
     BlockTokenException e = assertThrows(BlockTokenException.class,
-        () -> tokenVerifier.verify(testUser2, token, readChunkRequest));
+        () -> tokenVerifier.verify(token, readChunkRequest));
     assertThat(e.getMessage())
         .contains("doesn't have READ permission");
   }
@@ -242,14 +243,14 @@ public class TestOzoneBlockTokenSecretManager {
         .setEncodedToken(token.encodeToUrlString())
         .build();
 
-    tokenVerifier.verify("testUser", token, writeChunkRequest);
+    tokenVerifier.verify(token, writeChunkRequest);
 
     // Mock client with an expired cert
     ManagedSecretKey expiredSecretKey = generateExpiredSecretKey();
     when(secretKeyClient.getSecretKey(any())).thenReturn(expiredSecretKey);
 
     BlockTokenException e = assertThrows(BlockTokenException.class,
-        () -> tokenVerifier.verify(user, token, writeChunkRequest));
+        () -> tokenVerifier.verify(token, writeChunkRequest));
     assertThat(e.getMessage())
         .contains("Token can't be verified due to expired secret key");
   }

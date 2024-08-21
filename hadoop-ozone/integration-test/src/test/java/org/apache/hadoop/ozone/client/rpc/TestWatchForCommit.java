@@ -22,16 +22,16 @@ import java.io.OutputStream;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Random;
+import org.apache.commons.lang3.RandomUtils;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
-import org.apache.hadoop.conf.StorageUnit;
 import org.apache.hadoop.hdds.client.ReplicationType;
 import org.apache.hadoop.hdds.conf.DatanodeRatisServerConfig;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
+import org.apache.hadoop.hdds.conf.StorageUnit;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.hdds.ratis.conf.RatisClientConfig;
@@ -48,6 +48,7 @@ import org.apache.hadoop.hdds.scm.protocolPB.StorageContainerLocationProtocolCli
 import org.apache.hadoop.hdds.scm.storage.BlockOutputStream;
 import org.apache.hadoop.hdds.scm.storage.RatisBlockOutputStream;
 import org.apache.hadoop.hdds.utils.IOUtils;
+import org.apache.hadoop.ozone.ClientConfigForTesting;
 import org.apache.hadoop.ozone.HddsDatanodeService;
 import org.apache.hadoop.ozone.MiniOzoneCluster;
 import org.apache.hadoop.ozone.OzoneConfigKeys;
@@ -69,12 +70,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import org.apache.ratis.proto.RaftProtos;
 import org.apache.ratis.protocol.exceptions.GroupMismatchException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 /**
  * This class verifies the watchForCommit Handling by xceiverClient.
@@ -140,13 +144,16 @@ public class TestWatchForCommit {
     conf.setFromObject(raftClientConfig);
 
     conf.setTimeDuration(OZONE_SCM_STALENODE_INTERVAL, 30, TimeUnit.SECONDS);
-    cluster = MiniOzoneCluster.newBuilder(conf)
-        .setNumDatanodes(9)
+
+    ClientConfigForTesting.newBuilder(StorageUnit.BYTES)
         .setBlockSize(blockSize)
         .setChunkSize(chunkSize)
         .setStreamBufferFlushSize(flushSize)
         .setStreamBufferMaxSize(maxFlushSize)
-        .setStreamBufferSizeUnit(StorageUnit.BYTES)
+        .applyTo(conf);
+
+    cluster = MiniOzoneCluster.newBuilder(conf)
+        .setNumDatanodes(9)
         .build();
     cluster.waitForClusterToBeReady();
     cluster.waitForPipelineTobeReady(HddsProtos.ReplicationFactor.THREE, 60000);
@@ -249,41 +256,42 @@ public class TestWatchForCommit {
     validateData(keyName, data1);
   }
 
-  @Test
-  public void testWatchForCommitForRetryfailure() throws Exception {
+  @ParameterizedTest
+  @EnumSource(value = RaftProtos.ReplicationLevel.class, names = {"MAJORITY_COMMITTED", "ALL_COMMITTED"})
+  public void testWatchForCommitForRetryfailure(RaftProtos.ReplicationLevel watchType) throws Exception {
     GenericTestUtils.LogCapturer logCapturer =
         GenericTestUtils.LogCapturer.captureLogs(XceiverClientRatis.LOG);
+    RatisClientConfig ratisClientConfig = conf.getObject(RatisClientConfig.class);
+    ratisClientConfig.setWatchType(watchType.toString());
+    conf.setFromObject(ratisClientConfig);
     try (XceiverClientManager clientManager = new XceiverClientManager(conf)) {
       ContainerWithPipeline container1 = storageContainerLocationClient
           .allocateContainer(HddsProtos.ReplicationType.RATIS,
               HddsProtos.ReplicationFactor.THREE, OzoneConsts.OZONE);
       XceiverClientSpi xceiverClient = clientManager
           .acquireClient(container1.getPipeline());
-      assertEquals(1, xceiverClient.getRefcount());
-      assertEquals(container1.getPipeline(), xceiverClient.getPipeline());
-      Pipeline pipeline = xceiverClient.getPipeline();
-      TestHelper.createPipelineOnDatanode(pipeline, cluster);
-      XceiverClientReply reply = xceiverClient.sendCommandAsync(
-          ContainerTestHelper.getCreateContainerRequest(
-              container1.getContainerInfo().getContainerID(),
-              xceiverClient.getPipeline()));
-      reply.getResponse().get();
-      long index = reply.getLogIndex();
-      cluster.shutdownHddsDatanode(pipeline.getNodes().get(0));
-      cluster.shutdownHddsDatanode(pipeline.getNodes().get(1));
-      // emulate closing pipeline when SCM detects DEAD datanodes
-      cluster.getStorageContainerManager()
-          .getPipelineManager().closePipeline(pipeline, false);
-      // again write data with more than max buffer limit. This wi
       try {
+        assertEquals(1, xceiverClient.getRefcount());
+        assertEquals(container1.getPipeline(), xceiverClient.getPipeline());
+        Pipeline pipeline = xceiverClient.getPipeline();
+        TestHelper.createPipelineOnDatanode(pipeline, cluster);
+        XceiverClientReply reply = xceiverClient.sendCommandAsync(
+            ContainerTestHelper.getCreateContainerRequest(
+                container1.getContainerInfo().getContainerID(),
+                xceiverClient.getPipeline()));
+        reply.getResponse().get();
+        long index = reply.getLogIndex();
+        cluster.shutdownHddsDatanode(pipeline.getNodes().get(0));
+        cluster.shutdownHddsDatanode(pipeline.getNodes().get(1));
+        // emulate closing pipeline when SCM detects DEAD datanodes
+        cluster.getStorageContainerManager()
+            .getPipelineManager().closePipeline(pipeline, false);
+        // again write data with more than max buffer limit. This wi
         // just watch for a log index which in not updated in the commitInfo Map
         // as well as there is no logIndex generate in Ratis.
         // The basic idea here is just to test if its throws an exception.
-        xceiverClient
-            .watchForCommit(index + new Random().nextInt(100) + 10);
-        fail("expected exception not thrown");
-      } catch (Exception e) {
-        assertInstanceOf(ExecutionException.class, e);
+        ExecutionException e = assertThrows(ExecutionException.class,
+            () -> xceiverClient.watchForCommit(index + RandomUtils.nextInt(0, 100) + 10).get());
         // since the timeout value is quite long, the watch request will either
         // fail with NotReplicated exceptio, RetryFailureException or
         // RuntimeException
@@ -294,15 +302,20 @@ public class TestWatchForCommit {
         if (!logCapturer.getOutput().contains("Connection refused")) {
           assertThat(e.getMessage()).doesNotContain("Watch-MAJORITY_COMMITTED");
         }
+      } finally {
+        clientManager.releaseClient(xceiverClient, false);
       }
-      clientManager.releaseClient(xceiverClient, false);
     }
   }
 
-  @Test
-  public void test2WayCommitForTimeoutException() throws Exception {
+  @ParameterizedTest
+  @EnumSource(value = RaftProtos.ReplicationLevel.class, names = {"MAJORITY_COMMITTED", "ALL_COMMITTED"})
+  public void test2WayCommitForTimeoutException(RaftProtos.ReplicationLevel watchType) throws Exception {
     GenericTestUtils.LogCapturer logCapturer =
         GenericTestUtils.LogCapturer.captureLogs(XceiverClientRatis.LOG);
+    RatisClientConfig ratisClientConfig = conf.getObject(RatisClientConfig.class);
+    ratisClientConfig.setWatchType(watchType.toString());
+    conf.setFromObject(ratisClientConfig);
     try (XceiverClientManager clientManager = new XceiverClientManager(conf)) {
 
       ContainerWithPipeline container1 = storageContainerLocationClient
@@ -310,39 +323,46 @@ public class TestWatchForCommit {
               HddsProtos.ReplicationFactor.THREE, OzoneConsts.OZONE);
       XceiverClientSpi xceiverClient = clientManager
           .acquireClient(container1.getPipeline());
-      assertEquals(1, xceiverClient.getRefcount());
-      assertEquals(container1.getPipeline(), xceiverClient.getPipeline());
-      Pipeline pipeline = xceiverClient.getPipeline();
-      TestHelper.createPipelineOnDatanode(pipeline, cluster);
-      XceiverClientRatis ratisClient = (XceiverClientRatis) xceiverClient;
-      XceiverClientReply reply = xceiverClient.sendCommandAsync(
-          ContainerTestHelper.getCreateContainerRequest(
-              container1.getContainerInfo().getContainerID(),
-              xceiverClient.getPipeline()));
-      reply.getResponse().get();
-      assertEquals(3, ratisClient.getCommitInfoMap().size());
-      List<DatanodeDetails> nodesInPipeline = pipeline.getNodes();
-      for (HddsDatanodeService dn : cluster.getHddsDatanodes()) {
-        // shutdown the ratis follower
-        if (nodesInPipeline.contains(dn.getDatanodeDetails())
-            && RatisTestHelper.isRatisFollower(dn, pipeline)) {
-          cluster.shutdownHddsDatanode(dn.getDatanodeDetails());
-          break;
+      try {
+        assertEquals(1, xceiverClient.getRefcount());
+        assertEquals(container1.getPipeline(), xceiverClient.getPipeline());
+        Pipeline pipeline = xceiverClient.getPipeline();
+        TestHelper.createPipelineOnDatanode(pipeline, cluster);
+        XceiverClientRatis ratisClient = (XceiverClientRatis) xceiverClient;
+        XceiverClientReply reply = xceiverClient.sendCommandAsync(
+            ContainerTestHelper.getCreateContainerRequest(
+                container1.getContainerInfo().getContainerID(),
+                xceiverClient.getPipeline()));
+        reply.getResponse().get();
+        assertEquals(3, ratisClient.getCommitInfoMap().size());
+        List<DatanodeDetails> nodesInPipeline = pipeline.getNodes();
+        for (HddsDatanodeService dn : cluster.getHddsDatanodes()) {
+          // shutdown the ratis follower
+          if (nodesInPipeline.contains(dn.getDatanodeDetails())
+              && RatisTestHelper.isRatisFollower(dn, pipeline)) {
+            cluster.shutdownHddsDatanode(dn.getDatanodeDetails());
+            break;
+          }
         }
-      }
-      reply = xceiverClient.sendCommandAsync(ContainerTestHelper
-          .getCloseContainer(pipeline,
-              container1.getContainerInfo().getContainerID()));
-      reply.getResponse().get();
-      xceiverClient.watchForCommit(reply.getLogIndex());
+        reply = xceiverClient.sendCommandAsync(ContainerTestHelper
+            .getCloseContainer(pipeline,
+                container1.getContainerInfo().getContainerID()));
+        reply.getResponse().get();
+        xceiverClient.watchForCommit(reply.getLogIndex()).get();
 
-      // commitInfo Map will be reduced to 2 here
-      assertEquals(2, ratisClient.getCommitInfoMap().size());
-      clientManager.releaseClient(xceiverClient, false);
-      String output = logCapturer.getOutput();
-      assertThat(output).contains("3 way commit failed");
-      assertThat(output).contains("TimeoutException");
-      assertThat(output).contains("Committed by majority");
+        // commitInfo Map will be reduced to 2 here
+        if (watchType == RaftProtos.ReplicationLevel.ALL_COMMITTED) {
+          assertEquals(2, ratisClient.getCommitInfoMap().size());
+          String output = logCapturer.getOutput();
+          assertThat(output).contains("ALL_COMMITTED way commit failed");
+          assertThat(output).contains("TimeoutException");
+          assertThat(output).contains("Committed by majority");
+        } else {
+          assertEquals(3, ratisClient.getCommitInfoMap().size());
+        }
+      } finally {
+        clientManager.releaseClient(xceiverClient, false);
+      }
     }
     logCapturer.stopCapturing();
   }
@@ -355,31 +375,29 @@ public class TestWatchForCommit {
               HddsProtos.ReplicationFactor.THREE, OzoneConsts.OZONE);
       XceiverClientSpi xceiverClient = clientManager
           .acquireClient(container1.getPipeline());
-      assertEquals(1, xceiverClient.getRefcount());
-      assertEquals(container1.getPipeline(), xceiverClient.getPipeline());
-      Pipeline pipeline = xceiverClient.getPipeline();
-      XceiverClientRatis ratisClient = (XceiverClientRatis) xceiverClient;
-      long containerId = container1.getContainerInfo().getContainerID();
-      XceiverClientReply reply = xceiverClient.sendCommandAsync(
-          ContainerTestHelper.getCreateContainerRequest(containerId,
-              xceiverClient.getPipeline()));
-      reply.getResponse().get();
-      assertEquals(3, ratisClient.getCommitInfoMap().size());
-      List<Pipeline> pipelineList = new ArrayList<>();
-      pipelineList.add(pipeline);
-      TestHelper.waitForPipelineClose(pipelineList, cluster);
       try {
+        assertEquals(1, xceiverClient.getRefcount());
+        assertEquals(container1.getPipeline(), xceiverClient.getPipeline());
+        Pipeline pipeline = xceiverClient.getPipeline();
+        XceiverClientRatis ratisClient = (XceiverClientRatis) xceiverClient;
+        long containerId = container1.getContainerInfo().getContainerID();
+        XceiverClientReply reply = xceiverClient.sendCommandAsync(
+            ContainerTestHelper.getCreateContainerRequest(containerId,
+                xceiverClient.getPipeline()));
+        reply.getResponse().get();
+        assertEquals(3, ratisClient.getCommitInfoMap().size());
+        List<Pipeline> pipelineList = new ArrayList<>();
+        pipelineList.add(pipeline);
+        TestHelper.waitForPipelineClose(pipelineList, cluster);
         // just watch for a log index which in not updated in the commitInfo Map
         // as well as there is no logIndex generate in Ratis.
         // The basic idea here is just to test if its throws an exception.
-        xceiverClient
-            .watchForCommit(reply.getLogIndex() +
-                new Random().nextInt(100) + 10);
-        fail("Expected exception not thrown");
-      } catch (Exception e) {
+        final Exception e = assertThrows(Exception.class,
+            () -> xceiverClient.watchForCommit(reply.getLogIndex() + RandomUtils.nextInt(0, 100) + 10).get());
         assertInstanceOf(GroupMismatchException.class, HddsClientUtils.checkForException(e));
+      } finally {
+        clientManager.releaseClient(xceiverClient, false);
       }
-      clientManager.releaseClient(xceiverClient, false);
     }
   }
 

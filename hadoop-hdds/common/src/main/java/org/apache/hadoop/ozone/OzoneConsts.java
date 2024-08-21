@@ -115,20 +115,21 @@ public final class OzoneConsts {
   public static final String CHUNK_OVERWRITE = "OverWriteRequested";
 
   public static final int CHUNK_SIZE = 1 * 1024 * 1024; // 1 MB
+  // for client and DataNode to label a block contains a incremental chunk list.
+  public static final String INCREMENTAL_CHUNK_LIST = "incremental";
   public static final long KB = 1024L;
   public static final long MB = KB * 1024L;
   public static final long GB = MB * 1024L;
   public static final long TB = GB * 1024L;
+  public static final long PB = TB * 1024L;
+  public static final long EB = PB * 1024L;
 
   /**
    * level DB names used by SCM and data nodes.
    */
   public static final String CONTAINER_DB_SUFFIX = "container.db";
   public static final String PIPELINE_DB_SUFFIX = "pipeline.db";
-  public static final String CRL_DB_SUFFIX = "crl.db";
   public static final String DN_CONTAINER_DB = "-dn-" + CONTAINER_DB_SUFFIX;
-  public static final String DN_CRL_DB = "dn-" + CRL_DB_SUFFIX;
-  public static final String CRL_DB_DIRECTORY_NAME = "crl";
   public static final String OM_DB_NAME = "om.db";
   public static final String SCM_DB_NAME = "scm.db";
   public static final String OM_DB_BACKUP_PREFIX = "om.db.backup.";
@@ -147,17 +148,6 @@ public final class OzoneConsts {
       "#RANGEROZONESERVICEVERSION";
 
   public static final String MULTIPART_FORM_DATA_BOUNDARY = "---XXX";
-
-  /**
-   * Supports Bucket Versioning.
-   */
-  public enum Versioning {
-    NOT_DEFINED, ENABLED, DISABLED;
-
-    public static Versioning getVersioning(boolean versioning) {
-      return versioning ? ENABLED : DISABLED;
-    }
-  }
 
   // Block ID prefixes used in datanode containers.
   public static final String DELETING_KEY_PREFIX = "#deleting#";
@@ -354,6 +344,7 @@ public final class OzoneConsts {
   public static final String BUCKET_LAYOUT = "bucketLayout";
   public static final String TENANT = "tenant";
   public static final String USER_PREFIX = "userPrefix";
+  public static final String REWRITE_GENERATION = "rewriteGeneration";
 
   // For multi-tenancy
   public static final String TENANT_ID_USERNAME_DELIMITER = "$";
@@ -397,6 +388,10 @@ public final class OzoneConsts {
 
   /** Metadata stored in OmKeyInfo. */
   public static final String HSYNC_CLIENT_ID = "hsyncClientId";
+  public static final String LEASE_RECOVERY = "leaseRecovery";
+  public static final String DELETED_HSYNC_KEY = "deletedHsyncKey";
+  public static final String OVERWRITTEN_HSYNC_KEY = "overwrittenHsyncKey";
+  public static final String FORCE_LEASE_RECOVERY_ENV = "OZONE.CLIENT.RECOVER.LEASE.FORCE";
 
   //GDPR
   public static final String GDPR_FLAG = "gdprEnabled";
@@ -460,9 +455,6 @@ public final class OzoneConsts {
   // in non-HA style.
   public static final String SCM_DUMMY_NODEID = "scmNodeId";
   public static final String SCM_DUMMY_SERVICE_ID = "scmServiceId";
-
-  // CRL Sequence Id
-  public static final String CRL_SEQUENCE_ID_KEY = "CRL_SEQUENCE_ID";
 
   public static final String SCM_CA_PATH = "ca";
   public static final String SCM_CA_CERT_STORAGE_DIR = "scm";
@@ -598,4 +590,9 @@ public final class OzoneConsts {
    */
   public static final String COMPACTION_LOG_TABLE =
       "compactionLogTable";
+
+  /**
+   * S3G multipart upload request's ETag header key.
+   */
+  public static final String ETAG = "ETag";
 }

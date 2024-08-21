@@ -26,16 +26,27 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 
+import org.apache.hadoop.hdds.utils.LegacyHadoopConfigurationSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HANDLER_COUNT_KEY;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HANDLER_COUNT_DEFAULT;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_CLIENT_HANDLER_COUNT_KEY;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_BLOCK_HANDLER_COUNT_KEY;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_DATANODE_HANDLER_COUNT_KEY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -47,6 +58,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
  * Test class for OzoneConfiguration.
  */
 public class TestOzoneConfiguration {
+
+  private static final Logger LOG = LoggerFactory.getLogger(
+      TestOzoneConfiguration.class);
 
   private OzoneConfiguration conf;
 
@@ -136,6 +150,67 @@ public class TestOzoneConfiguration {
     assertSame(Integer.class, configuration.getMyClass());
     assertEquals(10.5, configuration.getThreshold());
     assertEquals(Duration.ofSeconds(3), configuration.getDuration());
+  }
+
+  @Test
+  public void testRestrictedComplianceModeWithOzoneConf() {
+    Configuration config = new Configuration();
+    config.set("ozone.security.crypto.compliance.mode", "restricted");
+    OzoneConfiguration ozoneConfig = new OzoneConfiguration(config);
+
+    // Set it to an allowed config value
+    ozoneConfig.set("hdds.x509.signature.algorithm", "SHA512withDCA");
+    ozoneConfig.set("hdds.x509.signature.algorithm.restricted.whitelist", "SHA512withRSA,SHA512withDCA");
+
+    assertEquals("restricted", ozoneConfig.get("ozone.security.crypto.compliance.mode"));
+    assertEquals("SHA512withRSA,SHA512withDCA", ozoneConfig.get("hdds.x509.signature.algorithm.restricted.whitelist"));
+    assertEquals("SHA512withDCA", ozoneConfig.get("hdds.x509.signature.algorithm"));
+
+    // Set it to a disallowed config value
+    ozoneConfig.set("hdds.x509.signature.algorithm", "SHA256withRSA");
+
+    assertThrows(ConfigurationException.class, () -> ozoneConfig.get("hdds.x509.signature.algorithm"));
+
+    // Check it with a Hadoop Configuration
+    Configuration hadoopConfig =
+        LegacyHadoopConfigurationSource.asHadoopConfiguration(ozoneConfig);
+    assertThrows(ConfigurationException.class, () -> hadoopConfig.get("hdds.x509.signature.algorithm"));
+  }
+
+  @Test
+  public void testRestrictedComplianceModeWithLegacyHadoopConf() {
+    Configuration config = new Configuration();
+    config.addResource("ozone-default.xml");
+    config.set("ozone.security.crypto.compliance.mode", "restricted");
+    LegacyHadoopConfigurationSource legacyHadoopConf = new LegacyHadoopConfigurationSource(config);
+
+    // Set it to an allowed config value
+    legacyHadoopConf.set("hdds.x509.signature.algorithm", "SHA512withDCA");
+    legacyHadoopConf.set("hdds.x509.signature.algorithm.restricted.whitelist", "SHA512withRSA,SHA512withDCA");
+
+    assertEquals("restricted", legacyHadoopConf.get("ozone.security.crypto.compliance.mode"));
+    assertEquals("SHA512withRSA,SHA512withDCA",
+        legacyHadoopConf.get("hdds.x509.signature.algorithm.restricted.whitelist"));
+    assertEquals("SHA512withDCA", legacyHadoopConf.get("hdds.x509.signature.algorithm"));
+
+    // Set it to a disallowed config value
+    legacyHadoopConf.set("hdds.x509.signature.algorithm", "SHA256withRSA");
+
+    assertThrows(ConfigurationException.class, () -> legacyHadoopConf.get("hdds.x509.signature.algorithm"));
+
+    // Check it with a Hadoop Configuration
+    Configuration legacyConf = LegacyHadoopConfigurationSource.asHadoopConfiguration(legacyHadoopConf);
+    assertThrows(ConfigurationException.class, () -> legacyConf.get("hdds.x509.signature.algorithm"));
+  }
+
+  @Test
+  public void testUnrestrictedComplianceMode() {
+    OzoneConfiguration ozoneConfig = new OzoneConfiguration();
+    ozoneConfig.set("hdds.x509.signature.algorithm", "SHA256");
+    ozoneConfig.set("hdds.x509.signature.algorithm.unrestricted.whitelist", "SHA512withRSA");
+
+    assertEquals(ozoneConfig.get("hdds.x509.signature.algorithm"), "SHA256");
+    assertEquals(ozoneConfig.get("ozone.security.crypto.compliance.mode"), "unrestricted");
   }
 
   @Test
@@ -248,6 +323,30 @@ public class TestOzoneConfiguration {
     assertEquals(0, subject.getInt("test.scm.client.port", 123));
     assertEquals(0, subject.getTimeDuration("test.scm.client.wait", 555, TimeUnit.SECONDS));
     assertEquals(0, subject.getDouble("test.scm.client.threshold", 20.5));
+  }
+
+  private static Stream<Arguments> getIntBackwardCompatibilityScenarios() {
+    return Stream.of(
+        Arguments.of(OZONE_SCM_CLIENT_HANDLER_COUNT_KEY, 10, true,
+            OZONE_SCM_HANDLER_COUNT_KEY, 10, OZONE_SCM_HANDLER_COUNT_DEFAULT),
+        Arguments.of(OZONE_SCM_BLOCK_HANDLER_COUNT_KEY, -1, false,
+            OZONE_SCM_HANDLER_COUNT_KEY, OZONE_SCM_HANDLER_COUNT_DEFAULT,
+                OZONE_SCM_HANDLER_COUNT_DEFAULT),
+        Arguments.of(OZONE_SCM_DATANODE_HANDLER_COUNT_KEY, 105, true,
+            OZONE_SCM_HANDLER_COUNT_KEY, 105, OZONE_SCM_HANDLER_COUNT_DEFAULT)
+    );
+  }
+
+  @ParameterizedTest
+  @MethodSource("getIntBackwardCompatibilityScenarios")
+  public void testGetIntBackwardCompatibility(String name, int newVal,
+      boolean isGen, String fallbackName, int targetVal, int defaultVal) {
+    OzoneConfiguration ozoneConfig = new OzoneConfiguration();
+    if (isGen) {
+      ozoneConfig.setInt(name, newVal);
+    }
+    int value = ozoneConfig.getInt(name, fallbackName, defaultVal, LOG::info);
+    assertEquals(value, targetVal);
   }
 
   @Test

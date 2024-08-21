@@ -26,7 +26,6 @@ import org.apache.hadoop.hdds.utils.BackgroundTaskResult;
 import org.apache.hadoop.hdds.utils.db.Table;
 import org.apache.hadoop.hdds.utils.db.Table.KeyValue;
 import org.apache.hadoop.hdds.utils.db.TableIterator;
-import org.apache.hadoop.ozone.om.IOmMetadataReader;
 import org.apache.hadoop.ozone.om.OMConfigKeys;
 import org.apache.hadoop.ozone.om.OmMetadataManagerImpl;
 import org.apache.hadoop.ozone.om.OmSnapshot;
@@ -35,7 +34,6 @@ import org.apache.hadoop.ozone.om.OzoneManager;
 import org.apache.hadoop.ozone.om.helpers.OmDirectoryInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.snapshot.ReferenceCounted;
-import org.apache.hadoop.ozone.om.snapshot.SnapshotCache;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.PurgePathRequest;
 import org.apache.hadoop.util.Time;
 import org.apache.ratis.protocol.ClientId;
@@ -156,13 +154,6 @@ public class DirectoryDeletingService extends AbstractKeyDeletingService {
         List<Pair<String, OmKeyInfo>> allSubDirList
             = new ArrayList<>((int) remainNum);
 
-        // Acquire active DB deletedDirectoryTable write lock because of the
-        // deletedDirTable read-write here to avoid interleaving with
-        // the table range delete operation in createOmSnapshotCheckpoint()
-        // that is called from OMSnapshotCreateResponse#addToDBBatch.
-        getOzoneManager().getMetadataManager().getTableLock(
-            OmMetadataManagerImpl.DELETED_DIR_TABLE).writeLock().lock();
-
         Table.KeyValue<String, OmKeyInfo> pendingDeletedDirInfo;
         try (TableIterator<String, ? extends KeyValue<String, OmKeyInfo>>
                  deleteTableIterator = getOzoneManager().getMetadataManager().
@@ -218,10 +209,6 @@ public class DirectoryDeletingService extends AbstractKeyDeletingService {
         } catch (IOException e) {
           LOG.error("Error while running delete directories and files " +
               "background task. Will retry at next run.", e);
-        } finally {
-          // Release deletedDirectoryTable write lock
-          getOzoneManager().getMetadataManager().getTableLock(
-              OmMetadataManagerImpl.DELETED_DIR_TABLE).writeLock().unlock();
         }
       }
 
@@ -238,7 +225,7 @@ public class DirectoryDeletingService extends AbstractKeyDeletingService {
       OmMetadataManagerImpl metadataManager = (OmMetadataManagerImpl)
           getOzoneManager().getMetadataManager();
 
-      try (ReferenceCounted<IOmMetadataReader, SnapshotCache> rcLatestSnapshot =
+      try (ReferenceCounted<OmSnapshot> rcLatestSnapshot =
           metadataManager.getLatestActiveSnapshot(
               deletedDirInfo.getVolumeName(),
               deletedDirInfo.getBucketName(),
@@ -249,11 +236,9 @@ public class DirectoryDeletingService extends AbstractKeyDeletingService {
               .getRenameKey(deletedDirInfo.getVolumeName(),
                   deletedDirInfo.getBucketName(), deletedDirInfo.getObjectID());
           Table<String, OmDirectoryInfo> prevDirTable =
-              ((OmSnapshot) rcLatestSnapshot.get())
-                  .getMetadataManager().getDirectoryTable();
+              rcLatestSnapshot.get().getMetadataManager().getDirectoryTable();
           Table<String, OmKeyInfo> prevDeletedDirTable =
-              ((OmSnapshot) rcLatestSnapshot.get())
-                  .getMetadataManager().getDeletedDirTable();
+              rcLatestSnapshot.get().getMetadataManager().getDeletedDirTable();
           OmKeyInfo prevDeletedDirInfo = prevDeletedDirTable.get(key);
           if (prevDeletedDirInfo != null) {
             return true;

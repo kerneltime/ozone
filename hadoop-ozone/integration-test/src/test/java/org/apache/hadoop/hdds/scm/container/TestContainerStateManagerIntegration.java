@@ -50,12 +50,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeoutException;
 
 import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_DATANODE_PIPELINE_LIMIT;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Tests for ContainerStateManager.
@@ -214,7 +213,7 @@ public class TestContainerStateManagerIntegration {
       ContainerInfo info = containerManager
           .getMatchingContainer(OzoneConsts.GB * 3, OzoneConsts.OZONE,
               container1.getPipeline());
-      assertTrue(info.getContainerID() > cid);
+      assertThat(info.getContainerID()).isGreaterThan(cid);
       cid = info.getContainerID();
     }
 
@@ -253,9 +252,8 @@ public class TestContainerStateManagerIntegration {
 
     // make sure pipeline has has numContainerPerOwnerInPipeline number of
     // containers.
-    assertEquals(scm.getPipelineManager()
-            .getNumberOfContainers(container1.getPipeline().getId()),
-        numContainerPerOwnerInPipeline);
+    assertEquals(numContainerPerOwnerInPipeline, scm.getPipelineManager()
+            .getNumberOfContainers(container1.getPipeline().getId()));
     Thread.sleep(5000);
     long threshold = 2000;
     // check the way the block allocations are distributed in the different
@@ -264,10 +262,9 @@ public class TestContainerStateManagerIntegration {
       // TODO: #CLUTIL Look at the division of block allocations in different
       // containers.
       LOG.error("Total allocated block = " + matchedCount);
-      assertTrue(matchedCount <=
-          numBlockAllocates / container2MatchedCount.size() + threshold
-          && matchedCount >=
-          numBlockAllocates / container2MatchedCount.size() - threshold);
+      assertThat(matchedCount)
+          .isLessThanOrEqualTo(numBlockAllocates / container2MatchedCount.size() + threshold)
+          .isGreaterThanOrEqualTo(numBlockAllocates / container2MatchedCount.size() - threshold);
     }
   }
 
@@ -375,43 +372,43 @@ public class TestContainerStateManagerIntegration {
     containerStateManager.updateContainerReplica(id, replicaTwo);
     replicaSet = containerStateManager.getContainerReplicas(id);
     assertEquals(2, replicaSet.size());
-    assertTrue(replicaSet.contains(replicaOne));
-    assertTrue(replicaSet.contains(replicaTwo));
+    assertThat(replicaSet).contains(replicaOne);
+    assertThat(replicaSet).contains(replicaTwo);
 
     // Test 3: Remove one replica node and then test
     containerStateManager.removeContainerReplica(id, replicaOne);
     replicaSet = containerStateManager.getContainerReplicas(id);
     assertEquals(1, replicaSet.size());
-    assertFalse(replicaSet.contains(replicaOne));
-    assertTrue(replicaSet.contains(replicaTwo));
+    assertThat(replicaSet).doesNotContain(replicaOne);
+    assertThat(replicaSet).contains(replicaTwo);
 
     // Test 3: Remove second replica node and then test
     containerStateManager.removeContainerReplica(id, replicaTwo);
     replicaSet = containerStateManager.getContainerReplicas(id);
     assertEquals(0, replicaSet.size());
-    assertFalse(replicaSet.contains(replicaOne));
-    assertFalse(replicaSet.contains(replicaTwo));
+    assertThat(replicaSet).doesNotContain(replicaOne);
+    assertThat(replicaSet).doesNotContain(replicaTwo);
 
     // Test 4: Re-insert dn1
     containerStateManager.updateContainerReplica(id, replicaOne);
     replicaSet = containerStateManager.getContainerReplicas(id);
     assertEquals(1, replicaSet.size());
-    assertTrue(replicaSet.contains(replicaOne));
-    assertFalse(replicaSet.contains(replicaTwo));
+    assertThat(replicaSet).contains(replicaOne);
+    assertThat(replicaSet).doesNotContain(replicaTwo);
 
     // Re-insert dn2
     containerStateManager.updateContainerReplica(id, replicaTwo);
     replicaSet = containerStateManager.getContainerReplicas(id);
     assertEquals(2, replicaSet.size());
-    assertTrue(replicaSet.contains(replicaOne));
-    assertTrue(replicaSet.contains(replicaTwo));
+    assertThat(replicaSet).contains(replicaOne);
+    assertThat(replicaSet).contains(replicaTwo);
 
     // Re-insert dn1
     containerStateManager.updateContainerReplica(id, replicaOne);
     replicaSet = containerStateManager.getContainerReplicas(id);
     assertEquals(2, replicaSet.size());
-    assertTrue(replicaSet.contains(replicaOne));
-    assertTrue(replicaSet.contains(replicaTwo));
+    assertThat(replicaSet).contains(replicaOne);
+    assertThat(replicaSet).contains(replicaTwo);
   }
 
 }

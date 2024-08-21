@@ -53,6 +53,8 @@ import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.WriteChunk
 import org.apache.hadoop.hdds.scm.ByteStringConversion;
 import org.apache.hadoop.hdds.scm.ScmConfigKeys;
 import org.apache.hadoop.hdds.scm.container.common.helpers.StorageContainerException;
+import org.apache.hadoop.hdds.upgrade.HDDSLayoutFeature;
+import org.apache.hadoop.hdds.utils.FaultInjector;
 import org.apache.hadoop.hdds.utils.HddsServerUtil;
 import org.apache.hadoop.ozone.OzoneConfigKeys;
 import org.apache.hadoop.ozone.common.Checksum;
@@ -100,8 +102,11 @@ import static org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.Res
 import static org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.Result.INVALID_CONTAINER_STATE;
 import static org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.Result.IO_EXCEPTION;
 import static org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.Result.PUT_SMALL_FILE_ERROR;
+import static org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.Result.UNSUPPORTED_REQUEST;
 import static org.apache.hadoop.hdds.scm.protocolPB.ContainerCommandResponseBuilders.getBlockDataResponse;
 import static org.apache.hadoop.hdds.scm.protocolPB.ContainerCommandResponseBuilders.getBlockLengthResponse;
+import static org.apache.hadoop.hdds.scm.protocolPB.ContainerCommandResponseBuilders.getEchoResponse;
+import static org.apache.hadoop.hdds.scm.protocolPB.ContainerCommandResponseBuilders.getFinalizeBlockResponse;
 import static org.apache.hadoop.hdds.scm.protocolPB.ContainerCommandResponseBuilders.getGetSmallFileResponseSuccess;
 import static org.apache.hadoop.hdds.scm.protocolPB.ContainerCommandResponseBuilders.getListBlockResponse;
 import static org.apache.hadoop.hdds.scm.protocolPB.ContainerCommandResponseBuilders.getPutFileResponseSuccess;
@@ -109,14 +114,17 @@ import static org.apache.hadoop.hdds.scm.protocolPB.ContainerCommandResponseBuil
 import static org.apache.hadoop.hdds.scm.protocolPB.ContainerCommandResponseBuilders.getReadContainerResponse;
 import static org.apache.hadoop.hdds.scm.protocolPB.ContainerCommandResponseBuilders.getSuccessResponse;
 import static org.apache.hadoop.hdds.scm.protocolPB.ContainerCommandResponseBuilders.getSuccessResponseBuilder;
+import static org.apache.hadoop.hdds.scm.protocolPB.ContainerCommandResponseBuilders.getWriteChunkResponseSuccess;
 import static org.apache.hadoop.hdds.scm.protocolPB.ContainerCommandResponseBuilders.malformedRequest;
 import static org.apache.hadoop.hdds.scm.protocolPB.ContainerCommandResponseBuilders.putBlockResponseSuccess;
 import static org.apache.hadoop.hdds.scm.protocolPB.ContainerCommandResponseBuilders.unsupportedRequest;
 import static org.apache.hadoop.hdds.scm.utils.ClientCommandsUtils.getReadChunkVersion;
 import static org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos
     .ContainerDataProto.State.RECOVERING;
+import static org.apache.hadoop.ozone.ClientVersion.EC_REPLICA_INDEX_REQUIRED_IN_BLOCK_REQUEST;
 import static org.apache.hadoop.ozone.container.common.interfaces.Container.ScanResult;
 
+import org.apache.hadoop.util.Time;
 import org.apache.ratis.statemachine.StateMachine;
 import org.apache.ratis.thirdparty.com.google.protobuf.ByteString;
 import org.slf4j.Logger;
@@ -138,6 +146,7 @@ public class KeyValueHandler extends Handler {
   private final boolean validateChunkChecksumData;
   // A striped lock that is held during container creation.
   private final Striped<Lock> containerCreationLocks;
+  private static FaultInjector injector;
 
   public KeyValueHandler(ConfigurationSource config,
                          String datanodeId,
@@ -164,9 +173,9 @@ public class KeyValueHandler extends Handler {
     // Requests.
     final int threadCountPerDisk = conf.getInt(
         OzoneConfigKeys
-            .DFS_CONTAINER_RATIS_NUM_WRITE_CHUNK_THREADS_PER_VOLUME_KEY,
+            .HDDS_CONTAINER_RATIS_NUM_WRITE_CHUNK_THREADS_PER_VOLUME_KEY,
         OzoneConfigKeys
-            .DFS_CONTAINER_RATIS_NUM_WRITE_CHUNK_THREADS_PER_VOLUME_DEFAULT);
+            .HDDS_CONTAINER_RATIS_NUM_WRITE_CHUNK_THREADS_PER_VOLUME_DEFAULT);
     final int numberOfDisks =
         HddsServerUtil.getDatanodeStorageDirs(conf).size();
     containerCreationLocks = Striped.lazyWeakLock(
@@ -274,6 +283,10 @@ public class KeyValueHandler extends Handler {
       return handler.handleGetSmallFile(request, kvContainer);
     case GetCommittedBlockLength:
       return handler.handleGetCommittedBlockLength(request, kvContainer);
+    case FinalizeBlock:
+      return handler.handleFinalizeBlock(request, kvContainer);
+    case Echo:
+      return handler.handleEcho(request, kvContainer);
     default:
       return null;
     }
@@ -562,6 +575,69 @@ public class KeyValueHandler extends Handler {
     return putBlockResponseSuccess(request, blockDataProto);
   }
 
+  ContainerCommandResponseProto handleFinalizeBlock(
+      ContainerCommandRequestProto request, KeyValueContainer kvContainer) {
+    ContainerCommandResponseProto responseProto = checkFaultInjector(request);
+    if (responseProto != null) {
+      return responseProto;
+    }
+
+    if (!request.hasFinalizeBlock()) {
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Malformed Finalize block request. trace ID: {}",
+            request.getTraceID());
+      }
+      return malformedRequest(request);
+    }
+    ContainerProtos.BlockData responseData;
+
+    try {
+      if (!VersionedDatanodeFeatures.isFinalized(HDDSLayoutFeature.HBASE_SUPPORT)) {
+        throw new StorageContainerException("DataNode has not finalized " +
+            "upgrading to a version that supports block finalization.", UNSUPPORTED_REQUEST);
+      }
+
+      checkContainerOpen(kvContainer);
+      BlockID blockID = BlockID.getFromProtobuf(
+          request.getFinalizeBlock().getBlockID());
+      Preconditions.checkNotNull(blockID);
+
+      LOG.info("Finalized Block request received {} ", blockID);
+
+      responseData = blockManager.getBlock(kvContainer, blockID)
+          .getProtoBufMessage();
+
+      chunkManager.finalizeWriteChunk(kvContainer, blockID);
+      blockManager.finalizeBlock(kvContainer, blockID);
+      kvContainer.getContainerData()
+          .addToFinalizedBlockSet(blockID.getLocalID());
+
+      LOG.info("Block has been finalized {} ", blockID);
+
+    } catch (StorageContainerException ex) {
+      return ContainerUtils.logAndReturnError(LOG, ex, request);
+    } catch (IOException ex) {
+      return ContainerUtils.logAndReturnError(LOG,
+          new StorageContainerException(
+              "Finalize Block failed", ex, IO_EXCEPTION), request);
+    }
+    return getFinalizeBlockResponse(request, responseData);
+  }
+
+  ContainerCommandResponseProto handleEcho(
+      ContainerCommandRequestProto request, KeyValueContainer kvContainer) {
+    return getEchoResponse(request);
+  }
+
+  /**
+   * Checks if a replicaIndex needs to be checked based on the client version for a request.
+   * @param request ContainerCommandRequest object.
+   * @return true if the validation is required for the client version else false.
+   */
+  private boolean replicaIndexCheckRequired(ContainerCommandRequestProto request) {
+    return request.hasVersion() && request.getVersion() >= EC_REPLICA_INDEX_REQUIRED_IN_BLOCK_REQUEST.toProtoValue();
+  }
+
   /**
    * Handle Get Block operation. Calls BlockManager to process the request.
    */
@@ -580,9 +656,10 @@ public class KeyValueHandler extends Handler {
     try {
       BlockID blockID = BlockID.getFromProtobuf(
           request.getGetBlock().getBlockID());
-      checkContainerIsHealthy(kvContainer, blockID, Type.GetBlock);
-      responseData = blockManager.getBlock(kvContainer, blockID)
-          .getProtoBufMessage();
+      if (replicaIndexCheckRequired(request)) {
+        BlockUtils.verifyReplicaIdx(kvContainer, blockID);
+      }
+      responseData = blockManager.getBlock(kvContainer, blockID).getProtoBufMessage();
       final long numBytes = responseData.getSerializedSize();
       metrics.incContainerBytesStats(Type.GetBlock, numBytes);
 
@@ -603,6 +680,12 @@ public class KeyValueHandler extends Handler {
    */
   ContainerCommandResponseProto handleGetCommittedBlockLength(
       ContainerCommandRequestProto request, KeyValueContainer kvContainer) {
+
+    ContainerCommandResponseProto responseProto = checkFaultInjector(request);
+    if (responseProto != null) {
+      return responseProto;
+    }
+
     if (!request.hasGetCommittedBlockLength()) {
       if (LOG.isDebugEnabled()) {
         LOG.debug("Malformed Get Key request. trace ID: {}",
@@ -615,8 +698,6 @@ public class KeyValueHandler extends Handler {
     try {
       BlockID blockID = BlockID
           .getFromProtobuf(request.getGetCommittedBlockLength().getBlockID());
-      checkContainerIsHealthy(kvContainer, blockID,
-          Type.GetCommittedBlockLength);
       BlockUtils.verifyBCSId(kvContainer, blockID);
       blockLength = blockManager.getCommittedBlockLength(kvContainer, blockID);
     } catch (StorageContainerException ex) {
@@ -686,7 +767,6 @@ public class KeyValueHandler extends Handler {
   ContainerCommandResponseProto handleReadChunk(
       ContainerCommandRequestProto request, KeyValueContainer kvContainer,
       DispatcherContext dispatcherContext) {
-
     if (!request.hasReadChunk()) {
       if (LOG.isDebugEnabled()) {
         LOG.debug("Malformed Read Chunk request. trace ID: {}",
@@ -694,7 +774,6 @@ public class KeyValueHandler extends Handler {
       }
       return malformedRequest(request);
     }
-
     ChunkBuffer data;
     try {
       BlockID blockID = BlockID.getFromProtobuf(
@@ -702,9 +781,11 @@ public class KeyValueHandler extends Handler {
       ChunkInfo chunkInfo = ChunkInfo.getFromProtoBuf(request.getReadChunk()
           .getChunkData());
       Preconditions.checkNotNull(chunkInfo);
-
-      checkContainerIsHealthy(kvContainer, blockID, Type.ReadChunk);
+      if (replicaIndexCheckRequired(request)) {
+        BlockUtils.verifyReplicaIdx(kvContainer, blockID);
+      }
       BlockUtils.verifyBCSId(kvContainer, blockID);
+
       if (dispatcherContext == null) {
         dispatcherContext = DispatcherContext.getHandleReadChunk();
       }
@@ -721,11 +802,14 @@ public class KeyValueHandler extends Handler {
 
       data = chunkManager.readChunk(kvContainer, blockID, chunkInfo,
           dispatcherContext);
+      LOG.debug("read chunk from block {} chunk {}", blockID, chunkInfo);
       // Validate data only if the read chunk is issued by Ratis for its
       // internal logic.
       //  For client reads, the client is expected to validate.
       if (DispatcherContext.op(dispatcherContext).readFromTmpFile()) {
         validateChunkChecksumData(data, chunkInfo);
+        metrics.incBytesReadStateMachine(chunkInfo.getLen());
+        metrics.incNumReadStateMachine();
       }
       metrics.incContainerBytesStats(Type.ReadChunk, chunkInfo.getLen());
     } catch (StorageContainerException ex) {
@@ -739,25 +823,6 @@ public class KeyValueHandler extends Handler {
     Preconditions.checkNotNull(data, "Chunk data is null");
 
     return getReadChunkResponse(request, data, byteBufferToByteString);
-  }
-
-  /**
-   * Throw an exception if the container is unhealthy.
-   *
-   * @throws StorageContainerException if the container is unhealthy.
-   */
-  @VisibleForTesting
-  void checkContainerIsHealthy(KeyValueContainer kvContainer, BlockID blockID,
-      Type cmd) {
-    kvContainer.readLock();
-    try {
-      if (kvContainer.getContainerData().getState() == State.UNHEALTHY) {
-        LOG.warn("{} request {} for UNHEALTHY container {} replica", cmd,
-            blockID, kvContainer.getContainerData().getContainerID());
-      }
-    } finally {
-      kvContainer.readUnlock();
-    }
   }
 
   /**
@@ -777,7 +842,7 @@ public class KeyValueHandler extends Handler {
       throws StorageContainerException {
     if (validateChunkChecksumData) {
       try {
-        Checksum.verifyChecksum(data, info.getChecksumData(), 0);
+        Checksum.verifyChecksum(data.duplicate(data.position(), data.limit()), info.getChecksumData(), 0);
       } catch (OzoneChecksumException ex) {
         throw ChunkUtils.wrapInStorageContainerException(ex);
       }
@@ -799,12 +864,14 @@ public class KeyValueHandler extends Handler {
       return malformedRequest(request);
     }
 
+    ContainerProtos.BlockData blockDataProto = null;
     try {
       checkContainerOpen(kvContainer);
 
       WriteChunkRequestProto writeChunk = request.getWriteChunk();
       BlockID blockID = BlockID.getFromProtobuf(writeChunk.getBlockID());
       ContainerProtos.ChunkInfo chunkInfoProto = writeChunk.getChunkData();
+
       ChunkInfo chunkInfo = ChunkInfo.getFromProtoBuf(chunkInfoProto);
       Preconditions.checkNotNull(chunkInfo);
 
@@ -821,6 +888,28 @@ public class KeyValueHandler extends Handler {
       chunkManager
           .writeChunk(kvContainer, blockID, chunkInfo, data, dispatcherContext);
 
+      final boolean isCommit = dispatcherContext.getStage().isCommit();
+      if (isCommit && writeChunk.hasBlock()) {
+        long startTime = Time.monotonicNowNanos();
+        metrics.incContainerOpsMetrics(Type.PutBlock);
+        BlockData blockData = BlockData.getFromProtoBuf(
+            writeChunk.getBlock().getBlockData());
+        // optimization for hsync when WriteChunk is in commit phase:
+        //
+        // block metadata is piggybacked in the same message.
+        // there will not be an additional PutBlock request.
+        //
+        // do not do this in WRITE_DATA phase otherwise PutBlock will be out
+        // of order.
+        blockData.setBlockCommitSequenceId(dispatcherContext.getLogIndex());
+        boolean eob = writeChunk.getBlock().getEof();
+        blockManager.putBlock(kvContainer, blockData, eob);
+        blockDataProto = blockData.getProtoBufMessage();
+        final long numBytes = blockDataProto.getSerializedSize();
+        metrics.incContainerBytesStats(Type.PutBlock, numBytes);
+        metrics.incContainerOpsLatencies(Type.PutBlock, Time.monotonicNowNanos() - startTime);
+      }
+
       // We should increment stats after writeChunk
       if (isWrite) {
         metrics.incContainerBytesStats(Type.WriteChunk, writeChunk
@@ -834,7 +923,7 @@ public class KeyValueHandler extends Handler {
           request);
     }
 
-    return getSuccessResponse(request);
+    return getWriteChunkResponseSuccess(request, blockDataProto);
   }
 
   /**
@@ -877,9 +966,9 @@ public class KeyValueHandler extends Handler {
 
       // chunks will be committed as a part of handling putSmallFile
       // here. There is no need to maintain this info in openContainerBlockMap.
+      validateChunkChecksumData(data, chunkInfo);
       chunkManager
           .writeChunk(kvContainer, blockID, chunkInfo, data, dispatcherContext);
-      validateChunkChecksumData(data, chunkInfo);
       chunkManager.finishWriteChunks(kvContainer, blockData);
 
       List<ContainerProtos.ChunkInfo> chunks = new LinkedList<>();
@@ -923,7 +1012,6 @@ public class KeyValueHandler extends Handler {
     try {
       BlockID blockID = BlockID.getFromProtobuf(getSmallFileReq.getBlock()
           .getBlockID());
-      checkContainerIsHealthy(kvContainer, blockID, Type.GetSmallFile);
       BlockData responseData = blockManager.getBlock(kvContainer, blockID);
 
       ContainerProtos.ChunkInfo chunkInfoProto = null;
@@ -1233,6 +1321,16 @@ public class KeyValueHandler extends Handler {
     }
   }
 
+  public void addFinalizedBlock(Container container, long localID) {
+    KeyValueContainer keyValueContainer = (KeyValueContainer)container;
+    keyValueContainer.getContainerData().addToFinalizedBlockSet(localID);
+  }
+
+  public boolean isFinalizedBlockExist(Container container, long localID) {
+    KeyValueContainer keyValueContainer = (KeyValueContainer)container;
+    return keyValueContainer.getContainerData().isFinalizedBlockExist(localID);
+  }
+
   private String[] getFilesWithPrefix(String prefix, File chunkDir) {
     FilenameFilter filter = (dir, name) -> name.startsWith(prefix);
     return chunkDir.list(filter);
@@ -1391,8 +1489,40 @@ public class KeyValueHandler extends Handler {
     throw new StorageContainerException(msg, result);
   }
 
+  private ContainerCommandResponseProto checkFaultInjector(ContainerCommandRequestProto request) {
+    if (injector != null) {
+      synchronized (injector) {
+        ContainerProtos.Type type = injector.getType();
+        if (request.getCmdType().equals(type) || type == null) {
+          Throwable ex = injector.getException();
+          if (ex != null) {
+            if (type == null) {
+              injector = null;
+            }
+            return ContainerUtils.logAndReturnError(LOG, (StorageContainerException) ex, request);
+          }
+          try {
+            injector.pause();
+          } catch (IOException e) {
+            // do nothing
+          }
+        }
+      }
+    }
+    return null;
+  }
+
   public static Logger getLogger() {
     return LOG;
   }
 
+  @VisibleForTesting
+  public static FaultInjector getInjector() {
+    return injector;
+  }
+
+  @VisibleForTesting
+  public static void setInjector(FaultInjector instance) {
+    injector = instance;
+  }
 }

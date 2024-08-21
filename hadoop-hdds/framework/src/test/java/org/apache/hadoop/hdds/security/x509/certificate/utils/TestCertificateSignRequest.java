@@ -19,7 +19,6 @@
 package org.apache.hadoop.hdds.security.x509.certificate.utils;
 
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
-import org.apache.hadoop.hdds.security.exception.SCMSecurityException;
 import org.apache.hadoop.hdds.security.SecurityConfig;
 import org.apache.hadoop.hdds.security.x509.keys.HDDSKeyGenerator;
 import org.bouncycastle.asn1.ASN1Encodable;
@@ -33,10 +32,8 @@ import org.bouncycastle.asn1.x509.GeneralName;
 import org.bouncycastle.asn1.x509.GeneralNames;
 import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
 import org.bouncycastle.operator.ContentVerifierProvider;
-import org.bouncycastle.operator.OperatorCreationException;
 import org.bouncycastle.operator.jcajce.JcaContentVerifierProviderBuilder;
 import org.bouncycastle.pkcs.PKCS10CertificationRequest;
-import org.bouncycastle.pkcs.PKCSException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -44,8 +41,6 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.security.KeyPair;
-import java.security.NoSuchAlgorithmException;
-import java.security.NoSuchProviderException;
 import java.util.Iterator;
 import java.util.UUID;
 
@@ -54,6 +49,7 @@ import static org.apache.hadoop.hdds.security.x509.certificate.utils.Certificate
 import static org.apache.hadoop.hdds.security.x509.certificate.utils.CertificateSignRequest.getPkcs9Extensions;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -72,9 +68,7 @@ public class TestCertificateSignRequest {
   }
 
   @Test
-  public void testGenerateCSR() throws NoSuchProviderException,
-      NoSuchAlgorithmException, SCMSecurityException,
-      OperatorCreationException, PKCSException {
+  public void testGenerateCSR() throws Exception {
     String clusterID = UUID.randomUUID().toString();
     String scmID = UUID.randomUUID().toString();
     String subject = "DN001";
@@ -89,7 +83,8 @@ public class TestCertificateSignRequest {
             .setClusterID(clusterID)
             .setKey(keyPair)
             .setConfiguration(securityConfig);
-    PKCS10CertificationRequest csr = builder.build();
+    //TODO: generateCSR!
+    PKCS10CertificationRequest csr = builder.build().generateCSR();
 
     // Check the Subject Name is in the expected format.
     String dnName = String.format(getDistinguishedNameFormat(),
@@ -123,9 +118,7 @@ public class TestCertificateSignRequest {
   }
 
   @Test
-  public void testGenerateCSRwithSan() throws NoSuchProviderException,
-      NoSuchAlgorithmException, SCMSecurityException,
-      OperatorCreationException, PKCSException {
+  public void testGenerateCSRwithSan() throws Exception {
     String clusterID = UUID.randomUUID().toString();
     String scmID = UUID.randomUUID().toString();
     String subject = "DN001";
@@ -148,7 +141,8 @@ public class TestCertificateSignRequest {
 
     builder.addDnsName("dn1.abc.com");
 
-    PKCS10CertificationRequest csr = builder.build();
+    //TODO: generateCSR!
+    PKCS10CertificationRequest csr = builder.build().generateCSR();
 
     // Check the Subject Name is in the expected format.
     String dnName = String.format(getDistinguishedNameFormat(),
@@ -180,8 +174,7 @@ public class TestCertificateSignRequest {
   }
 
   @Test
-  public void testGenerateCSRWithInvalidParams() throws NoSuchProviderException,
-      NoSuchAlgorithmException, SCMSecurityException {
+  public void testGenerateCSRWithInvalidParams() throws Exception {
     String clusterID = UUID.randomUUID().toString();
     String scmID = UUID.randomUUID().toString();
     String subject = "DN001";
@@ -206,31 +199,26 @@ public class TestCertificateSignRequest {
     }
 
     // Now try with blank/null Subject.
-    try {
+    assertThrows(IllegalArgumentException.class, () -> {
       builder.setSubject(null);
       builder.build();
-      fail("Null/Blank Subject should have thrown.");
-    } catch (IllegalArgumentException e) {
-      builder.setSubject(subject);
-    }
+    });
+    builder.setSubject(subject);
 
-    try {
+    assertThrows(IllegalArgumentException.class, () -> {
       builder.setSubject("");
       builder.build();
-      fail("Null/Blank Subject should have thrown.");
-    } catch (IllegalArgumentException e) {
-      builder.setSubject(subject);
-    }
+    });
+    builder.setSubject(subject);
 
     // Now try with invalid IP address
-    try {
+    assertThrows(IllegalArgumentException.class, () -> {
       builder.addIpAddress("255.255.255.*");
       builder.build();
-      fail("Invalid ip address");
-    } catch (IllegalArgumentException e) {
-    }
+    });
 
-    PKCS10CertificationRequest csr = builder.build();
+    //TODO: generateCSR!
+    PKCS10CertificationRequest csr = builder.build().generateCSR();
 
     // Check the Subject Name is in the expected format.
     String dnName = String.format(getDistinguishedNameFormat(),
@@ -249,8 +237,7 @@ public class TestCertificateSignRequest {
   }
 
   @Test
-  public void testCsrSerialization() throws NoSuchProviderException,
-      NoSuchAlgorithmException, SCMSecurityException, IOException {
+  public void testCsrSerialization() throws Exception {
     String clusterID = UUID.randomUUID().toString();
     String scmID = UUID.randomUUID().toString();
     String subject = "DN001";
@@ -266,7 +253,8 @@ public class TestCertificateSignRequest {
             .setKey(keyPair)
             .setConfiguration(securityConfig);
 
-    PKCS10CertificationRequest csr = builder.build();
+    //TODO: generateCSR!
+    PKCS10CertificationRequest csr = builder.build().generateCSR();
     byte[] csrBytes = csr.getEncoded();
 
     // Verify de-serialized CSR matches with the original CSR
@@ -290,7 +278,7 @@ public class TestCertificateSignRequest {
             assertEquals("2.16.840.1.113730.3.1.34", oid);
           }
           if (o instanceof DERTaggedObject) {
-            String serviceName = ((DERTaggedObject)o).getObject().toString();
+            String serviceName = ((DERTaggedObject)o).toASN1Primitive().toString();
             assertEquals("OzoneMarketingCluster003", serviceName);
           }
         }

@@ -112,10 +112,11 @@ import static org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.Res
 import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.BlockTokenSecretProto.AccessModeProto.READ;
 import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.BlockTokenSecretProto.AccessModeProto.WRITE;
 import static org.apache.hadoop.ozone.container.ContainerTestHelper.newWriteChunkRequestBuilder;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * This class tests container commands on EC containers.
@@ -129,15 +130,15 @@ public class TestContainerCommandsEC {
   private static ObjectStore store;
   private static StorageContainerLocationProtocolClientSideTranslatorPB
       storageContainerLocationClient;
-  private static final String SCM_ID = UUID.randomUUID().toString();
-  private static final String CLUSTER_ID = UUID.randomUUID().toString();
   private static final int EC_DATA = 3;
   private static final int EC_PARITY = 2;
   private static final EcCodec EC_CODEC = EcCodec.RS;
   private static final int EC_CHUNK_SIZE = 1024 * 1024;
   private static final int STRIPE_DATA_SIZE = EC_DATA * EC_CHUNK_SIZE;
   private static final int NUM_DN = EC_DATA + EC_PARITY + 3;
-  private static byte[][] inputChunks = new byte[EC_DATA][EC_CHUNK_SIZE];
+  // Data slots are EC_DATA + 1 so we can generate enough data to have a full stripe
+  // plus one extra chunk.
+  private static byte[][] inputChunks = new byte[EC_DATA + 1][EC_CHUNK_SIZE];
 
   // Each key size will be in range [min, max), min inclusive, max exclusive
   private static final int[][] KEY_SIZE_RANGES =
@@ -166,6 +167,7 @@ public class TestContainerCommandsEC {
   public static void init() throws Exception {
     config = new OzoneConfiguration();
     config.setInt(ScmConfigKeys.OZONE_SCM_PIPELINE_OWNER_CONTAINER_COUNT, 1);
+    config.setTimeDuration(ScmConfigKeys.OZONE_SCM_STALENODE_INTERVAL, 3, TimeUnit.SECONDS);
     config.setBoolean(OzoneConfigKeys.OZONE_ACL_ENABLED, true);
     config.set(OzoneConfigKeys.OZONE_ACL_AUTHORIZER_CLASS,
         OzoneConfigKeys.OZONE_ACL_AUTHORIZER_CLASS_NATIVE);
@@ -423,17 +425,17 @@ public class TestContainerCommandsEC {
       ListBlockResponseProto response = ContainerProtocolCalls
           .listBlock(clients.get(i), containerID, null, Integer.MAX_VALUE,
               containerToken);
-      assertTrue(
-          minNumExpectedBlocks <= response.getBlockDataList().stream().filter(
+      assertThat(minNumExpectedBlocks)
+          .withFailMessage("blocks count should be same or more than min expected" +
+               " blocks count on DN " + i)
+          .isLessThanOrEqualTo(response.getBlockDataList().stream().filter(
               k -> k.getChunksCount() > 0 && k.getChunks(0).getLen() > 0)
-              .collect(Collectors.toList()).size(),
-          "blocks count should be same or more than min expected" +
-              " blocks count on DN " + i);
-      assertTrue(
-          minNumExpectedChunks <= response.getBlockDataList().stream()
-              .mapToInt(BlockData::getChunksCount).sum(),
-          "chunks count should be same or more than min expected" +
-              " chunks count on DN " + i);
+              .collect(Collectors.toList()).size());
+      assertThat(minNumExpectedChunks)
+          .withFailMessage("chunks count should be same or more than min expected" +
+              " chunks count on DN " + i)
+          .isLessThanOrEqualTo(response.getBlockDataList().stream()
+              .mapToInt(BlockData::getChunksCount).sum());
     }
   }
 
@@ -451,10 +453,10 @@ public class TestContainerCommandsEC {
           .generateToken(ANY_USER, container.containerID());
       scm.getContainerManager().getContainerStateManager()
           .addContainer(container.getProtobuf());
-
+      int replicaIndex = 4;
       XceiverClientSpi dnClient = xceiverClientManager.acquireClient(
           createSingleNodePipeline(newPipeline, newPipeline.getNodes().get(0),
-              2));
+              replicaIndex));
       try {
         // To create the actual situation, container would have been in closed
         // state at SCM.
@@ -469,7 +471,7 @@ public class TestContainerCommandsEC {
         String encodedToken = cToken.encodeToUrlString();
         ContainerProtocolCalls.createRecoveringContainer(dnClient,
             container.containerID().getProtobuf().getId(),
-            encodedToken, 4);
+            encodedToken, replicaIndex);
 
         BlockID blockID = ContainerTestHelper
             .getTestBlockID(container.containerID().getProtobuf().getId());
@@ -510,7 +512,8 @@ public class TestContainerCommandsEC {
             readContainerResponseProto.getContainerData().getState());
         ContainerProtos.ReadChunkResponseProto readChunkResponseProto =
             ContainerProtocolCalls.readChunk(dnClient,
-                writeChunkRequest.getWriteChunk().getChunkData(), blockID, null,
+                writeChunkRequest.getWriteChunk().getChunkData(),
+                blockID.getDatanodeBlockIDProtobufBuilder().setReplicaIndex(replicaIndex).build(), null,
                 blockToken);
         ByteBuffer[] readOnlyByteBuffersArray = BufferUtils
             .getReadOnlyByteBuffersArray(
@@ -615,12 +618,19 @@ public class TestContainerCommandsEC {
     testECReconstructionCoordinator(missingIndexes, 3);
   }
 
-  @Test
-  void testECReconstructionWithPartialStripe()
-          throws Exception {
-    testECReconstructionCoordinator(ImmutableList.of(4, 5), 1);
+  @ParameterizedTest
+  @MethodSource("recoverableMissingIndexes")
+  void testECReconstructionCoordinatorWithPartialStripe(List<Integer> missingIndexes)
+      throws Exception {
+    testECReconstructionCoordinator(missingIndexes, 1);
   }
 
+  @ParameterizedTest
+  @MethodSource("recoverableMissingIndexes")
+  void testECReconstructionCoordinatorWithFullAndPartialStripe(List<Integer> missingIndexes)
+      throws Exception {
+    testECReconstructionCoordinator(missingIndexes, 4);
+  }
 
   static Stream<List<Integer>> recoverableMissingIndexes() {
     return Stream
@@ -797,7 +807,7 @@ public class TestContainerCommandsEC {
     try (OzoneOutputStream out = bucket.createKey(keyString, 4096,
         new ECReplicationConfig(3, 2, EcCodec.RS, EC_CHUNK_SIZE),
         new HashMap<>())) {
-      assertTrue(out.getOutputStream() instanceof KeyOutputStream);
+      assertInstanceOf(KeyOutputStream.class, out.getOutputStream());
       for (int i = 0; i < numChunks; i++) {
         out.write(inputChunks[i]);
       }
@@ -896,18 +906,19 @@ public class TestContainerCommandsEC {
           reconstructedBlockData) {
 
     for (int i = 0; i < blockData.length; i++) {
+      assertEquals(blockData[i].getBlockID(), reconstructedBlockData[i].getBlockID());
+      assertEquals(blockData[i].getSize(), reconstructedBlockData[i].getSize());
+      assertEquals(blockData[i].getMetadata(), reconstructedBlockData[i].getMetadata());
       List<ContainerProtos.ChunkInfo> oldBlockDataChunks =
           blockData[i].getChunks();
       List<ContainerProtos.ChunkInfo> newBlockDataChunks =
           reconstructedBlockData[i].getChunks();
       for (int j = 0; j < oldBlockDataChunks.size(); j++) {
         ContainerProtos.ChunkInfo chunkInfo = oldBlockDataChunks.get(j);
-        if (chunkInfo.getLen() == 0) {
-          // let's ignore the empty chunks
-          continue;
-        }
         assertEquals(chunkInfo, newBlockDataChunks.get(j));
       }
+      // Ensure there are no extra chunks in the reconstructed block
+      assertEquals(oldBlockDataChunks.size(), newBlockDataChunks.size());
     }
   }
 
@@ -925,7 +936,6 @@ public class TestContainerCommandsEC {
     secretKeyClient = new SecretKeyTestClient();
 
     cluster = MiniOzoneCluster.newBuilder(conf).setNumDatanodes(NUM_DN)
-        .setScmId(SCM_ID).setClusterId(CLUSTER_ID)
         .setCertificateClient(certClient)
         .setSecretKeyClient(secretKeyClient)
         .build();

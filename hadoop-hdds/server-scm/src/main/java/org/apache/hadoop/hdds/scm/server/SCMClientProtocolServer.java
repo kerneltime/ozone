@@ -22,7 +22,6 @@
 package org.apache.hadoop.hdds.scm.server;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.collect.Maps;
 import com.google.protobuf.BlockingService;
@@ -34,28 +33,33 @@ import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.conf.ReconfigurationHandler;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
-import org.apache.hadoop.hdds.protocol.proto.ReconfigureProtocolProtos.ReconfigureProtocolService;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos.DeletedBlocksTransactionInfo;
+import org.apache.hadoop.hdds.protocol.proto.ReconfigureProtocolProtos.ReconfigureProtocolService;
 import org.apache.hadoop.hdds.protocol.proto.StorageContainerLocationProtocolProtos;
+import org.apache.hadoop.hdds.protocol.proto.StorageContainerLocationProtocolProtos.ContainerBalancerStatusInfoResponseProto;
+import org.apache.hadoop.hdds.protocol.proto.StorageContainerLocationProtocolProtos.ContainerBalancerTaskIterationStatusInfo;
 import org.apache.hadoop.hdds.protocol.proto.StorageContainerLocationProtocolProtos.DecommissionScmResponseProto;
 import org.apache.hadoop.hdds.protocol.proto.StorageContainerLocationProtocolProtos.DecommissionScmResponseProto.Builder;
+import org.apache.hadoop.hdds.protocol.proto.StorageContainerLocationProtocolProtos.NodeTransferInfo;
 import org.apache.hadoop.hdds.protocol.proto.StorageContainerLocationProtocolProtos.StartContainerBalancerResponseProto;
 import org.apache.hadoop.hdds.protocolPB.ReconfigureProtocolPB;
 import org.apache.hadoop.hdds.protocolPB.ReconfigureProtocolServerSideTranslatorPB;
 import org.apache.hadoop.hdds.ratis.RatisHelper;
 import org.apache.hadoop.hdds.scm.DatanodeAdminError;
+import org.apache.hadoop.hdds.scm.FetchMetrics;
 import org.apache.hadoop.hdds.scm.ScmInfo;
 import org.apache.hadoop.hdds.scm.container.ContainerID;
 import org.apache.hadoop.hdds.scm.container.ContainerInfo;
 import org.apache.hadoop.hdds.scm.container.ContainerNotFoundException;
 import org.apache.hadoop.hdds.scm.container.ContainerReplica;
-import org.apache.hadoop.hdds.scm.container.common.helpers.DeletedBlocksTransactionInfoWrapper;
 import org.apache.hadoop.hdds.scm.container.ReplicationManagerReport;
 import org.apache.hadoop.hdds.scm.container.balancer.ContainerBalancer;
 import org.apache.hadoop.hdds.scm.container.balancer.ContainerBalancerConfiguration;
+import org.apache.hadoop.hdds.scm.container.balancer.ContainerBalancerStatusInfo;
 import org.apache.hadoop.hdds.scm.container.balancer.IllegalContainerBalancerStateException;
 import org.apache.hadoop.hdds.scm.container.balancer.InvalidContainerBalancerConfigurationException;
 import org.apache.hadoop.hdds.scm.container.common.helpers.ContainerWithPipeline;
+import org.apache.hadoop.hdds.scm.container.common.helpers.DeletedBlocksTransactionInfoWrapper;
 import org.apache.hadoop.hdds.scm.events.SCMEvents;
 import org.apache.hadoop.hdds.scm.exceptions.SCMException;
 import org.apache.hadoop.hdds.scm.exceptions.SCMException.ResultCodes;
@@ -99,6 +103,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -107,10 +112,12 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.apache.hadoop.hdds.protocol.proto.StorageContainerLocationProtocolProtos.StorageContainerLocationProtocolService.newReflectiveBlockingService;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_CLIENT_HANDLER_COUNT_KEY;
 import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HANDLER_COUNT_DEFAULT;
 import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HANDLER_COUNT_KEY;
 import static org.apache.hadoop.hdds.scm.ScmUtils.checkIfCertSignRequestAllowed;
@@ -140,9 +147,9 @@ public class SCMClientProtocolServer implements
       ReconfigurationHandler reconfigurationHandler) throws IOException {
     this.scm = scm;
     this.config = conf;
-    final int handlerCount =
-        conf.getInt(OZONE_SCM_HANDLER_COUNT_KEY,
-            OZONE_SCM_HANDLER_COUNT_DEFAULT);
+    final int handlerCount = conf.getInt(OZONE_SCM_CLIENT_HANDLER_COUNT_KEY,
+        OZONE_SCM_HANDLER_COUNT_KEY, OZONE_SCM_HANDLER_COUNT_DEFAULT,
+            LOG::info);
     RPC.setProtocolEngine(conf, StorageContainerLocationProtocolPB.class,
         ProtobufRpcEngine.class);
 
@@ -587,6 +594,15 @@ public class SCMClientProtocolServer implements
   }
 
   @Override
+  public Map<String, List<ContainerID>> getContainersOnDecomNode(DatanodeDetails dn) throws IOException {
+    try {
+      return scm.getScmDecommissionManager().getContainersPendingReplication(dn);
+    } catch (NodeNotFoundException e) {
+      throw new IOException("Failed to get containers list. Unable to find required node", e);
+    }
+  }
+
+  @Override
   public List<HddsProtos.Node> queryNode(
       HddsProtos.NodeOperationalState opState, HddsProtos.NodeState state,
       HddsProtos.QueryScope queryScope, String poolName, int clientVersion)
@@ -613,11 +629,32 @@ public class SCMClientProtocolServer implements
   }
 
   @Override
-  public List<DatanodeAdminError> decommissionNodes(List<String> nodes)
+  public HddsProtos.Node queryNode(UUID uuid)
+      throws IOException {
+    HddsProtos.Node result = null;
+    try {
+      DatanodeDetails node = scm.getScmNodeManager().getNodeByUuid(uuid);
+      if (node != null) {
+        NodeStatus ns = scm.getScmNodeManager().getNodeStatus(node);
+        result = HddsProtos.Node.newBuilder()
+            .setNodeID(node.getProtoBufMessage())
+            .addNodeStates(ns.getHealth())
+            .addNodeOperationalStates(ns.getOperationalState())
+            .build();
+      }
+    } catch (NodeNotFoundException e) {
+      throw new IOException(
+          "An unexpected error occurred querying the NodeStatus", e);
+    }
+    return result;
+  }
+
+  @Override
+  public List<DatanodeAdminError> decommissionNodes(List<String> nodes, boolean force)
       throws IOException {
     try {
       getScm().checkAdminAccess(getRemoteUser(), false);
-      return scm.getScmDecommissionManager().decommissionNodes(nodes);
+      return scm.getScmDecommissionManager().decommissionNodes(nodes, force);
     } catch (Exception ex) {
       LOG.error("Failed to decommission nodes", ex);
       throw ex;
@@ -638,11 +675,11 @@ public class SCMClientProtocolServer implements
 
   @Override
   public List<DatanodeAdminError> startMaintenanceNodes(List<String> nodes,
-      int endInHours) throws IOException {
+      int endInHours, boolean force) throws IOException {
     try {
       getScm().checkAdminAccess(getRemoteUser(), false);
       return scm.getScmDecommissionManager()
-          .startMaintenanceNodes(nodes, endInHours);
+          .startMaintenanceNodes(nodes, endInHours, force);
     } catch (Exception ex) {
       LOG.error("Failed to place nodes into maintenance mode", ex);
       throw ex;
@@ -1014,67 +1051,130 @@ public class SCMClientProtocolServer implements
       Optional<Integer> maxDatanodesPercentageToInvolvePerIteration,
       Optional<Long> maxSizeToMovePerIterationInGB,
       Optional<Long> maxSizeEnteringTarget,
-      Optional<Long> maxSizeLeavingSource) throws IOException {
+      Optional<Long> maxSizeLeavingSource,
+      Optional<Integer> balancingInterval,
+      Optional<Integer> moveTimeout,
+      Optional<Integer> moveReplicationTimeout,
+      Optional<Boolean> networkTopologyEnable,
+      Optional<String> includeNodes,
+      Optional<String> excludeNodes) throws IOException {
     getScm().checkAdminAccess(getRemoteUser(), false);
     ContainerBalancerConfiguration cbc =
         scm.getConfiguration().getObject(ContainerBalancerConfiguration.class);
     Map<String, String> auditMap = Maps.newHashMap();
-    if (threshold.isPresent()) {
-      double tsd = threshold.get();
-      auditMap.put("threshold", String.valueOf(tsd));
-      Preconditions.checkState(tsd >= 0.0D && tsd < 100.0D,
-          "threshold should be specified in range [0.0, 100.0).");
-      cbc.setThreshold(tsd);
-    }
-    if (maxSizeToMovePerIterationInGB.isPresent()) {
-      long mstm = maxSizeToMovePerIterationInGB.get();
-      auditMap.put("maxSizeToMovePerIterationInGB", String.valueOf(mstm));
-      Preconditions.checkState(mstm > 0,
-          "maxSizeToMovePerIterationInGB must be positive.");
-      cbc.setMaxSizeToMovePerIteration(mstm * OzoneConsts.GB);
-    }
-    if (maxDatanodesPercentageToInvolvePerIteration.isPresent()) {
-      int mdti = maxDatanodesPercentageToInvolvePerIteration.get();
-      auditMap.put("maxDatanodesPercentageToInvolvePerIteration",
-          String.valueOf(mdti));
-      Preconditions.checkState(mdti >= 0,
-          "maxDatanodesPercentageToInvolvePerIteration must be " +
-              "greater than equal to zero.");
-      Preconditions.checkState(mdti <= 100,
-          "maxDatanodesPercentageToInvolvePerIteration must be " +
-              "lesser than or equal to 100.");
-      cbc.setMaxDatanodesPercentageToInvolvePerIteration(mdti);
-    }
-    if (iterations.isPresent()) {
-      int i = iterations.get();
-      auditMap.put("iterations", String.valueOf(i));
-      Preconditions.checkState(i > 0 || i == -1,
-          "number of iterations must be positive or" +
-              " -1 (for running container balancer infinitely).");
-      cbc.setIterations(i);
-    }
-
-    if (maxSizeEnteringTarget.isPresent()) {
-      long mset = maxSizeEnteringTarget.get();
-      auditMap.put("maxSizeEnteringTarget", String.valueOf(mset));
-      Preconditions.checkState(mset > 0,
-          "maxSizeEnteringTarget must be " +
-              "greater than zero.");
-      cbc.setMaxSizeEnteringTarget(mset * OzoneConsts.GB);
-    }
-
-    if (maxSizeLeavingSource.isPresent()) {
-      long msls = maxSizeLeavingSource.get();
-      auditMap.put("maxSizeLeavingSource", String.valueOf(msls));
-      Preconditions.checkState(msls > 0,
-          "maxSizeLeavingSource must be " +
-              "greater than zero.");
-      cbc.setMaxSizeLeavingSource(msls * OzoneConsts.GB);
-    }
-
-    ContainerBalancer containerBalancer = scm.getContainerBalancer();
     try {
+      if (threshold.isPresent()) {
+        double tsd = threshold.get();
+        auditMap.put("threshold", String.valueOf(tsd));
+        if (tsd < 0.0D || tsd >= 100.0D) {
+          throw new IOException("Threshold should be specified in the range [0.0, 100.0).");
+        }
+        cbc.setThreshold(tsd);
+      }
+
+      if (maxSizeToMovePerIterationInGB.isPresent()) {
+        long mstm = maxSizeToMovePerIterationInGB.get();
+        auditMap.put("maxSizeToMovePerIterationInGB", String.valueOf(mstm));
+        if (mstm <= 0) {
+          throw new IOException("Max Size To Move Per Iteration In GB must be positive.");
+        }
+        cbc.setMaxSizeToMovePerIteration(mstm * OzoneConsts.GB);
+      }
+
+      if (maxDatanodesPercentageToInvolvePerIteration.isPresent()) {
+        int mdti = maxDatanodesPercentageToInvolvePerIteration.get();
+        auditMap.put("maxDatanodesPercentageToInvolvePerIteration",
+            String.valueOf(mdti));
+        if (mdti < 0 || mdti > 100) {
+          throw new IOException("Max Datanodes Percentage To Involve Per Iteration" +
+                  "should be specified in the range [0, 100]");
+        }
+        cbc.setMaxDatanodesPercentageToInvolvePerIteration(mdti);
+      }
+
+      if (iterations.isPresent()) {
+        int i = iterations.get();
+        auditMap.put("iterations", String.valueOf(i));
+        if (i < -1 || i == 0) {
+          throw new IOException("Number of Iterations must be positive or" +
+              " -1 (for running container balancer infinitely).");
+        }
+        cbc.setIterations(i);
+      }
+
+      if (maxSizeEnteringTarget.isPresent()) {
+        long mset = maxSizeEnteringTarget.get();
+        auditMap.put("maxSizeEnteringTarget", String.valueOf(mset));
+        if (mset <= 0) {
+          throw new IOException("Max Size Entering Target must be " +
+              "greater than zero.");
+        }
+        cbc.setMaxSizeEnteringTarget(mset * OzoneConsts.GB);
+      }
+
+      if (maxSizeLeavingSource.isPresent()) {
+        long msls = maxSizeLeavingSource.get();
+        auditMap.put("maxSizeLeavingSource", String.valueOf(msls));
+        if (msls <= 0) {
+          throw new IOException("Max Size Leaving Source must be " +
+              "greater than zero.");
+        }
+        cbc.setMaxSizeLeavingSource(msls * OzoneConsts.GB);
+      }
+
+      if (balancingInterval.isPresent()) {
+        int bi = balancingInterval.get();
+        auditMap.put("balancingInterval", String.valueOf(bi));
+        if (bi <= 0) {
+          throw new IOException("Balancing Interval must be greater than zero.");
+        }
+        cbc.setBalancingInterval(Duration.ofMinutes(bi));
+      }
+
+      if (moveTimeout.isPresent()) {
+        int mt = moveTimeout.get();
+        auditMap.put("moveTimeout", String.valueOf(mt));
+        if (mt <= 0) {
+          throw new IOException("Move Timeout must be greater than zero.");
+        }
+        cbc.setMoveTimeout(Duration.ofMinutes(mt));
+      }
+
+      if (moveReplicationTimeout.isPresent()) {
+        int mrt = moveReplicationTimeout.get();
+        auditMap.put("moveReplicationTimeout", String.valueOf(mrt));
+        if (mrt <= 0) {
+          throw new IOException("Move Replication Timeout must be greater than zero.");
+        }
+        cbc.setMoveReplicationTimeout(Duration.ofMinutes(mrt));
+      }
+
+      if (networkTopologyEnable.isPresent()) {
+        Boolean nt = networkTopologyEnable.get();
+        auditMap.put("networkTopologyEnable", String.valueOf(nt));
+        cbc.setNetworkTopologyEnable(nt);
+      }
+
+      if (includeNodes.isPresent()) {
+        String in = includeNodes.get();
+        auditMap.put("includeNodes", (in));
+        cbc.setIncludeNodes(in);
+      }
+
+      if (excludeNodes.isPresent()) {
+        String ex = excludeNodes.get();
+        auditMap.put("excludeNodes", (ex));
+        cbc.setExcludeNodes(ex);
+      }
+
+      ContainerBalancer containerBalancer = scm.getContainerBalancer();
       containerBalancer.startBalancer(cbc);
+
+      AUDIT.logWriteSuccess(buildAuditMessageForSuccess(
+          SCMAction.START_CONTAINER_BALANCER, auditMap));
+      return StartContainerBalancerResponseProto.newBuilder()
+           .setStart(true)
+           .build();
     } catch (IllegalContainerBalancerStateException | IOException |
         InvalidContainerBalancerConfigurationException e) {
       AUDIT.logWriteFailure(buildAuditMessageForFailure(
@@ -1084,11 +1184,6 @@ public class SCMClientProtocolServer implements
           .setMessage(e.getMessage())
           .build();
     }
-    AUDIT.logWriteSuccess(buildAuditMessageForSuccess(
-        SCMAction.START_CONTAINER_BALANCER, auditMap));
-    return StartContainerBalancerResponseProto.newBuilder()
-        .setStart(true)
-        .build();
   }
 
   @Override
@@ -1109,6 +1204,67 @@ public class SCMClientProtocolServer implements
     AUDIT.logReadSuccess(buildAuditMessageForSuccess(
         SCMAction.GET_CONTAINER_BALANCER_STATUS, null));
     return scm.getContainerBalancer().isBalancerRunning();
+  }
+
+  @Override
+  public ContainerBalancerStatusInfoResponseProto getContainerBalancerStatusInfo() throws IOException {
+    AUDIT.logReadSuccess(buildAuditMessageForSuccess(
+        SCMAction.GET_CONTAINER_BALANCER_STATUS_INFO, null));
+    ContainerBalancerStatusInfo balancerStatusInfo = scm.getContainerBalancer().getBalancerStatusInfo();
+    if (balancerStatusInfo == null) {
+      return ContainerBalancerStatusInfoResponseProto
+          .newBuilder()
+          .setIsRunning(false)
+          .build();
+    } else {
+
+      return ContainerBalancerStatusInfoResponseProto
+          .newBuilder()
+          .setIsRunning(true)
+          .setContainerBalancerStatusInfo(StorageContainerLocationProtocolProtos.ContainerBalancerStatusInfo
+              .newBuilder()
+              .setStartedAt(balancerStatusInfo.getStartedAt().toEpochSecond())
+              .setConfiguration(balancerStatusInfo.getConfiguration())
+              .addAllIterationsStatusInfo(
+                  balancerStatusInfo.getIterationsStatusInfo()
+                      .stream()
+                      .map(
+                          info -> ContainerBalancerTaskIterationStatusInfo.newBuilder()
+                              .setIterationNumber(info.getIterationNumber())
+                              .setIterationResult(Optional.ofNullable(info.getIterationResult()).orElse(""))
+                              .setSizeScheduledForMoveGB(info.getSizeScheduledForMoveGB())
+                              .setDataSizeMovedGB(info.getDataSizeMovedGB())
+                              .setContainerMovesScheduled(info.getContainerMovesScheduled())
+                              .setContainerMovesCompleted(info.getContainerMovesCompleted())
+                              .setContainerMovesFailed(info.getContainerMovesFailed())
+                              .setContainerMovesTimeout(info.getContainerMovesTimeout())
+                              .addAllSizeEnteringNodesGB(
+                                  info.getSizeEnteringNodesGB().entrySet()
+                                      .stream()
+                                      .map(entry -> NodeTransferInfo.newBuilder()
+                                          .setUuid(entry.getKey().toString())
+                                          .setDataVolumeGB(entry.getValue())
+                                          .build()
+                                      )
+                                      .collect(Collectors.toList())
+                              )
+                              .addAllSizeLeavingNodesGB(
+                                  info.getSizeLeavingNodesGB().entrySet()
+                                      .stream()
+                                      .map(entry -> NodeTransferInfo.newBuilder()
+                                          .setUuid(entry.getKey().toString())
+                                          .setDataVolumeGB(entry.getValue())
+                                          .build()
+                                      )
+                                      .collect(Collectors.toList())
+                              )
+                              .build()
+                      )
+                      .collect(Collectors.toList())
+              )
+          )
+          .build();
+    }
   }
 
   /**
@@ -1340,5 +1496,11 @@ public class SCMClientProtocolServer implements
           .setErrorMsg(ex.getMessage());
     }
     return decommissionScmResponseBuilder.build();
+  }
+
+  @Override
+  public String getMetrics(String query) throws IOException {
+    FetchMetrics fetchMetrics = new FetchMetrics();
+    return fetchMetrics.getMetrics(query);
   }
 }

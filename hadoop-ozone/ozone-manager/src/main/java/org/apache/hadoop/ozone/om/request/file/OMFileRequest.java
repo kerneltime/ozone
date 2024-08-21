@@ -51,12 +51,11 @@ import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfoGroup;
 import org.apache.hadoop.ozone.om.helpers.OzoneFSUtils;
 import org.apache.hadoop.ozone.om.helpers.OzoneFileStatus;
 import org.apache.hadoop.ozone.om.helpers.BucketLayout;
-import org.jetbrains.annotations.NotNull;
-import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.annotation.Nonnull;
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
 
 import static org.apache.hadoop.hdds.scm.net.NetConstants.PATH_SEPARATOR_STR;
 import static org.apache.hadoop.ozone.om.OzoneManagerUtils.getBucketLayout;
@@ -473,15 +472,17 @@ public final class OMFileRequest {
    */
   public static void addOpenFileTableCacheEntry(
           OMMetadataManager omMetadataManager, String dbOpenFileName,
-          @Nullable OmKeyInfo omFileInfo, String fileName, long trxnLogIndex) {
+          @Nullable OmKeyInfo omFileInfo, String fileName, String keyName, long trxnLogIndex) {
 
     final Table<String, OmKeyInfo> table = omMetadataManager.getOpenKeyTable(
         BucketLayout.FILE_SYSTEM_OPTIMIZED);
     if (omFileInfo != null) {
-      // New key format for the openFileTable.
       // For example, the user given key path is '/a/b/c/d/e/file1', then in DB
-      // keyName field stores only the leaf node name, which is 'file1'.
-      omFileInfo.setKeyName(fileName);
+      // keyName field stores full path, which is '/a/b/c/d/e/file1'.
+      // This is required as in some cases like hsync, Keys inside openKeyTable is used for auto commit after expiry.
+      // (Full key path is required in commit key request)
+      omFileInfo.setKeyName(keyName);
+      // fileName will contain only the leaf(file1) which is actual file name.
       omFileInfo.setFileName(fileName);
       table.addCacheEntry(dbOpenFileName, omFileInfo, trxnLogIndex);
     } else {
@@ -691,7 +692,7 @@ public final class OMFileRequest {
 
       if (omDirInfo != null) {
         lastKnownParentId = omDirInfo.getObjectID();
-      } else if (!elements.hasNext() && 
+      } else if (!elements.hasNext() &&
           (!keyName.endsWith(PATH_SEPARATOR_STR))) {
         // If the requested keyName contains "/" at the end then we need to
         // just check the directory table.
@@ -732,7 +733,7 @@ public final class OMFileRequest {
    * @param keyName    user given key name
    * @return OmKeyInfo object
    */
-  @NotNull
+  @Nonnull
   public static OmKeyInfo getOmKeyInfo(String volumeName, String bucketName,
       OmDirectoryInfo dirInfo, String keyName) {
 
@@ -752,6 +753,7 @@ public final class OMFileRequest {
             .getInstance(HddsProtos.ReplicationFactor.ONE))
         .setOmKeyLocationInfos(Collections.singletonList(
             new OmKeyLocationInfoGroup(0, new ArrayList<>())))
+        .setOwnerName(dirInfo.getOwner())
         .build();
   }
 
@@ -762,7 +764,7 @@ public final class OMFileRequest {
    * @param fileName   file name
    * @return absolute path
    */
-  @NotNull
+  @Nonnull
   public static String getAbsolutePath(String prefixName, String fileName) {
     if (Strings.isNullOrEmpty(prefixName)) {
       return fileName;

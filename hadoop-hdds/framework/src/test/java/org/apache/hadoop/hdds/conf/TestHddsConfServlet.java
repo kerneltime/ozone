@@ -19,15 +19,15 @@ package org.apache.hadoop.hdds.conf;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.google.common.base.Strings;
-import com.google.gson.Gson;
+import org.apache.hadoop.hdds.JsonTestUtils;
 import org.apache.hadoop.hdds.server.http.HttpServer2;
 import org.apache.hadoop.util.XMLUtils;
 import org.eclipse.jetty.util.ajax.JSON;
@@ -109,8 +109,7 @@ public class TestHddsConfServlet {
     conf.getObject(OzoneTestConfig.class);
     // test cmd is getOzoneTags
     String result = getResultWithCmd(conf, "getOzoneTags");
-    Gson gson = new Gson();
-    String tags = gson.toJson(OzoneConfiguration.TAGS);
+    String tags = JsonTestUtils.toJsonString(OzoneConfiguration.TAGS);
     assertEquals(result, tags);
     // cmd is getPropertyByTag
     result = getResultWithCmd(conf, "getPropertyByTag");
@@ -170,12 +169,8 @@ public class TestHddsConfServlet {
   @Test
   public void testBadFormat() throws Exception {
     StringWriter sw = new StringWriter();
-    try {
-      HddsConfServlet.writeResponse(getTestConf(), sw, "not a format", null);
-      fail("writeResponse with bad format didn't throw!");
-    } catch (HddsConfServlet.BadFormatException bfe) {
-      // expected
-    }
+    assertThrows(HddsConfServlet.BadFormatException.class,
+        () -> HddsConfServlet.writeResponse(getTestConf(), sw, "not a format", null));
     assertEquals("", sw.toString());
   }
 

@@ -40,8 +40,9 @@ import org.apache.hadoop.ozone.protocol.commands.CommandForDatanode;
 import org.apache.hadoop.ozone.protocol.commands.RegisteredCommand;
 import org.apache.hadoop.ozone.protocol.commands.SCMCommand;
 
-import javax.annotation.Nullable;
+import jakarta.annotation.Nullable;
 import java.io.Closeable;
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -428,4 +429,14 @@ public interface NodeManager extends StorageContainerNodeProtocol,
   }
 
   default void forceNodesToHealthyReadOnly() { }
+
+  /**
+   * This API allows removal of only DECOMMISSIONED, IN_MAINTENANCE and DEAD nodes
+   * from NodeManager data structures and cleanup memory.
+   * @param datanodeDetails
+   * @throws NodeNotFoundException
+   */
+  default void removeNode(DatanodeDetails datanodeDetails) throws NodeNotFoundException, IOException {
+
+  }
 }
