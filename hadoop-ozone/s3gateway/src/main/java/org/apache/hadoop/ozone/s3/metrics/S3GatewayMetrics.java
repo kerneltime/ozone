@@ -65,6 +65,10 @@ public final class S3GatewayMetrics implements Closeable, MetricsSource {
   private @Metric MutableCounterLong listMultipartUploadsFailure;
   private @Metric MutableCounterLong listKeyCount;
 
+  // STSEndpoint
+  private @Metric MutableCounterLong assumeRoleSuccess;
+  private @Metric MutableCounterLong assumeRoleFailure;
+
 
   // RootEndpoint
   private @Metric MutableCounterLong listS3BucketsSuccess;
@@ -164,6 +168,15 @@ public final class S3GatewayMetrics implements Closeable, MetricsSource {
   @Metric(about = "Latency for failing to list S3 buckets " +
       "in nanoseconds")
   private PerformanceMetrics listS3BucketsFailureLatencyNs;
+  
+  // STSEndpoint
+  
+  @Metric(about = "Latency for successfully assuming a role via STS in " +
+      "nanoseconds")
+  private PerformanceMetrics assumeRoleSuccessLatencyNs;
+  
+  @Metric(about = "Latency for failing to assume a role via STS in nanoseconds")
+  private PerformanceMetrics assumeRoleFailureLatencyNs;
 
   // ObjectEndpoint
 
@@ -359,6 +372,12 @@ public final class S3GatewayMetrics implements Closeable, MetricsSource {
     listS3BucketsSuccessLatencyNs.snapshot(recordBuilder, true);
     listS3BucketsFailure.snapshot(recordBuilder, true);
     listS3BucketsFailureLatencyNs.snapshot(recordBuilder, true);
+    
+    // STSEndpoint
+    assumeRoleSuccess.snapshot(recordBuilder, true);
+    assumeRoleSuccessLatencyNs.snapshot(recordBuilder, true);
+    assumeRoleFailure.snapshot(recordBuilder, true); 
+    assumeRoleFailureLatencyNs.snapshot(recordBuilder, true);
 
     // ObjectEndpoint
     createMultipartKeySuccess.snapshot(recordBuilder, true);
@@ -682,6 +701,27 @@ public final class S3GatewayMetrics implements Closeable, MetricsSource {
     this.putObjectAclFailure.incr();
     this.putObjectAclFailureLatencyNs.add(Time.monotonicNowNanos() - startNanos);
   }
+  
+  // STSEndpoint
+  
+  public long updateAssumeRoleTime(long elapsedNanos) {
+    assumeRoleSuccess.incr();
+    assumeRoleSuccessLatencyNs.add(elapsedNanos);
+    return elapsedNanos;
+  }
+  
+  public void updateAssumeRoleFailureStats(long startNanos) {
+    assumeRoleFailure.incr();
+    assumeRoleFailureLatencyNs.add(Time.monotonicNowNanos() - startNanos);
+  }
+  
+  /**
+   * Update metrics for assume role failures.
+   * This overload is used when no timing information is needed.
+   */
+  public void updateAssumeRoleFailureStats() {
+    assumeRoleFailure.incr();
+  }
 
   // GET
   public long getListS3BucketsSuccess() {
@@ -822,6 +862,14 @@ public final class S3GatewayMetrics implements Closeable, MetricsSource {
 
   public long getListS3BucketsFailure() {
     return listS3BucketsFailure.value();
+  }
+  
+  public long getAssumeRoleSuccess() {
+    return assumeRoleSuccess.value();
+  }
+  
+  public long getAssumeRoleFailure() {
+    return assumeRoleFailure.value();
   }
 
   public long getGetObjectTaggingSuccess() {
