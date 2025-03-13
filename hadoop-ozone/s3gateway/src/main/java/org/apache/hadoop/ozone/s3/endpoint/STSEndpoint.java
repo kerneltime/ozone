@@ -36,6 +36,7 @@ import org.apache.hadoop.ozone.audit.AuditEventStatus;
 import org.apache.hadoop.ozone.audit.AuditLogger;
 import org.apache.hadoop.ozone.audit.S3GAction;
 import org.apache.hadoop.ozone.client.OzoneClient;
+import org.apache.hadoop.ozone.s3.iam.AWSIAMService;
 import org.apache.hadoop.ozone.s3.metrics.S3GatewayMetrics;
 import org.apache.hadoop.ozone.client.protocol.ClientProtocol;
 import org.apache.hadoop.ozone.om.helpers.S3SecretValue;
@@ -60,6 +61,9 @@ public class STSEndpoint extends EndpointBase {
 
   @Inject
   private OzoneClient client;
+  
+  @Inject
+  private AWSIAMService iamService;
   
   // Metrics for tracking STS operations
   private S3GatewayMetrics metrics;
@@ -123,35 +127,76 @@ public class STSEndpoint extends EndpointBase {
       }
       
       // Parse duration seconds
-      int durationSeconds = durationString != null ? 
-          Integer.parseInt(durationString) : 
+      int defaultDuration = iamService.isEnabled() ?
+          iamService.getDefaultTokenDuration() :
           Integer.parseInt(DEFAULT_SESSION_TOKEN_DURATION);
+          
+      int maxDuration = iamService.isEnabled() ?
+          iamService.getMaxTokenDuration() :
+          MAX_SESSION_DURATION_SECONDS;
       
-      if (durationSeconds < 900 || durationSeconds > MAX_SESSION_DURATION_SECONDS) {
+      int durationSeconds = durationString != null ? 
+          Integer.parseInt(durationString) : defaultDuration;
+      
+      if (durationSeconds < 900 || durationSeconds > maxDuration) {
         throw S3ErrorTable.newError(S3ErrorTable.INVALID_REQUEST,
-            "DurationSeconds must be between 900 and " 
-                + MAX_SESSION_DURATION_SECONDS);
+            "DurationSeconds must be between 900 and " + maxDuration);
       }
       
-      // Validate the STS token (roleArn)
-      // This would typically involve token validation logic specific to your
-      // identity management system. Here we're extracting the username from roleArn.
-      String username = extractUsernameFromRoleArn(roleArn);
+      // Validate the role ARN with AWS IAM if integration is enabled
+      if (!validateRole(roleArn)) {
+        throw S3ErrorTable.newError(S3ErrorTable.INVALID_REQUEST,
+            "Role does not exist or cannot be assumed: " + roleArn);
+      }
       
-      // Generate S3 credentials for the user
-      S3SecretValue s3Secret = generateS3Credentials(username);
+      S3SecretValue s3Secret;
+      String accessKey;
+      String secretKey;
+      String sessionToken;
+      
+      // If AWS IAM integration is enabled, use AWS STS to assume the role
+      if (iamService.isEnabled()) {
+        try {
+          // Call AWS STS assumeRole API
+          com.amazonaws.services.securitytoken.model.Credentials awsCreds = 
+              iamService.assumeRole(roleArn, roleSessionName, durationSeconds);
+          
+          // Use the credentials returned by AWS STS
+          accessKey = awsCreds.getAccessKeyId();
+          secretKey = awsCreds.getSecretAccessKey();
+          sessionToken = awsCreds.getSessionToken();
+          
+          // Store the AWS STS credentials in Ozone Manager
+          s3Secret = S3SecretValue.of(accessKey, secretKey);
+          
+          LOG.info("Using AWS STS credentials for role: {}", roleArn);
+        } catch (Exception e) {
+          LOG.error("Failed to assume role with AWS STS: {}", roleArn, e);
+          throw S3ErrorTable.newError(S3ErrorTable.INVALID_REQUEST, 
+              "Failed to assume role: " + e.getMessage());
+        }
+      } else {
+        // Use our internal credential generation when AWS IAM integration is disabled
+        String username = extractUsernameFromRoleArn(roleArn);
+        s3Secret = generateS3Credentials(username);
+        accessKey = s3Secret.getAwsAccessKey();
+        secretKey = s3Secret.getAwsSecret();
+        sessionToken = generateSessionToken();
+        
+        LOG.info("Using internally generated credentials for role: {}", roleArn);
+      }
       
       // Store the credentials in Ozone Manager
-      storeS3CredentialsInOM(username, s3Secret);
+      storeS3CredentialsInOM(roleArn, s3Secret);
       
       // Construct response
       Instant expiration = Instant.now().plus(durationSeconds, ChronoUnit.SECONDS);
       String response = formatAssumeRoleResponse(
           roleArn, 
           roleSessionName, 
-          s3Secret.getAwsAccessKey(), 
-          s3Secret.getAwsSecret(),
-          generateSessionToken(), 
+          accessKey, 
+          secretKey,
+          sessionToken, 
           expiration);
       
       auditMap.put("result", "success");
@@ -192,10 +237,33 @@ public class STSEndpoint extends EndpointBase {
    * @return The extracted username
    */
   private String extractUsernameFromRoleArn(String roleArn) {
-    // This is a simple implementation that assumes the roleArn contains the username
-    // In a production system, you would validate this against your identity system
-    String[] parts = roleArn.split("/");
-    return parts[parts.length - 1];
+    // When AWS IAM integration is enabled, use the full role ARN as the username
+    // to maintain a mapping between the AWS IAM role and Ozone credentials
+    // This allows for better tracking and management
+    
+    // When not using AWS IAM integration, extract the role name from the ARN
+    if (!iamService.isEnabled()) {
+      String[] parts = roleArn.split("/");
+      return parts[parts.length - 1];
+    }
+    
+    return roleArn;
+  }
+  
+  /**
+   * Validates the role ARN with AWS IAM.
+   * 
+   * @param roleArn The role ARN to validate
+   * @return True if valid, false otherwise
+   */
+  private boolean validateRole(String roleArn) {
+    // If AWS IAM integration is enabled, validate the role ARN
+    if (iamService.isEnabled()) {
+      return iamService.validateRole(roleArn);
+    }
+    
+    // Otherwise, assume the role is valid (for backward compatibility)
+    return true;
   }
   
   /**

@@ -30,6 +30,18 @@
   </properties>
 
   <dependencies>
+    <!-- AWS IAM SDK for AWS IAM integration -->
+    <dependency>
+      <groupId>com.amazonaws</groupId>
+      <artifactId>aws-java-sdk-iam</artifactId>
+      <version>${aws-java-sdk.version}</version>
+    </dependency>
+    <!-- AWS STS SDK for STS operations -->
+    <dependency>
+      <groupId>com.amazonaws</groupId>
+      <artifactId>aws-java-sdk-sts</artifactId>
+      <version>${aws-java-sdk.version}</version>
+    </dependency>
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>

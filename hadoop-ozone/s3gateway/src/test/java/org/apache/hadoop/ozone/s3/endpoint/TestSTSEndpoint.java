@@ -21,6 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -30,6 +32,7 @@ import java.io.IOException;
 import java.lang.reflect.Field;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.Date;
 import javax.ws.rs.core.Response;
 
 import org.apache.hadoop.ozone.audit.AuditLogger;
@@ -38,6 +41,7 @@ import org.apache.hadoop.ozone.client.OzoneClient;
 import org.apache.hadoop.ozone.client.protocol.ClientProtocol;
 import org.apache.hadoop.ozone.om.helpers.S3SecretValue;
 import org.apache.hadoop.ozone.s3.exception.OS3Exception;
+import org.apache.hadoop.ozone.s3.iam.AWSIAMService;
 import org.apache.hadoop.ozone.s3.metrics.S3GatewayMetrics;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -53,6 +57,7 @@ public class TestSTSEndpoint {
   private ClientProtocol clientProtocol;
   private AuditLogger auditLogger;
   private S3GatewayMetrics metrics;
+  private AWSIAMService iamService;
   
   @BeforeEach
   public void setUp() throws IOException {
@@ -62,13 +67,21 @@ public class TestSTSEndpoint {
     clientProtocol = mock(ClientProtocol.class);
     auditLogger = mock(AuditLogger.class);
     metrics = mock(S3GatewayMetrics.class);
+    iamService = mock(AWSIAMService.class);
     
     // Setup endpoint with mocks
     stsEndpoint = new STSEndpoint();
     stsEndpoint.setClient(ozoneClient);
-    // Use reflection to set the audit logger and metrics
+    // Use reflection to set the audit logger, metrics, and IAM service
     setField(stsEndpoint, "AUDIT", auditLogger);
     setField(stsEndpoint, "metrics", metrics);
+    setField(stsEndpoint, "iamService", iamService);
+    
+    // Configure IAM service mock defaults
+    when(iamService.isEnabled()).thenReturn(false); // Disabled by default in tests
+    when(iamService.getDefaultTokenDuration()).thenReturn(3600);
+    when(iamService.getMaxTokenDuration()).thenReturn(43200);
+    when(iamService.validateRole(anyString())).thenReturn(true); // Role always valid by default
     
     // Setup mock behavior
     when(ozoneClient.getObjectStore()).thenReturn(objectStore);
@@ -224,6 +237,84 @@ public class TestSTSEndpoint {
     
     // Verify metrics were updated twice
     verify(metrics, times(2)).updateAssumeRoleTime(anyLong());
+  }
+  
+  @Test
+  public void testAssumeRoleWithAWSIAMIntegration() throws Exception {
+    // Test parameters
+    String action = "AssumeRole";
+    String roleArn = "arn:aws:iam::123456789012:role/test-role";
+    String roleSessionName = "test-session";
+    String durationSeconds = "3600";
+    
+    // Enable AWS IAM integration
+    when(iamService.isEnabled()).thenReturn(true);
+    
+    // Mock the AWS STS credentials
+    com.amazonaws.services.securitytoken.model.Credentials awsCredentials = 
+        new com.amazonaws.services.securitytoken.model.Credentials();
+    awsCredentials.setAccessKeyId("AKIA_AWS_KEY");
+    awsCredentials.setSecretAccessKey("AWS_SECRET_KEY");
+    awsCredentials.setSessionToken("AWS_SESSION_TOKEN");
+    awsCredentials.setExpiration(
+        new Date(System.currentTimeMillis() + 3600000));
+    
+    // Mock assumeRole to return AWS credentials
+    when(iamService.assumeRole(
+        eq(roleArn), 
+        eq(roleSessionName), 
+        eq(3600)))
+        .thenReturn(awsCredentials);
+    
+    // Call the endpoint
+    Response response = stsEndpoint.assumeRole(
+        action, roleArn, roleSessionName, durationSeconds);
+    
+    // Verify the response
+    assertNotNull(response);
+    assertEquals(200, response.getStatus());
+    
+    // Verify the response contains AWS credentials
+    String responseStr = response.getEntity().toString();
+    assertTrue(responseStr.contains("<AccessKeyId>AKIA_AWS_KEY</AccessKeyId>"));
+    assertTrue(responseStr.contains("<SecretAccessKey>AWS_SECRET_KEY</SecretAccessKey>"));
+    assertTrue(responseStr.contains("<SessionToken>AWS_SESSION_TOKEN</SessionToken>"));
+    
+    // Verify IAM service was called
+    verify(iamService).assumeRole(
+        eq(roleArn), 
+        eq(roleSessionName), 
+        eq(3600));
+    
+    // Verify metrics were updated
+    verify(metrics).updateAssumeRoleTime(anyLong());
+  }
+  
+  @Test
+  public void testAssumeRoleWithInvalidRoleInAWS() throws Exception {
+    // Test parameters
+    String action = "AssumeRole";
+    String roleArn = "arn:aws:iam::123456789012:role/invalid-role";
+    String roleSessionName = "test-session";
+    String durationSeconds = "3600";
+    
+    // Enable AWS IAM integration
+    when(iamService.isEnabled()).thenReturn(true);
+    
+    // Mock role validation to fail
+    when(iamService.validateRole(roleArn)).thenReturn(false);
+    
+    try {
+      stsEndpoint.assumeRole(action, roleArn, roleSessionName, durationSeconds);
+      // Should not reach here
+      throw new AssertionError("Expected OS3Exception was not thrown");
+    } catch (OS3Exception e) {
+      assertEquals("InvalidRequest", e.getCode());
+      assertTrue(e.getMessage().contains("Role does not exist"));
+      
+      // Verify metrics were updated for failure
+      verify(metrics).updateAssumeRoleFailureStats();
+    }
   }
   
   /**
