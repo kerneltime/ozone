@@ -175,6 +175,15 @@ Cannot create container without admin privilege
 Cannot reconcile container without admin privilege
     Requires admin privilege    ozone admin container reconcile "${CONTAINER}"
 
+Container create fails fast without authentication
+    Pass Execution If   '${SECURITY_ENABLED}' == 'false'    Skip in unsecure cluster
+    Execute             kdestroy
+    ${rc}               ${output} =          Run And Return Rc And Output       timeout 30 ozone admin container create
+    Should Not Be Equal As Integers    0    ${rc}
+    Should contain      ${output}       Client cannot authenticate via
+    # Reset credentials for subsequent tests
+    Kinit test user     testuser     testuser.keytab
+
 Reset user
     Run Keyword if      '${SECURITY_ENABLED}' == 'true'     Kinit test user     testuser     testuser.keytab
 
