@@ -343,7 +343,7 @@ public class TestS3MultipartResponse {
       OMResponse omResponse) {
     return new S3MultipartUploadAbortResponse(omResponse, multipartKey,
         multipartOpenKey, omMultipartKeyInfo, omBucketInfo,
-        getBucketLayout());
+        getBucketLayout(), null, null);
   }
 
   public BucketLayout getBucketLayout() {

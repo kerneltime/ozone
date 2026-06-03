@@ -33,20 +33,27 @@ import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import org.apache.hadoop.hdds.client.ECReplicationConfig;
 import org.apache.hadoop.hdds.client.RatisReplicationConfig;
 import org.apache.hadoop.hdds.client.ReplicationConfig;
 import org.apache.hadoop.hdds.client.ReplicationFactor;
 import org.apache.hadoop.hdds.client.ReplicationType;
 import org.apache.hadoop.hdds.utils.UniqueId;
+import org.apache.hadoop.hdds.utils.db.BatchOperation;
 import org.apache.hadoop.hdds.utils.db.cache.CacheKey;
 import org.apache.hadoop.hdds.utils.db.cache.CacheValue;
+import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.om.OMMetrics;
 import org.apache.hadoop.ozone.om.helpers.BucketLayout;
+import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfoGroup;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartKey;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartUpload;
 import org.apache.hadoop.ozone.om.helpers.OzoneFSUtils;
+import org.apache.hadoop.ozone.om.helpers.QuotaUtil;
 import org.apache.hadoop.ozone.om.request.OMRequestTestUtils;
 import org.apache.hadoop.ozone.om.request.util.OMMultipartUploadUtils;
 import org.apache.hadoop.ozone.om.response.OMClientResponse;
@@ -57,6 +64,8 @@ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Multipa
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Status;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.util.Time;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
@@ -307,6 +316,187 @@ public class TestS3ExpiredMultipartUploadsAbortRequest
         metrics.getNumExpiredMPUSubmittedForAbort());
     assertEquals(numExistentMPUs, metrics.getNumExpiredMPUAborted());
     assertEquals(numExistentMPUs * numParts, metrics.getNumExpiredMPUPartsAborted());
+  }
+
+  /**
+   * Regression for the expired-MPU abort quota calculation: an EC-replicated
+   * upload must release the stripe-aware {@link QuotaUtil#getReplicatedSize}
+   * from the bucket, NOT {@code dataSize * replicationConfig.getRequiredNodes()}.
+   * For RATIS the two coincide (factor == required nodes), so only an EC config
+   * distinguishes the fix from the pre-fix {@code * keyFactor} bug. RS-3-2 is
+   * used here: its stripe-aware size is far below {@code dataSize * 5}.
+   * Exercises the schemaVersion 1 (split parts table) reclaim branch.
+   */
+  @Test
+  public void testExpiredAbortReleasesEcStripeAwareQuota() throws Exception {
+    this.bucketLayout = BucketLayout.DEFAULT;
+    final String volumeName = UUID.randomUUID().toString();
+    final String bucketName = UUID.randomUUID().toString();
+    final String keyName = UUID.randomUUID().toString();
+
+    // RS-3-2 with the default 1 MiB chunk.
+    final ECReplicationConfig ecConfig = new ECReplicationConfig(3, 2);
+    final long partDataSize = 5 * OzoneConsts.MB;  // spans more than one stripe
+    final long perPartReplicated =
+        QuotaUtil.getReplicatedSize(partDataSize, ecConfig);
+    // Guard the guard: the stripe-aware size must differ from the buggy
+    // dataSize * requiredNodes, else this test would pass on both code paths.
+    assertNotEquals(partDataSize * ecConfig.getRequiredNodes(),
+        perPartReplicated);
+    final long expectedReleased = 2 * perPartReplicated;
+    final long initialUsedBytes = 100 * OzoneConsts.MB;
+
+    OMRequestTestUtils.addVolumeToDB(volumeName, omMetadataManager);
+    OMRequestTestUtils.addBucketToOM(omMetadataManager,
+        OmBucketInfo.newBuilder()
+            .setVolumeName(volumeName)
+            .setBucketName(bucketName)
+            .setBucketLayout(getBucketLayout())
+            .setUsedBytes(initialUsedBytes)
+            .build());
+
+    // Build a schemaVersion 1, EC-replicated parent MPU and seed two equal
+    // parts directly into the split parts table (the v1 reclaim branch reads
+    // the parts table and derives the replicated size from this parent's
+    // replication config).
+    final String uploadID = OMMultipartUploadUtils.getMultipartUploadId();
+    OmKeyInfo mpuKeyInfo = new OmKeyInfo.Builder()
+        .setVolumeName(volumeName)
+        .setBucketName(bucketName)
+        .setKeyName(keyName)
+        .build();
+    OmMultipartKeyInfo multipartKeyInfo = new OmMultipartKeyInfo.Builder()
+        .setUploadID(uploadID)
+        .setReplicationConfig(ecConfig)
+        .setUpdateID(1L)
+        .setSchemaVersion((byte) 1)
+        .build();
+    String mpuDBKey = OMRequestTestUtils.addMultipartInfoToTable(false,
+        mpuKeyInfo, multipartKeyInfo, 1L, omMetadataManager);
+
+    seedV1Part(uploadID, 1, 2L, partDataSize);
+    seedV1Part(uploadID, 2, 3L, partDataSize);
+
+    OMRequest omRequest = doPreExecute(createAbortExpiredMPURequest(
+        volumeName, bucketName, Collections.singletonList(mpuDBKey)));
+    S3ExpiredMultipartUploadsAbortRequest abortRequest =
+        new S3ExpiredMultipartUploadsAbortRequest(omRequest);
+    OMClientResponse omClientResponse =
+        abortRequest.validateAndUpdateCache(ozoneManager, 100L);
+    assertEquals(Status.OK, omClientResponse.getOMResponse().getStatus());
+
+    BatchOperation batchOperation =
+        omMetadataManager.getStore().initBatchOperation();
+    omClientResponse.checkAndUpdateDB(omMetadataManager, batchOperation);
+    omMetadataManager.getStore().commitBatchOperation(batchOperation);
+
+    long finalUsedBytes = omMetadataManager.getBucketTable()
+        .get(omMetadataManager.getBucketKey(volumeName, bucketName))
+        .getUsedBytes();
+    assertEquals(initialUsedBytes - expectedReleased, finalUsedBytes,
+        "expired-abort must release the EC stripe-aware replicated size");
+  }
+
+  @Test
+  public void testExpiredAbortReleasesEcStripeAwareQuotaV0() throws Exception {
+    // v0 (inline) counterpart of testExpiredAbortReleasesEcStripeAwareQuota.
+    // The expired-abort EC quota fix changed BOTH the inline (schemaVersion 0)
+    // and split-table (schemaVersion 1) reclaim branches from
+    // dataSize*requiredNodes to the stripe-aware QuotaUtil.getReplicatedSize;
+    // this guards the v0 branch so a regression there cannot pass while only
+    // the v1 case is covered.
+    this.bucketLayout = BucketLayout.DEFAULT;
+    final String volumeName = UUID.randomUUID().toString();
+    final String bucketName = UUID.randomUUID().toString();
+    final String keyName = UUID.randomUUID().toString();
+
+    final ECReplicationConfig ecConfig = new ECReplicationConfig(3, 2);
+    // createPartKeyInfo stores dataSize=100; EC getReplicatedSize(100)=300,
+    // which differs from the buggy 100*requiredNodes=500.
+    final long partDataSize = 100L;
+    final long perPartReplicated =
+        QuotaUtil.getReplicatedSize(partDataSize, ecConfig);
+    assertNotEquals(partDataSize * ecConfig.getRequiredNodes(),
+        perPartReplicated);
+    final long expectedReleased = 2 * perPartReplicated;
+    final long initialUsedBytes = 100 * OzoneConsts.MB;
+
+    OMRequestTestUtils.addVolumeToDB(volumeName, omMetadataManager);
+    OMRequestTestUtils.addBucketToOM(omMetadataManager,
+        OmBucketInfo.newBuilder()
+            .setVolumeName(volumeName)
+            .setBucketName(bucketName)
+            .setBucketLayout(getBucketLayout())
+            .setUsedBytes(initialUsedBytes)
+            .build());
+
+    // Build a schemaVersion 0 (inline), EC-replicated parent MPU with two
+    // inline parts. The v0 reclaim branch reads each part's dataSize and the
+    // replicated size from the parent EC config.
+    final String uploadID = OMMultipartUploadUtils.getMultipartUploadId();
+    OmKeyInfo mpuKeyInfo = new OmKeyInfo.Builder()
+        .setVolumeName(volumeName)
+        .setBucketName(bucketName)
+        .setKeyName(keyName)
+        .build();
+    OmMultipartKeyInfo multipartKeyInfo = new OmMultipartKeyInfo.Builder()
+        .setUploadID(uploadID)
+        .setReplicationConfig(ecConfig)
+        .setUpdateID(1L)
+        .build();
+    multipartKeyInfo.addPartKeyInfo(OMRequestTestUtils.createPartKeyInfo(
+        volumeName, bucketName, keyName, uploadID, 1));
+    multipartKeyInfo.addPartKeyInfo(OMRequestTestUtils.createPartKeyInfo(
+        volumeName, bucketName, keyName, uploadID, 2));
+    String mpuDBKey = OMRequestTestUtils.addMultipartInfoToTable(false,
+        mpuKeyInfo, multipartKeyInfo, 1L, omMetadataManager);
+
+    OMRequest omRequest = doPreExecute(createAbortExpiredMPURequest(
+        volumeName, bucketName, Collections.singletonList(mpuDBKey)));
+    S3ExpiredMultipartUploadsAbortRequest abortRequest =
+        new S3ExpiredMultipartUploadsAbortRequest(omRequest);
+    OMClientResponse omClientResponse =
+        abortRequest.validateAndUpdateCache(ozoneManager, 100L);
+    assertEquals(Status.OK, omClientResponse.getOMResponse().getStatus());
+
+    BatchOperation batchOperation =
+        omMetadataManager.getStore().initBatchOperation();
+    omClientResponse.checkAndUpdateDB(omMetadataManager, batchOperation);
+    omMetadataManager.getStore().commitBatchOperation(batchOperation);
+
+    long finalUsedBytes = omMetadataManager.getBucketTable()
+        .get(omMetadataManager.getBucketKey(volumeName, bucketName))
+        .getUsedBytes();
+    assertEquals(initialUsedBytes - expectedReleased, finalUsedBytes,
+        "v0 expired-abort must release the EC stripe-aware replicated size");
+  }
+
+  /**
+   * Seeds one schemaVersion 1 part with the given logical data size into the
+   * split parts table cache (the cache-aware reclaim scan reads it). The part's
+   * own block replication is irrelevant to quota -- the released size derives
+   * from the parent upload's replication config -- so a single empty location
+   * group is attached just to give block GC a well-formed key.
+   */
+  private void seedV1Part(String uploadID, int partNumber, long epoch,
+      long dataSize) {
+    OmKeyInfo partKeyInfo = new OmKeyInfo.Builder()
+        .setVolumeName("vol").setBucketName("bucket").setKeyName("key")
+        .setReplicationConfig(RatisReplicationConfig.getInstance(ONE))
+        .setOmKeyLocationInfos(Collections.singletonList(
+            new OmKeyLocationInfoGroup(0, new ArrayList<>(), true)))
+        .setDataSize(dataSize)
+        .setCreationTime(Time.now())
+        .setModificationTime(Time.now())
+        .setObjectID(1000L + partNumber)
+        .setUpdateID(epoch)
+        .addMetadata(OzoneConsts.ETAG, "etag-" + partNumber)
+        .build();
+    OmMultipartPartInfo part = OmMultipartPartInfo.from(
+        "part-" + partNumber, partNumber, partKeyInfo);
+    omMetadataManager.getMultipartPartsTable().addCacheEntry(
+        new CacheKey<>(OmMultipartPartKey.of(uploadID, partNumber)),
+        CacheValue.get(epoch, part));
   }
 
   /**

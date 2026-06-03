@@ -21,7 +21,10 @@ import static org.apache.hadoop.ozone.om.lock.OzoneManagerLock.LeveledResource.B
 
 import java.io.IOException;
 import java.nio.file.InvalidPathException;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.SortedMap;
 import org.apache.hadoop.hdds.utils.db.cache.CacheKey;
 import org.apache.hadoop.hdds.utils.db.cache.CacheValue;
 import org.apache.hadoop.ozone.OzoneConsts;
@@ -34,6 +37,8 @@ import org.apache.hadoop.ozone.om.helpers.BucketLayout;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartKey;
 import org.apache.hadoop.ozone.om.helpers.QuotaUtil;
 import org.apache.hadoop.ozone.om.request.key.OMKeyRequest;
 import org.apache.hadoop.ozone.om.request.util.OMMultipartUploadUtils;
@@ -177,14 +182,15 @@ public class S3MultipartUploadAbortRequest extends OMKeyRequest {
           .setUpdateID(trxnLogIndex)
           .build();
 
-      // When abort uploaded key, we need to subtract the PartKey length from
-      // the volume usedBytes.
-      long quotaReleased = 0;
-      for (PartKeyInfo iterPartKeyInfo : multipartKeyInfo.getPartKeyInfoMap()) {
-        quotaReleased += QuotaUtil.getReplicatedSize(
-            iterPartKeyInfo.getPartKeyInfo().getDataSize(),
-            multipartKeyInfo.getReplicationConfig());
-      }
+      // When aborting an upload, subtract every part's replicated size from the
+      // bucket usedBytes. schemaVersion 0 keeps the parts inline; schemaVersion
+      // 1 reads them from the split parts table (cache-aware), synthesizes their
+      // key info for block GC, and tombstones the part rows.
+      List<OmKeyInfo> partsKeyInfoToDelete = new ArrayList<>();
+      List<OmMultipartPartKey> partsTableKeysToDelete = new ArrayList<>();
+      long quotaReleased = reclaimAbortedParts(omMetadataManager,
+          multipartKeyInfo, keyArgs, trxnLogIndex, partsKeyInfoToDelete,
+          partsTableKeysToDelete);
       omBucketInfo.incrUsedBytes(-quotaReleased);
 
       // Update cache of openKeyTable and multipartInfo table.
@@ -198,7 +204,8 @@ public class S3MultipartUploadAbortRequest extends OMKeyRequest {
               CacheValue.get(trxnLogIndex));
 
       omClientResponse = getOmClientResponse(ozoneManager, multipartKeyInfo,
-          multipartKey, multipartOpenKey, omResponse, omBucketInfo);
+          multipartKey, multipartOpenKey, omResponse, omBucketInfo,
+          partsKeyInfoToDelete, partsTableKeysToDelete);
 
       result = Result.SUCCESS;
     } catch (IOException | InvalidPathException ex) {
@@ -240,6 +247,49 @@ public class S3MultipartUploadAbortRequest extends OMKeyRequest {
     return omClientResponse;
   }
 
+  /**
+   * Subtract every part's replicated size from the bucket usedBytes and collect
+   * the parts to reclaim. schemaVersion 0 keeps parts inline; schemaVersion 1
+   * reads them from the split parts table (cache-aware), synthesizes their key
+   * info for block GC, and tombstones the part rows. Returns the released quota
+   * and fills the two lists.
+   */
+  private long reclaimAbortedParts(OMMetadataManager omMetadataManager,
+      OmMultipartKeyInfo multipartKeyInfo,
+      OzoneManagerProtocolProtos.KeyArgs keyArgs, long trxnLogIndex,
+      List<OmKeyInfo> partsKeyInfoToDelete,
+      List<OmMultipartPartKey> partsTableKeysToDelete) throws IOException {
+    String volumeName = keyArgs.getVolumeName();
+    String bucketName = keyArgs.getBucketName();
+    String keyName = keyArgs.getKeyName();
+    String uploadID = keyArgs.getMultipartUploadID();
+    long quotaReleased = 0;
+    if (multipartKeyInfo.getSchemaVersion() == 0) {
+      for (PartKeyInfo iterPartKeyInfo : multipartKeyInfo.getPartKeyInfoMap()) {
+        quotaReleased += QuotaUtil.getReplicatedSize(
+            iterPartKeyInfo.getPartKeyInfo().getDataSize(),
+            multipartKeyInfo.getReplicationConfig());
+      }
+    } else {
+      SortedMap<Integer, OmMultipartPartInfo> tableParts =
+          MultipartPartScanUtil.scanParts(omMetadataManager, uploadID);
+      for (Map.Entry<Integer, OmMultipartPartInfo> entry
+          : tableParts.entrySet()) {
+        OmMultipartPartInfo part = entry.getValue();
+        quotaReleased += QuotaUtil.getReplicatedSize(part.getDataSize(),
+            multipartKeyInfo.getReplicationConfig());
+        partsKeyInfoToDelete.add(part.toOmKeyInfo(volumeName, bucketName,
+            keyName, multipartKeyInfo.getReplicationConfig()));
+        OmMultipartPartKey partKey =
+            OmMultipartPartKey.of(uploadID, entry.getKey());
+        partsTableKeysToDelete.add(partKey);
+        omMetadataManager.getMultipartPartsTable().addCacheEntry(
+            new CacheKey<>(partKey), CacheValue.get(trxnLogIndex));
+      }
+    }
+    return quotaReleased;
+  }
+
   protected OMClientResponse getOmClientResponse(Exception exception,
       OMResponse.Builder omResponse) {
 
@@ -247,16 +297,20 @@ public class S3MultipartUploadAbortRequest extends OMKeyRequest {
             exception), getBucketLayout());
   }
 
+  @SuppressWarnings("checkstyle:ParameterNumber")
   protected OMClientResponse getOmClientResponse(OzoneManager ozoneManager,
       OmMultipartKeyInfo multipartKeyInfo, String multipartKey,
       String multipartOpenKey, OMResponse.Builder omResponse,
-      OmBucketInfo omBucketInfo) {
+      OmBucketInfo omBucketInfo,
+      List<OmKeyInfo> partsKeyInfoToDelete,
+      List<OmMultipartPartKey> partsTableKeysToDelete) {
 
     OMClientResponse omClientResponse = new S3MultipartUploadAbortResponse(
         omResponse.setAbortMultiPartUploadResponse(
             MultipartUploadAbortResponse.newBuilder()).build(), multipartKey,
         multipartOpenKey, multipartKeyInfo,
-        omBucketInfo.copyObject(), getBucketLayout());
+        omBucketInfo.copyObject(), getBucketLayout(), partsKeyInfoToDelete,
+        partsTableKeysToDelete);
     return omClientResponse;
   }
 

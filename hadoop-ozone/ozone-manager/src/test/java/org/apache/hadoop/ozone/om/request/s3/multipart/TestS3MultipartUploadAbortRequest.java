@@ -18,17 +18,36 @@
 package org.apache.hadoop.ozone.om.request.s3.multipart;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.Mockito.when;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.UUID;
+import java.util.stream.Collectors;
+import org.apache.hadoop.hdds.client.RatisReplicationConfig;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationFactor;
+import org.apache.hadoop.hdds.utils.db.BatchOperation;
 import org.apache.hadoop.hdds.utils.db.cache.CacheKey;
 import org.apache.hadoop.hdds.utils.db.cache.CacheValue;
+import org.apache.hadoop.ozone.OzoneConsts;
+import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfo;
+import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfoGroup;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartKey;
 import org.apache.hadoop.ozone.om.request.OMRequestTestUtils;
 import org.apache.hadoop.ozone.om.response.OMClientResponse;
+import org.apache.hadoop.ozone.om.upgrade.OMLayoutFeature;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.KeyLocation;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMRequest;
+import org.apache.hadoop.util.Time;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -93,6 +112,99 @@ public class TestS3MultipartUploadAbortRequest extends TestS3MultipartRequest {
         .getOpenKeyTable(s3MultipartUploadAbortRequest.getBucketLayout())
         .get(multipartOpenKey));
 
+  }
+
+  private List<KeyLocation> abortBlocks(int count, int seed) {
+    List<KeyLocation> keyLocations = new ArrayList<>();
+    for (int i = 0; i < count; i++) {
+      keyLocations.add(KeyLocation.newBuilder()
+          .setBlockID(HddsProtos.BlockID.newBuilder()
+              .setContainerBlockID(HddsProtos.ContainerBlockID.newBuilder()
+                  .setContainerID(seed + i + 1000L)
+                  .setLocalID(seed + i + 100L).build()))
+          .setOffset(0).setLength(200).setCreateVersion(0L).build());
+    }
+    return keyLocations;
+  }
+
+  private void seedV1Part(String uploadID, int partNumber, long epoch,
+      List<KeyLocation> keyLocations) {
+    List<OmKeyLocationInfo> locInfos = keyLocations.stream()
+        .map(OmKeyLocationInfo::getFromProtobuf).collect(Collectors.toList());
+    OmKeyInfo partKeyInfo = new OmKeyInfo.Builder()
+        .setVolumeName("vol").setBucketName("bucket").setKeyName("key")
+        .setReplicationConfig(
+            RatisReplicationConfig.getInstance(ReplicationFactor.ONE))
+        .setOmKeyLocationInfos(Collections.singletonList(
+            new OmKeyLocationInfoGroup(0, locInfos, true)))
+        .setDataSize(keyLocations.stream()
+            .mapToLong(KeyLocation::getLength).sum())
+        .setCreationTime(Time.now())
+        .setModificationTime(Time.now())
+        .setObjectID(1000L + partNumber)
+        .setUpdateID(epoch)
+        .addMetadata(OzoneConsts.ETAG, "etag-" + partNumber)
+        .build();
+    OmMultipartPartInfo part = OmMultipartPartInfo.from(
+        "part-" + partNumber, partNumber, partKeyInfo);
+    omMetadataManager.getMultipartPartsTable().addCacheEntry(
+        new CacheKey<>(OmMultipartPartKey.of(uploadID, partNumber)),
+        CacheValue.get(epoch, part));
+  }
+
+  @Test
+  public void testValidateAndUpdateCacheV1AbortReclaimsParts()
+      throws Exception {
+    // Post-finalization v1 abort: every part row must be deleted and every
+    // part's blocks tombstoned to the deleted table (the leak this fixes).
+    when(ozoneManager.getVersionManager().getMetadataLayoutVersion())
+        .thenReturn(OMLayoutFeature.MPU_PARTS_TABLE_SPLIT.layoutVersion());
+
+    String volumeName = UUID.randomUUID().toString();
+    String bucketName = UUID.randomUUID().toString();
+    String keyName = getKeyName();
+    OMRequestTestUtils.addVolumeAndBucketToDB(volumeName, bucketName,
+        omMetadataManager, getBucketLayout());
+    createParentPath(volumeName, bucketName);
+
+    // Initiate a schemaVersion 1 upload and seed its parts directly into the
+    // split parts table (layout-agnostic; avoids the layout-specific open-key
+    // setup of the commit path).
+    String multipartUploadID =
+        initiateMultipartUploadWithSchemaVersion(volumeName, bucketName,
+            keyName, (byte) 1);
+
+    seedV1Part(multipartUploadID, 1, 2L, abortBlocks(2, 0));
+    seedV1Part(multipartUploadID, 2, 3L, abortBlocks(3, 10));
+    assertNotNull(omMetadataManager.getMultipartPartsTable()
+        .get(OmMultipartPartKey.of(multipartUploadID, 1)));
+    assertNotNull(omMetadataManager.getMultipartPartsTable()
+        .get(OmMultipartPartKey.of(multipartUploadID, 2)));
+
+    OMRequest abortMPURequest = doPreExecuteAbortMPU(volumeName, bucketName,
+        keyName, multipartUploadID);
+    OMClientResponse omClientResponse = getS3MultipartUploadAbortReq(
+        abortMPURequest).validateAndUpdateCache(ozoneManager, 4L);
+    BatchOperation batchOperation =
+        omMetadataManager.getStore().initBatchOperation();
+    omClientResponse.checkAndUpdateDB(omMetadataManager, batchOperation);
+    omMetadataManager.getStore().commitBatchOperation(batchOperation);
+
+    assertEquals(OzoneManagerProtocolProtos.Status.OK,
+        omClientResponse.getOMResponse().getStatus());
+
+    String multipartKey = omMetadataManager.getMultipartKey(volumeName,
+        bucketName, keyName, multipartUploadID);
+    assertNull(omMetadataManager.getMultipartInfoTable().get(multipartKey));
+    // Both part rows are reclaimed.
+    assertNull(omMetadataManager.getMultipartPartsTable()
+        .get(OmMultipartPartKey.of(multipartUploadID, 1)));
+    assertNull(omMetadataManager.getMultipartPartsTable()
+        .get(OmMultipartPartKey.of(multipartUploadID, 2)));
+    // The parts' blocks were moved to the deleted table for GC.
+    assertFalse(omMetadataManager.getDeletedTable()
+            .getRangeKVs(null, 100, multipartKey).isEmpty(),
+        "aborted parts' blocks should be moved to the deleted table");
   }
 
   @Test
