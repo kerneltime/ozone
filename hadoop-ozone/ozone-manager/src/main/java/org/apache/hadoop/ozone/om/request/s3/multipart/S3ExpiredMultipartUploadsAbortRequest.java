@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.SortedMap;
 import org.apache.hadoop.hdds.utils.db.cache.CacheKey;
 import org.apache.hadoop.hdds.utils.db.cache.CacheValue;
 import org.apache.hadoop.ozone.OzoneConsts;
@@ -35,9 +36,13 @@ import org.apache.hadoop.ozone.om.exceptions.OMException;
 import org.apache.hadoop.ozone.om.execution.flowcontrol.ExecutionContext;
 import org.apache.hadoop.ozone.om.helpers.BucketLayout;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
+import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartAbortInfo;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartKey;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartUpload;
+import org.apache.hadoop.ozone.om.helpers.QuotaUtil;
 import org.apache.hadoop.ozone.om.request.key.OMKeyRequest;
 import org.apache.hadoop.ozone.om.request.util.OMMultipartUploadUtils;
 import org.apache.hadoop.ozone.om.request.util.OmResponseUtil;
@@ -271,16 +276,18 @@ public class S3ExpiredMultipartUploadsAbortRequest extends OMKeyRequest {
           }
 
           // When abort uploaded key, we need to subtract the PartKey length
-          // from the volume usedBytes.
-          long quotaReleased = 0;
-          int keyFactor = omMultipartKeyInfo.getReplicationConfig()
-              .getRequiredNodes();
-          for (PartKeyInfo iterPartKeyInfo : omMultipartKeyInfo.
-              getPartKeyInfoMap()) {
-            quotaReleased +=
-                iterPartKeyInfo.getPartKeyInfo().getDataSize() * keyFactor;
-          }
+          // from the volume usedBytes. schemaVersion 0 keeps the parts inline;
+          // schemaVersion 1 reads them from the split parts table, synthesizes
+          // their key info for block GC, and tombstones the part rows.
+          List<OmKeyInfo> partsKeyInfoToDelete = new ArrayList<>();
+          List<OmMultipartPartKey> partsTableKeysToDelete = new ArrayList<>();
+          long quotaReleased = reclaimExpiredParts(omMetadataManager,
+              omMultipartKeyInfo, multipartUpload, trxnLogIndex,
+              partsKeyInfoToDelete, partsTableKeysToDelete);
           omBucketInfo.incrUsedBytes(-quotaReleased);
+          long numParts = omMultipartKeyInfo.getSchemaVersion() == 0
+              ? omMultipartKeyInfo.getPartKeyInfoMap().size()
+              : partsTableKeysToDelete.size();
 
           OmMultipartAbortInfo omMultipartAbortInfo =
               new OmMultipartAbortInfo.Builder()
@@ -288,6 +295,8 @@ public class S3ExpiredMultipartUploadsAbortRequest extends OMKeyRequest {
                   .setMultipartOpenKey(multipartOpenKey)
                   .setMultipartKeyInfo(omMultipartKeyInfo)
                   .setBucketLayout(omBucketInfo.getBucketLayout())
+                  .setPartsKeyInfoToDelete(partsKeyInfoToDelete)
+                  .setPartsTableKeysToDelete(partsTableKeysToDelete)
                   .build();
 
           abortedMultipartUploads.computeIfAbsent(omBucketInfo,
@@ -315,7 +324,6 @@ public class S3ExpiredMultipartUploadsAbortRequest extends OMKeyRequest {
               .addCacheEntry(new CacheKey<>(expiredMPUKeyName),
                   CacheValue.get(trxnLogIndex));
 
-          long numParts = omMultipartKeyInfo.getPartKeyInfoMap().size();
           ozoneManager.getMetrics().incNumExpiredMPUAborted();
           ozoneManager.getMetrics().incNumExpiredMPUPartsAborted(numParts);
           LOG.debug("Expired MPU {} aborted containing {} parts.",
@@ -332,5 +340,48 @@ public class S3ExpiredMultipartUploadsAbortRequest extends OMKeyRequest {
       }
     }
 
+  }
+
+  /**
+   * Subtract every part's size (scaled by replication) from the bucket
+   * usedBytes and collect the parts to reclaim for an expired upload.
+   * schemaVersion 0 keeps parts inline; schemaVersion 1 reads them from the
+   * split parts table, synthesizes their key info for block GC, and tombstones
+   * the part rows. Returns the released quota and fills the two lists.
+   */
+  private long reclaimExpiredParts(OMMetadataManager omMetadataManager,
+      OmMultipartKeyInfo omMultipartKeyInfo, OmMultipartUpload multipartUpload,
+      long trxnLogIndex, List<OmKeyInfo> partsKeyInfoToDelete,
+      List<OmMultipartPartKey> partsTableKeysToDelete) throws IOException {
+    long quotaReleased = 0;
+    if (omMultipartKeyInfo.getSchemaVersion() == 0) {
+      for (PartKeyInfo iterPartKeyInfo : omMultipartKeyInfo
+          .getPartKeyInfoMap()) {
+        quotaReleased += QuotaUtil.getReplicatedSize(
+            iterPartKeyInfo.getPartKeyInfo().getDataSize(),
+            omMultipartKeyInfo.getReplicationConfig());
+      }
+    } else {
+      SortedMap<Integer, OmMultipartPartInfo> tableParts =
+          MultipartPartScanUtil.scanParts(omMetadataManager,
+              multipartUpload.getUploadId());
+      for (Map.Entry<Integer, OmMultipartPartInfo> partEntry
+          : tableParts.entrySet()) {
+        OmMultipartPartInfo part = partEntry.getValue();
+        quotaReleased += QuotaUtil.getReplicatedSize(part.getDataSize(),
+            omMultipartKeyInfo.getReplicationConfig());
+        partsKeyInfoToDelete.add(part.toOmKeyInfo(
+            multipartUpload.getVolumeName(),
+            multipartUpload.getBucketName(),
+            multipartUpload.getKeyName(),
+            omMultipartKeyInfo.getReplicationConfig()));
+        OmMultipartPartKey partKey = OmMultipartPartKey.of(
+            multipartUpload.getUploadId(), partEntry.getKey());
+        partsTableKeysToDelete.add(partKey);
+        omMetadataManager.getMultipartPartsTable().addCacheEntry(
+            new CacheKey<>(partKey), CacheValue.get(trxnLogIndex));
+      }
+    }
+    return quotaReleased;
   }
 }

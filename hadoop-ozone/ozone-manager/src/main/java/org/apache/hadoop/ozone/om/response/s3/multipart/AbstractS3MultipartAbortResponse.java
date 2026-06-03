@@ -19,6 +19,7 @@ package org.apache.hadoop.ozone.om.response.s3.multipart;
 
 import jakarta.annotation.Nonnull;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import org.apache.hadoop.hdds.utils.db.BatchOperation;
@@ -29,6 +30,7 @@ import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartAbortInfo;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartKey;
 import org.apache.hadoop.ozone.om.helpers.RepeatedOmKeyInfo;
 import org.apache.hadoop.ozone.om.response.key.OmKeyResponse;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMResponse;
@@ -74,13 +76,30 @@ public abstract class AbstractS3MultipartAbortResponse extends OmKeyResponse {
 
       OmMultipartKeyInfo omMultipartKeyInfo = abortInfo
           .getOmMultipartKeyInfo();
-      // Move all the parts to delete table
-      for (PartKeyInfo partKeyInfo: omMultipartKeyInfo.getPartKeyInfoMap()) {
-        OmKeyInfo currentKeyPartInfo =
-            OmKeyInfo.getFromProtobuf(partKeyInfo.getPartKeyInfo());
 
+      // Collect the parts to move to the delete table. schemaVersion 0 keeps
+      // parts inline; schemaVersion 1 carries the synthesized part keys (read
+      // from the split parts table) and also deletes the parts-table rows.
+      List<OmKeyInfo> partsToDelete;
+      if (omMultipartKeyInfo.getSchemaVersion() == 0) {
+        partsToDelete = new ArrayList<>();
+        for (PartKeyInfo partKeyInfo : omMultipartKeyInfo.getPartKeyInfoMap()) {
+          partsToDelete.add(
+              OmKeyInfo.getFromProtobuf(partKeyInfo.getPartKeyInfo()));
+        }
+      } else {
+        partsToDelete = abortInfo.getPartsKeyInfoToDelete();
+        for (OmMultipartPartKey partKey
+            : abortInfo.getPartsTableKeysToDelete()) {
+          omMetadataManager.getMultipartPartsTable()
+              .deleteWithBatch(batchOperation, partKey);
+        }
+      }
+
+      // Move all the parts to delete table.
+      for (OmKeyInfo currentKeyPartInfo : partsToDelete) {
         // TODO: Similar to open key deletion response, we can check if the
-        //  MPU part actually contains blocks, and only move the to
+        //  MPU part actually contains blocks, and only move it to
         //  deletedTable if it does.
 
         RepeatedOmKeyInfo repeatedOmKeyInfo = OmUtils.prepareKeyForDelete(omBucketInfo.getObjectID(),
@@ -105,6 +124,7 @@ public abstract class AbstractS3MultipartAbortResponse extends OmKeyResponse {
    * Both LEGACY/OBS and FSO have similar abort logic. The only difference
    * is the multipartOpenKey used in the openKeyTable and openFileTable.
    */
+  @SuppressWarnings("checkstyle:ParameterNumber")
   protected void addAbortToBatch(
       OMMetadataManager omMetadataManager,
       BatchOperation batchOperation,
@@ -112,13 +132,17 @@ public abstract class AbstractS3MultipartAbortResponse extends OmKeyResponse {
       String multipartOpenKey,
       OmMultipartKeyInfo omMultipartKeyInfo,
       OmBucketInfo omBucketInfo,
-      BucketLayout bucketLayout) throws IOException {
+      BucketLayout bucketLayout,
+      List<OmKeyInfo> partsKeyInfoToDelete,
+      List<OmMultipartPartKey> partsTableKeysToDelete) throws IOException {
     OmMultipartAbortInfo omMultipartAbortInfo =
         new OmMultipartAbortInfo.Builder()
             .setMultipartKey(multipartKey)
             .setMultipartOpenKey(multipartOpenKey)
             .setMultipartKeyInfo(omMultipartKeyInfo)
             .setBucketLayout(bucketLayout)
+            .setPartsKeyInfoToDelete(partsKeyInfoToDelete)
+            .setPartsTableKeysToDelete(partsTableKeysToDelete)
             .build();
     addAbortToBatch(omMetadataManager, batchOperation, omBucketInfo,
         Collections.singletonList(omMultipartAbortInfo));

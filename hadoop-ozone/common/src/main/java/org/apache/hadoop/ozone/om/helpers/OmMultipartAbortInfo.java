@@ -17,6 +17,8 @@
 
 package org.apache.hadoop.ozone.om.helpers;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -28,13 +30,24 @@ public final class OmMultipartAbortInfo {
   private final String multipartOpenKey;
   private final OmMultipartKeyInfo omMultipartKeyInfo;
   private final BucketLayout bucketLayout;
+  // For schemaVersion 1 uploads the parts live in the split parts table: the
+  // synthesized part keys to tombstone for block GC, and the parts-table rows
+  // to delete. Empty for schemaVersion 0 (parts inline in omMultipartKeyInfo).
+  private final List<OmKeyInfo> partsKeyInfoToDelete;
+  private final List<OmMultipartPartKey> partsTableKeysToDelete;
 
   private OmMultipartAbortInfo(String multipartKey, String multipartOpenKey,
-      OmMultipartKeyInfo omMultipartKeyInfo, BucketLayout bucketLayout) {
+      OmMultipartKeyInfo omMultipartKeyInfo, BucketLayout bucketLayout,
+      List<OmKeyInfo> partsKeyInfoToDelete,
+      List<OmMultipartPartKey> partsTableKeysToDelete) {
     this.multipartKey = multipartKey;
     this.multipartOpenKey = multipartOpenKey;
     this.omMultipartKeyInfo = omMultipartKeyInfo;
     this.bucketLayout = bucketLayout;
+    this.partsKeyInfoToDelete = partsKeyInfoToDelete == null
+        ? Collections.emptyList() : partsKeyInfoToDelete;
+    this.partsTableKeysToDelete = partsTableKeysToDelete == null
+        ? Collections.emptyList() : partsTableKeysToDelete;
   }
 
   public String getMultipartKey() {
@@ -53,6 +66,14 @@ public final class OmMultipartAbortInfo {
     return bucketLayout;
   }
 
+  public List<OmKeyInfo> getPartsKeyInfoToDelete() {
+    return partsKeyInfoToDelete;
+  }
+
+  public List<OmMultipartPartKey> getPartsTableKeysToDelete() {
+    return partsTableKeysToDelete;
+  }
+
   /**
    * Builder of OmMultipartAbortInfo.
    */
@@ -61,6 +82,8 @@ public final class OmMultipartAbortInfo {
     private String multipartOpenKey;
     private OmMultipartKeyInfo omMultipartKeyInfo;
     private BucketLayout bucketLayout;
+    private List<OmKeyInfo> partsKeyInfoToDelete;
+    private List<OmMultipartPartKey> partsTableKeysToDelete;
 
     public Builder setMultipartKey(String mpuKey) {
       this.multipartKey = mpuKey;
@@ -82,9 +105,20 @@ public final class OmMultipartAbortInfo {
       return this;
     }
 
+    public Builder setPartsKeyInfoToDelete(List<OmKeyInfo> parts) {
+      this.partsKeyInfoToDelete = parts;
+      return this;
+    }
+
+    public Builder setPartsTableKeysToDelete(List<OmMultipartPartKey> keys) {
+      this.partsTableKeysToDelete = keys;
+      return this;
+    }
+
     public OmMultipartAbortInfo build() {
       return new OmMultipartAbortInfo(multipartKey,
-          multipartOpenKey, omMultipartKeyInfo, bucketLayout);
+          multipartOpenKey, omMultipartKeyInfo, bucketLayout,
+          partsKeyInfoToDelete, partsTableKeysToDelete);
     }
   }
 
