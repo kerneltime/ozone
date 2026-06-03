@@ -29,6 +29,8 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.SortedMap;
+import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -51,6 +53,8 @@ import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfoGroup;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartKey;
 import org.apache.hadoop.ozone.om.helpers.RepeatedOmKeyInfo;
 import org.apache.hadoop.ozone.om.request.file.OMFileRequest;
 import org.apache.hadoop.ozone.om.request.key.OMKeyRequest;
@@ -286,8 +290,27 @@ public class S3MultipartUploadCompleteRequest extends OMKeyRequest {
       validateIfMatchETag(keyArgs, existingKeyInfo);
 
       if (!partsList.isEmpty()) {
-        final OmMultipartKeyInfo.PartKeyInfoMap partKeyInfoMap
-            = multipartKeyInfo.getPartKeyInfoMap();
+        final OmMultipartKeyInfo.PartKeyInfoMap partKeyInfoMap;
+        final List<OmMultipartPartKey> partsTableKeysToDelete =
+            new ArrayList<>();
+        if (multipartKeyInfo.getSchemaVersion() == 0) {
+          partKeyInfoMap = multipartKeyInfo.getPartKeyInfoMap();
+        } else {
+          // schemaVersion 1: parts live in the split parts table. Read them
+          // cache-aware and adapt to the inline PartKeyInfoMap shape so the
+          // validation and assembly below are identical to the legacy path.
+          SortedMap<Integer, OmMultipartPartInfo> tableParts =
+              MultipartPartScanUtil.scanParts(omMetadataManager, uploadID);
+          partKeyInfoMap = buildPartKeyInfoMap(tableParts, volumeName,
+              bucketName, keyName, multipartKeyInfo.getReplicationConfig());
+          // Reclaim every scanned part row -- used parts (whose blocks now live
+          // in the assembled key) and discarded parts alike. Discarded parts'
+          // blocks are separately tombstoned by the unused-parts loop below.
+          for (Integer partNumber : tableParts.keySet()) {
+            partsTableKeysToDelete.add(
+                OmMultipartPartKey.of(uploadID, partNumber));
+          }
+        }
         if (partKeyInfoMap.size() == 0) {
           LOG.error("Complete MultipartUpload failed for key {} , MPU Key has" +
                   " no parts in OM, parts given to upload are {}", ozoneKey,
@@ -357,6 +380,14 @@ public class S3MultipartUploadCompleteRequest extends OMKeyRequest {
         updateCache(omMetadataManager, dbBucketKey, omBucketInfo, dbOzoneKey,
             dbMultipartOpenKey, multipartKey, omKeyInfo, trxnLogIndex);
 
+        // schemaVersion 1: the split-table part rows are no longer needed once
+        // the key is assembled; tombstone them in cache (the response deletes
+        // them from the DB).
+        for (OmMultipartPartKey partKey : partsTableKeysToDelete) {
+          omMetadataManager.getMultipartPartsTable().addCacheEntry(
+              new CacheKey<>(partKey), CacheValue.get(trxnLogIndex));
+        }
+
         omResponse.setCompleteMultiPartUploadResponse(
             MultipartUploadCompleteResponse.newBuilder()
                 .setVolume(requestedVolume)
@@ -369,7 +400,8 @@ public class S3MultipartUploadCompleteRequest extends OMKeyRequest {
         omClientResponse =
             getOmClientResponse(multipartKey, omResponse, dbMultipartOpenKey,
                 omKeyInfo, allKeyInfoToRemove, omBucketInfo,
-                volumeId, bucketId, missingParentInfos, multipartKeyInfo);
+                volumeId, bucketId, missingParentInfos, multipartKeyInfo,
+                partsTableKeysToDelete);
 
         result = Result.SUCCESS;
       } else {
@@ -411,11 +443,35 @@ public class S3MultipartUploadCompleteRequest extends OMKeyRequest {
       OmKeyInfo omKeyInfo,  List<OmKeyInfo> allKeyInfoToRemove,
       OmBucketInfo omBucketInfo,
       long volumeId, long bucketId, List<OmDirectoryInfo> missingParentInfos,
-      OmMultipartKeyInfo multipartKeyInfo) {
+      OmMultipartKeyInfo multipartKeyInfo,
+      List<OmMultipartPartKey> partsTableKeysToDelete) {
 
     return new S3MultipartUploadCompleteResponse(omResponse.build(),
         multipartKey, dbMultipartOpenKey, omKeyInfo, allKeyInfoToRemove,
-        getBucketLayout(), omBucketInfo, bucketId);
+        getBucketLayout(), omBucketInfo, bucketId, partsTableKeysToDelete);
+  }
+
+  /**
+   * Adapts the split parts-table rows of a schemaVersion 1 upload into the
+   * inline {@link OmMultipartKeyInfo.PartKeyInfoMap} shape, so Complete's
+   * validation/assembly can consume them unchanged. The part's eTag is carried
+   * in the reconstructed key's metadata (see {@link OmMultipartPartInfo#toOmKeyInfo}).
+   */
+  private OmMultipartKeyInfo.PartKeyInfoMap buildPartKeyInfoMap(
+      SortedMap<Integer, OmMultipartPartInfo> tableParts, String volumeName,
+      String bucketName, String keyName, ReplicationConfig replicationConfig) {
+    SortedMap<Integer, PartKeyInfo> partKeyInfos = new TreeMap<>();
+    for (Map.Entry<Integer, OmMultipartPartInfo> entry
+        : tableParts.entrySet()) {
+      OmMultipartPartInfo part = entry.getValue();
+      partKeyInfos.put(entry.getKey(), PartKeyInfo.newBuilder()
+          .setPartNumber(part.getPartNumber())
+          .setPartName(part.getPartName())
+          .setPartKeyInfo(part.toOmKeyInfo(volumeName, bucketName, keyName,
+              replicationConfig).getProtobuf(getOmRequest().getVersion()))
+          .build());
+    }
+    return new OmMultipartKeyInfo.PartKeyInfoMap(partKeyInfos);
   }
 
   protected void checkDirectoryAlreadyExists(OzoneManager ozoneManager,
