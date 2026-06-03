@@ -54,9 +54,22 @@ public class OmMultipartUploadCompleteList {
    */
   public List<Part> getPartsList() {
     List<Part> partList = new ArrayList<>();
-    multipartMap.forEach((partNumber, eTag) -> partList.add(Part
-        // set partName equal to eTag for back compatibility (partName is a required property)
-        .newBuilder().setPartName(eTag).setETag(eTag).setPartNumber(partNumber).build()));
+    // Each map value is the per-part identifier the caller supplied at Complete:
+    // for an S3 client it is the part's MD5 eTag; for the native Ozone client
+    // (which never computes an eTag) it is the part NAME. We populate BOTH the
+    // proto partName and eTag fields from that single value. Two reasons:
+    //   1. partName is a required proto field, so it must be set.
+    //   2. CONTRACT (load-bearing for the HDDS-14661 eTag-less multipart path):
+    //      the OM's CompleteMultipartUpload validator takes its eTag-based path
+    //      only when EVERY Part has an eTag (Part::hasETag). Mirroring the value
+    //      into eTag here keeps a native, eTag-less upload on that path, where it
+    //      passes via the validator's "request eTag equals the stored part name"
+    //      fallback. See S3MultipartUploadCompleteRequest#eTagBasedValidator.
+    // Do NOT stop populating eTag here without updating that validator: a native
+    // multipart Complete would then fail every part with INVALID_PART.
+    multipartMap.forEach((partNumber, partIdentifier) -> partList.add(Part
+        .newBuilder().setPartName(partIdentifier).setETag(partIdentifier)
+        .setPartNumber(partNumber).build()));
     return partList;
   }
 }

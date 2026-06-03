@@ -100,6 +100,14 @@ public class S3MultipartUploadCompleteRequest extends OMKeyRequest {
               .findFirst().ifPresent(kv -> dbPartETag.set(kv.getValue()));
           dbPartName = partKeyInfo.getPartName();
         }
+        // A part is valid if the value supplied at Complete matches EITHER the
+        // stored part eTag OR the stored part name. The "|| stored part name"
+        // clause is load-bearing for the HDDS-14661 eTag-less multipart path:
+        // a native Ozone client commits parts with no eTag (dbPartETag == null)
+        // and supplies the part name at Complete (mirrored into the eTag field
+        // by OmMultipartUploadCompleteList#getPartsList), so the match succeeds
+        // only via this fallback. Do NOT drop it as redundant defensiveness --
+        // native multipart Complete would then fail every part with INVALID_PART.
         return new MultipartCommitRequestPart(eTag, partKeyInfo == null ? null :
             dbPartETag.get(), StringUtils.equals(eTag, dbPartETag.get()) || StringUtils.equals(eTag, dbPartName));
       };
