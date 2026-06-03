@@ -24,6 +24,7 @@ import java.util.Objects;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.fs.FileChecksum;
 import org.apache.hadoop.fs.FileEncryptionInfo;
+import org.apache.hadoop.hdds.client.ReplicationConfig;
 import org.apache.hadoop.hdds.utils.db.Codec;
 import org.apache.hadoop.hdds.utils.db.DelegatedCodec;
 import org.apache.hadoop.hdds.utils.db.Proto2Codec;
@@ -310,6 +311,31 @@ public final class OmMultipartPartInfo {
         .setFileChecksum(omKeyInfo.getFileChecksum())
         .setETag(omKeyInfo.getMetadata().get(OzoneConsts.ETAG));
     return builder.build();
+  }
+
+  /**
+   * Reconstruct this committed part as an {@link OmKeyInfo} for quota
+   * accounting and block cleanup. The part row stores no volume/bucket/key or
+   * replication config (those live on the parent multipart upload), so the
+   * caller supplies them. The result mirrors the part key the legacy inline
+   * path keeps in MultipartKeyInfo, so quota deltas and deleted-table entries
+   * match the schemaVersion 0 behavior for the same blocks.
+   */
+  public OmKeyInfo toOmKeyInfo(String volumeName, String bucketName,
+      String keyName, ReplicationConfig replicationConfig) {
+    return new OmKeyInfo.Builder()
+        .setVolumeName(volumeName)
+        .setBucketName(bucketName)
+        .setKeyName(keyName)
+        .setReplicationConfig(replicationConfig)
+        .setOmKeyLocationInfos(keyLocationInfos)
+        .setDataSize(dataSize)
+        .setCreationTime(modificationTime)
+        .setModificationTime(modificationTime)
+        .setObjectID(objectID)
+        .setUpdateID(updateID)
+        .setFileEncryptionInfo(encInfo)
+        .build();
   }
 
   private KeyLocationList getKeyLocationInfosAsProto() {

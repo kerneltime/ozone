@@ -291,8 +291,8 @@ public class TestS3MultipartResponse {
 
     return new S3MultipartUploadCommitPartResponseWithFSO(omResponse,
         multipartKey, openKey, multipartKeyInfo, keyToDeleteMap,
-        openPartKeyInfoToBeDeleted, omBucketInfo, omBucketInfo.getObjectID(),
-        getBucketLayout());
+        openPartKeyInfoToBeDeleted, null, null, omBucketInfo,
+        omBucketInfo.getObjectID(), getBucketLayout());
   }
 
   @SuppressWarnings("checkstyle:ParameterNumber")
