@@ -59,6 +59,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 import java.io.File;
+import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -73,6 +74,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import org.apache.hadoop.hdds.client.BlockID;
 import org.apache.hadoop.hdds.client.RatisReplicationConfig;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.protocol.StorageType;
@@ -80,6 +82,7 @@ import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.hdds.utils.TransactionInfo;
 import org.apache.hadoop.hdds.utils.db.cache.CacheKey;
 import org.apache.hadoop.hdds.utils.db.cache.CacheValue;
+import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.om.codec.OMDBDefinition;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
 import org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes;
@@ -87,8 +90,11 @@ import org.apache.hadoop.ozone.om.helpers.BucketLayout;
 import org.apache.hadoop.ozone.om.helpers.ListOpenFilesResult;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfoGroup;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartKey;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartUpload;
 import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
 import org.apache.hadoop.ozone.om.helpers.OpenKeySession;
@@ -1041,6 +1047,91 @@ public class TestOmMetadataManager {
     names = getMultipartKeyNames(allExpiredMPUs);
     assertEquals(numExpiredMPUs, names.size());
     assertThat(expiredMPUs).containsAll(names);
+  }
+
+  @Test
+  public void testGetExpiredMPUsCountsSplitTableParts() throws Exception {
+    // schemaVersion 1 uploads keep their parts in the split parts table, so the
+    // inline part map is empty. The maxParts throttle in discovery must still
+    // count those split-table parts; otherwise every v1 upload contributes 0
+    // and the throttle is defeated -- a single cleanup cycle could reclaim an
+    // unbounded number of parts. This is the huge-MPU case the feature targets.
+    final String bucketName = UUID.randomUUID().toString();
+    final String volumeName = UUID.randomUUID().toString();
+    final int numExpiredMPUs = 4;
+    final int numPartsPerMPU = 5;
+
+    final long expireThresholdMillis = ozoneConfiguration.getTimeDuration(
+        OZONE_OM_MPU_EXPIRE_THRESHOLD,
+        OZONE_OM_MPU_EXPIRE_THRESHOLD_DEFAULT,
+        TimeUnit.MILLISECONDS);
+    final Duration expireThreshold = Duration.ofMillis(expireThresholdMillis);
+    final long expiredMPUCreationTime =
+        expireThreshold.negated().plusMillis(Time.now()).toMillis();
+
+    Set<String> expiredMPUs = new HashSet<>();
+    for (int i = 0; i < numExpiredMPUs; i++) {
+      String uploadId = OMMultipartUploadUtils.getMultipartUploadId();
+      OmMultipartKeyInfo mpuKeyInfo = OMRequestTestUtils
+          .createOmMultipartKeyInfo(uploadId, expiredMPUCreationTime,
+              HddsProtos.ReplicationType.RATIS,
+              HddsProtos.ReplicationFactor.ONE, 0L)
+          .toBuilder().setSchemaVersion((byte) 1).build();
+
+      String keyName = "expired" + i;
+      OmKeyInfo keyInfo = OMRequestTestUtils.createOmKeyInfo(volumeName,
+              bucketName, keyName, RatisReplicationConfig.getInstance(ONE))
+          .setCreationTime(expiredMPUCreationTime)
+          .build();
+
+      // Parts live in the split table, keyed by uploadId (not inline).
+      for (int j = 1; j <= numPartsPerMPU; j++) {
+        seedSplitPart(uploadId, j, expiredMPUCreationTime);
+      }
+
+      expiredMPUs.add(OMRequestTestUtils.addMultipartInfoToTable(
+          false, keyInfo, mpuKeyInfo, 0L, omMetadataManager));
+    }
+
+    // Budget below the combined part count: discovery counts the split-table
+    // parts and stops one MPU short.
+    List<ExpiredMultipartUploadsBucket> someExpiredMPUs =
+        omMetadataManager.getExpiredMultipartUploads(expireThreshold,
+            (numExpiredMPUs * numPartsPerMPU) - numPartsPerMPU);
+    List<String> names = getMultipartKeyNames(someExpiredMPUs);
+    assertEquals(numExpiredMPUs - 1, names.size());
+    assertThat(expiredMPUs).containsAll(names);
+
+    // Budget above the combined part count: all expired MPUs returned.
+    List<ExpiredMultipartUploadsBucket> allExpiredMPUs =
+        omMetadataManager.getExpiredMultipartUploads(expireThreshold,
+            (numExpiredMPUs * numPartsPerMPU) + numPartsPerMPU);
+    names = getMultipartKeyNames(allExpiredMPUs);
+    assertEquals(numExpiredMPUs, names.size());
+    assertThat(expiredMPUs).containsAll(names);
+  }
+
+  private void seedSplitPart(String uploadId, int partNumber, long time)
+      throws IOException {
+    OmKeyLocationInfo location = new OmKeyLocationInfo.Builder()
+        .setBlockID(new BlockID(1000L + partNumber, 100L + partNumber))
+        .setLength(100L).setOffset(0L).build();
+    OmKeyInfo partKeyInfo = new OmKeyInfo.Builder()
+        .setVolumeName("vol").setBucketName("bucket").setKeyName("key")
+        .setReplicationConfig(RatisReplicationConfig.getInstance(ONE))
+        .setOmKeyLocationInfos(Collections.singletonList(
+            new OmKeyLocationInfoGroup(0,
+                Collections.singletonList(location), true)))
+        .setDataSize(100L)
+        .setCreationTime(time)
+        .setModificationTime(time)
+        .setObjectID(partNumber)
+        .setUpdateID(partNumber)
+        .addMetadata(OzoneConsts.ETAG, "etag-" + partNumber)
+        .build();
+    omMetadataManager.getMultipartPartsTable().put(
+        OmMultipartPartKey.of(uploadId, partNumber),
+        OmMultipartPartInfo.from("part-" + partNumber, partNumber, partKeyInfo));
   }
 
   private List<String> getOpenKeyNames(
