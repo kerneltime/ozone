@@ -52,18 +52,24 @@ import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import org.apache.commons.lang3.tuple.ImmutablePair;
+import org.apache.hadoop.hdds.client.BlockID;
 import org.apache.hadoop.hdds.client.RatisReplicationConfig;
 import org.apache.hadoop.hdds.client.StandaloneReplicationConfig;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.hdds.utils.db.DBStore;
 import org.apache.hadoop.hdds.utils.db.Table;
 import org.apache.hadoop.hdds.utils.db.TypedTable;
+import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.om.OMMetadataManager;
 import org.apache.hadoop.ozone.om.OmMetadataManagerImpl;
 import org.apache.hadoop.ozone.om.helpers.BucketLayout;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfo;
+import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfoGroup;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartKey;
 import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
 import org.apache.hadoop.ozone.om.helpers.RepeatedOmKeyInfo;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.KeyInfo;
@@ -781,6 +787,109 @@ public class TestOmTableInsightTask extends AbstractReconSqlDBTest {
     assertEquals(300L, getUnReplicatedSizeForTable(MULTIPART_INFO_TABLE));
     // each MPU part is replicated using RATIS THREE, total replicated size = 300 bytes * 3 = 900 bytes.
     assertEquals(900L, getReplicatedSizeForTable(MULTIPART_INFO_TABLE));
+  }
+
+  @Test
+  public void testReprocessForMultipartInfoTableSchemaVersion1() throws Exception {
+    // schemaVersion 1 upload: the inline part list is empty and the parts live
+    // in the split multipartPartsTable. Reprocess must read their sizes from
+    // there and derive the replicated size from the parent upload's replication
+    // config, matching the schemaVersion 0 result for equivalent parts.
+    String uploadID = UUID.randomUUID().toString();
+    String volumeName = UUID.randomUUID().toString();
+    String bucketName = UUID.randomUUID().toString();
+    String keyName = UUID.randomUUID().toString();
+
+    OmMultipartKeyInfo omMultipartKeyInfo = new OmMultipartKeyInfo.Builder()
+        .setObjectID(1L)
+        .setUploadID(uploadID)
+        .setCreationTime(Time.now())
+        .setReplicationConfig(RatisReplicationConfig.getInstance(
+            HddsProtos.ReplicationFactor.THREE))
+        .setSchemaVersion((byte) 1)
+        .build();
+    String multipartKey = reconOMMetadataManager.getMultipartKey(
+        volumeName, bucketName, keyName, uploadID);
+    reconOMMetadataManager.getMultipartInfoTable().put(multipartKey, omMultipartKeyInfo);
+
+    // Three 100-byte parts in the split table; the inline list stays empty.
+    for (int partNumber = 1; partNumber <= 3; partNumber++) {
+      reconOMMetadataManager.getMultipartPartsTable().put(
+          OmMultipartPartKey.of(uploadID, partNumber),
+          createSplitPart(partNumber, 100L));
+    }
+
+    ReconOmTask.TaskResult result = omTableInsightTask.reprocess(reconOMMetadataManager);
+    assertTrue(result.isTaskSuccess());
+
+    assertEquals(1L, getCountForTable(MULTIPART_INFO_TABLE));
+    // 3 parts * 100 bytes = 300 bytes unreplicated.
+    assertEquals(300L, getUnReplicatedSizeForTable(MULTIPART_INFO_TABLE));
+    // RATIS THREE -> 300 * 3 = 900 bytes replicated.
+    assertEquals(900L, getReplicatedSizeForTable(MULTIPART_INFO_TABLE));
+  }
+
+  @Test
+  public void testProcessForMultipartInfoTableSchemaVersion1() throws Exception {
+    // A schemaVersion 1 upload's parts live in the split table, so a
+    // multipartInfoTable PUT/DELETE event carries an empty inline list. The
+    // incremental path must handle it without error: the upload is counted, and
+    // the part sizes (tracked via the split table) are reflected at reprocess,
+    // not from these events.
+    String uploadID = UUID.randomUUID().toString();
+    String volumeName = UUID.randomUUID().toString();
+    String bucketName = UUID.randomUUID().toString();
+    String keyName = UUID.randomUUID().toString();
+    OmMultipartKeyInfo mpu = new OmMultipartKeyInfo.Builder()
+        .setObjectID(1L)
+        .setUploadID(uploadID)
+        .setCreationTime(Time.now())
+        .setReplicationConfig(RatisReplicationConfig.getInstance(
+            HddsProtos.ReplicationFactor.THREE))
+        .setSchemaVersion((byte) 1)
+        .build();
+    String multipartKey = reconOMMetadataManager.getMultipartKey(
+        volumeName, bucketName, keyName, uploadID);
+
+    ArrayList<OMDBUpdateEvent> putEvents = new ArrayList<>();
+    putEvents.add(getOMUpdateEvent(multipartKey, mpu, MULTIPART_INFO_TABLE, PUT, null));
+    omTableInsightTask.process(new OMUpdateEventBatch(putEvents, 0L), Collections.emptyMap());
+
+    // The upload is counted; size stays 0 incrementally (split-table parts are
+    // accounted at reprocess, see testReprocessForMultipartInfoTableSchemaVersion1).
+    assertEquals(1L, getCountForTable(MULTIPART_INFO_TABLE));
+    assertEquals(0L, getUnReplicatedSizeForTable(MULTIPART_INFO_TABLE));
+    assertEquals(0L, getReplicatedSizeForTable(MULTIPART_INFO_TABLE));
+
+    // DELETE handles the empty inline list without error and decrements count.
+    ArrayList<OMDBUpdateEvent> deleteEvents = new ArrayList<>();
+    deleteEvents.add(getOMUpdateEvent(multipartKey, mpu, MULTIPART_INFO_TABLE, DELETE, null));
+    omTableInsightTask.process(new OMUpdateEventBatch(deleteEvents, 0L), Collections.emptyMap());
+    assertEquals(0L, getCountForTable(MULTIPART_INFO_TABLE));
+  }
+
+  private OmMultipartPartInfo createSplitPart(int partNumber, long dataSize) {
+    OmKeyInfo partKeyInfo = new OmKeyInfo.Builder()
+        .setVolumeName("vol")
+        .setBucketName("bucket")
+        .setKeyName("key")
+        .setReplicationConfig(RatisReplicationConfig.getInstance(
+            HddsProtos.ReplicationFactor.THREE))
+        .setOmKeyLocationInfos(Collections.singletonList(
+            new OmKeyLocationInfoGroup(0, Collections.singletonList(
+                new OmKeyLocationInfo.Builder()
+                    .setBlockID(new BlockID(partNumber, partNumber))
+                    .setLength(dataSize)
+                    .setOffset(0)
+                    .build()))))
+        .setDataSize(dataSize)
+        .setCreationTime(Time.now())
+        .setModificationTime(Time.now())
+        .setObjectID(partNumber)
+        .setUpdateID(1)
+        .addMetadata(OzoneConsts.ETAG, "etag-" + partNumber)
+        .build();
+    return OmMultipartPartInfo.from("part-" + partNumber, partNumber, partKeyInfo);
   }
 
   public PartKeyInfo createPartKeyInfo(String volumeName, String bucketName,

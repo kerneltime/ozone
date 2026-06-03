@@ -24,6 +24,9 @@ import org.apache.hadoop.hdds.utils.db.Table;
 import org.apache.hadoop.hdds.utils.db.TableIterator;
 import org.apache.hadoop.ozone.om.OMMetadataManager;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartKey;
+import org.apache.hadoop.ozone.om.helpers.QuotaUtil;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.PartKeyInfo;
 import org.apache.hadoop.ozone.recon.api.types.ReconBasicOmKeyInfo;
 import org.slf4j.Logger;
@@ -32,6 +35,14 @@ import org.slf4j.LoggerFactory;
 /**
  * Manages records in the MultipartInfo Table, updating counts and sizes of
  * multipart upload keys in the backend.
+ *
+ * <p>For schemaVersion 1 uploads the per-part records live in the separate
+ * multipartPartsTable rather than inline in the multipartInfoTable row, so the
+ * reprocess path ({@link #getTableSizeAndCount}) reads their sizes from that
+ * table, deriving the replicated size from the parent upload's replication
+ * config. The incremental event path observes only multipartInfoTable events,
+ * whose inline part list is empty for v1 uploads, so v1 part sizes are
+ * reflected after the next reprocess.</p>
  */
 public class MultipartInfoInsightHandler implements OmTableHandler {
 
@@ -163,10 +174,31 @@ public class MultipartInfoInsightHandler implements OmTableHandler {
         Table.KeyValue<String, OmMultipartKeyInfo> kv = iterator.next();
         if (kv != null && kv.getValue() != null) {
           OmMultipartKeyInfo multipartKeyInfo = kv.getValue();
-          for (PartKeyInfo partKeyInfo : multipartKeyInfo.getPartKeyInfoMap()) {
-            ReconBasicOmKeyInfo omKeyInfo = ReconBasicOmKeyInfo.getFromProtobuf(partKeyInfo.getPartKeyInfo());
-            unReplicatedSize += omKeyInfo.getDataSize();
-            replicatedSize += omKeyInfo.getReplicatedSize();
+          if (multipartKeyInfo.getSchemaVersion() == 0) {
+            for (PartKeyInfo partKeyInfo : multipartKeyInfo.getPartKeyInfoMap()) {
+              ReconBasicOmKeyInfo omKeyInfo = ReconBasicOmKeyInfo.getFromProtobuf(partKeyInfo.getPartKeyInfo());
+              unReplicatedSize += omKeyInfo.getDataSize();
+              replicatedSize += omKeyInfo.getReplicatedSize();
+            }
+          } else {
+            // schemaVersion 1: parts live in the split parts table. Part rows
+            // carry no replication config, so derive the replicated size from
+            // the parent upload's replication config -- mirroring how the
+            // inline PartKeyInfo's KeyInfo carries it for schemaVersion 0.
+            try (Table.KeyValueIterator<OmMultipartPartKey, OmMultipartPartInfo> partIterator =
+                omMetadataManager.getMultipartPartsTable().iterator(
+                    OmMultipartPartKey.prefix(multipartKeyInfo.getUploadID()))) {
+              while (partIterator.hasNext()) {
+                OmMultipartPartInfo part = partIterator.next().getValue();
+                if (part == null
+                    || multipartKeyInfo.getReplicationConfig() == null) {
+                  continue;
+                }
+                unReplicatedSize += part.getDataSize();
+                replicatedSize += QuotaUtil.getReplicatedSize(
+                    part.getDataSize(), multipartKeyInfo.getReplicationConfig());
+              }
+            }
           }
           count++;
         }
