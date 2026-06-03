@@ -841,6 +841,82 @@ public class TestS3MultipartUploadCommitPartRequest
     assertNull(toDeleteKeyMap);
   }
 
+  /**
+   * Demonstrates the write-amplification fix that motivates the parts-table
+   * split (HDDS-10611). On every CommitPart the schemaVersion 0 path appends the
+   * part to the inline part list and re-serializes the whole multipartInfoTable
+   * row, so that row -- rewritten on each of N commits -- grows linearly with
+   * the part count (O(N^2) bytes rewritten across the upload). The schemaVersion
+   * 1 path stores each part in the split parts table and leaves the inline list
+   * empty, so the info row stays at its empty-parts size no matter how many
+   * parts commit. Runs for both OBS and FSO via the subclass.
+   */
+  @Test
+  public void testV1BoundsMultipartInfoRowGrowth() throws Exception {
+    final int numParts = 20;
+
+    // schemaVersion 0: the default (pre-finalization) layout version.
+    int[] v0RowSizes = commitPartsMeasuringInfoRow(numParts);
+
+    // schemaVersion 1: the finalized layout version.
+    when(ozoneManager.getVersionManager().getMetadataLayoutVersion())
+        .thenReturn(OMLayoutFeature.MPU_PARTS_TABLE_SPLIT.layoutVersion());
+    int[] v1RowSizes = commitPartsMeasuringInfoRow(numParts);
+
+    for (int i = 1; i < numParts; i++) {
+      // v0: the info row grows with every committed part.
+      assertTrue(v0RowSizes[i] > v0RowSizes[i - 1],
+          "schemaVersion 0 info row should grow on every commit");
+      // v1: the info row never grows -- parts live in the split table.
+      assertEquals(v1RowSizes[0], v1RowSizes[i],
+          "schemaVersion 1 info row size must not grow with part count");
+    }
+
+    // After N parts the v1 info row is far smaller than the v0 row that carries
+    // all N parts inline.
+    assertTrue(v1RowSizes[numParts - 1] < v0RowSizes[numParts - 1],
+        "schemaVersion 1 info row must stay smaller than the inline v0 row");
+  }
+
+  /**
+   * Commit {@code numParts} parts to a fresh upload and return the serialized
+   * size of its multipartInfoTable row after each commit.
+   */
+  private int[] commitPartsMeasuringInfoRow(int numParts) throws Exception {
+    String volumeName = UUID.randomUUID().toString();
+    String bucketName = UUID.randomUUID().toString();
+    String keyName = getKeyName();
+    OMRequestTestUtils.addVolumeAndBucketToDB(volumeName, bucketName,
+        omMetadataManager, getBucketLayout());
+    createParentPath(volumeName, bucketName);
+
+    OMRequest initiateMPURequest =
+        doPreExecuteInitiateMPU(volumeName, bucketName, keyName);
+    String uploadID = getS3InitiateMultipartUploadReq(initiateMPURequest)
+        .validateAndUpdateCache(ozoneManager, 1L).getOMResponse()
+        .getInitiateMultiPartUploadResponse().getMultipartUploadID();
+    String multipartKey = omMetadataManager.getMultipartKey(volumeName,
+        bucketName, keyName, uploadID);
+
+    int[] rowSizes = new int[numParts];
+    long txnIndex = 2L;
+    for (int partNumber = 1; partNumber <= numParts; partNumber++) {
+      long clientID = 1000L + partNumber;
+      addKeyToOpenKeyTable(volumeName, bucketName, keyName, clientID);
+      OMRequest commitRequest = doPreExecuteCommitMPU(volumeName, bucketName,
+          keyName, clientID, uploadID, partNumber);
+      OMClientResponse response = getS3MultipartUploadCommitReq(commitRequest)
+          .validateAndUpdateCache(ozoneManager, txnIndex++);
+      assertSame(OzoneManagerProtocolProtos.Status.OK,
+          response.getOMResponse().getStatus());
+      OmMultipartKeyInfo infoRow =
+          omMetadataManager.getMultipartInfoTable().get(multipartKey);
+      assertNotNull(infoRow);
+      rowSizes[partNumber - 1] = infoRow.getProto().getSerializedSize();
+    }
+    return rowSizes;
+  }
+
   protected void addKeyToOpenKeyTable(String volumeName, String bucketName,
       String keyName, long clientID) throws Exception {
     OMRequestTestUtils.addKeyToTable(true, true, volumeName, bucketName,
