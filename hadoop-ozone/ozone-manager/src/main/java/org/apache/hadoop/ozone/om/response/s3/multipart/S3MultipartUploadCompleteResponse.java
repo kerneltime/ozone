@@ -21,6 +21,7 @@ import static org.apache.hadoop.ozone.om.codec.OMDBDefinition.BUCKET_TABLE;
 import static org.apache.hadoop.ozone.om.codec.OMDBDefinition.DELETED_TABLE;
 import static org.apache.hadoop.ozone.om.codec.OMDBDefinition.KEY_TABLE;
 import static org.apache.hadoop.ozone.om.codec.OMDBDefinition.MULTIPART_INFO_TABLE;
+import static org.apache.hadoop.ozone.om.codec.OMDBDefinition.MULTIPART_PARTS_TABLE;
 import static org.apache.hadoop.ozone.om.codec.OMDBDefinition.OPEN_KEY_TABLE;
 
 import jakarta.annotation.Nonnull;
@@ -32,6 +33,7 @@ import org.apache.hadoop.ozone.om.OMMetadataManager;
 import org.apache.hadoop.ozone.om.helpers.BucketLayout;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartKey;
 import org.apache.hadoop.ozone.om.helpers.RepeatedOmKeyInfo;
 import org.apache.hadoop.ozone.om.response.CleanupTableInfo;
 import org.apache.hadoop.ozone.om.response.key.OmKeyResponse;
@@ -46,7 +48,7 @@ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMRespo
  * 3) Delete unused parts.
  */
 @CleanupTableInfo(cleanupTables = {OPEN_KEY_TABLE, KEY_TABLE, DELETED_TABLE,
-    MULTIPART_INFO_TABLE, BUCKET_TABLE})
+    MULTIPART_INFO_TABLE, MULTIPART_PARTS_TABLE, BUCKET_TABLE})
 public class S3MultipartUploadCompleteResponse extends OmKeyResponse {
   private String multipartKey;
   private String multipartOpenKey;
@@ -54,6 +56,7 @@ public class S3MultipartUploadCompleteResponse extends OmKeyResponse {
   private List<OmKeyInfo> allKeyInfoToRemove;
   private OmBucketInfo omBucketInfo;
   private long bucketId;
+  private List<OmMultipartPartKey> partsTableKeysToDelete;
 
   @SuppressWarnings("parameternumber")
   public S3MultipartUploadCompleteResponse(
@@ -64,7 +67,8 @@ public class S3MultipartUploadCompleteResponse extends OmKeyResponse {
       @Nonnull List<OmKeyInfo> allKeyInfoToRemove,
       @Nonnull BucketLayout bucketLayout,
       OmBucketInfo omBucketInfo,
-      long bucketId) {
+      long bucketId,
+      @Nullable List<OmMultipartPartKey> partsTableKeysToDelete) {
     super(omResponse, bucketLayout);
     this.allKeyInfoToRemove = allKeyInfoToRemove;
     this.multipartKey = multipartKey;
@@ -72,6 +76,7 @@ public class S3MultipartUploadCompleteResponse extends OmKeyResponse {
     this.omKeyInfo = omKeyInfo;
     this.omBucketInfo = omBucketInfo;
     this.bucketId = bucketId;
+    this.partsTableKeysToDelete = partsTableKeysToDelete;
   }
 
   /**
@@ -93,6 +98,14 @@ public class S3MultipartUploadCompleteResponse extends OmKeyResponse {
         .deleteWithBatch(batchOperation, multipartOpenKey);
     omMetadataManager.getMultipartInfoTable().deleteWithBatch(batchOperation,
         multipartKey);
+
+    // schemaVersion 1: delete the upload's part rows from the split table.
+    if (partsTableKeysToDelete != null) {
+      for (OmMultipartPartKey partKey : partsTableKeysToDelete) {
+        omMetadataManager.getMultipartPartsTable()
+            .deleteWithBatch(batchOperation, partKey);
+      }
+    }
 
     // 2. Add key to KeyTable
     addToKeyTable(omMetadataManager, batchOperation);

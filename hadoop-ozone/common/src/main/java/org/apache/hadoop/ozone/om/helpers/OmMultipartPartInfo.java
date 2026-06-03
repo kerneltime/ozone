@@ -335,7 +335,7 @@ public final class OmMultipartPartInfo {
    */
   public OmKeyInfo toOmKeyInfo(String volumeName, String bucketName,
       String keyName, ReplicationConfig replicationConfig) {
-    return new OmKeyInfo.Builder()
+    OmKeyInfo.Builder builder = new OmKeyInfo.Builder()
         .setVolumeName(volumeName)
         .setBucketName(bucketName)
         .setKeyName(keyName)
@@ -347,7 +347,14 @@ public final class OmMultipartPartInfo {
         .setObjectID(objectID)
         .setUpdateID(updateID)
         .setFileEncryptionInfo(encInfo)
-        .build();
+        .setFileChecksum(fileChecksum);
+    // Surface the eTag in metadata so Complete's per-part validation and the
+    // final-key hash -- both of which read ETAG from the part's OmKeyInfo
+    // metadata -- behave identically to the inline (schemaVersion 0) path.
+    if (eTag != null) {
+      builder.addMetadata(OzoneConsts.ETAG, eTag);
+    }
+    return builder.build();
   }
 
   private KeyLocationList getKeyLocationInfosAsProto() {
