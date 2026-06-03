@@ -314,6 +314,79 @@ public class TestS3MultipartUploadCommitPartRequest
   }
 
   @Test
+  public void testValidateAndUpdateCacheV1OnOverwriteReclaimsOldPartBlocks()
+      throws Exception {
+    // Post-finalization v1 upload: re-committing the same part number must
+    // reclaim the previously-committed part's blocks (read from the split
+    // parts table and reconstructed via toOmKeyInfo) and store the new part,
+    // exactly as the v0 inline path reclaims the overwritten inline part.
+    when(ozoneManager.getVersionManager().getMetadataLayoutVersion())
+        .thenReturn(OMLayoutFeature.MPU_PARTS_TABLE_SPLIT.layoutVersion());
+
+    String volumeName = UUID.randomUUID().toString();
+    String bucketName = UUID.randomUUID().toString();
+    String keyName = getKeyName();
+
+    OMRequestTestUtils.addVolumeAndBucketToDB(volumeName, bucketName,
+        omMetadataManager, getBucketLayout());
+    createParentPath(volumeName, bucketName);
+
+    OMRequest initiateMPURequest =
+        doPreExecuteInitiateMPU(volumeName, bucketName, keyName);
+    String multipartUploadID = getS3InitiateMultipartUploadReq(initiateMPURequest)
+        .validateAndUpdateCache(ozoneManager, 1L).getOMResponse()
+        .getInitiateMultiPartUploadResponse().getMultipartUploadID();
+
+    // First commit of part 1 (2 blocks).
+    long clientID = Time.now();
+    List<KeyLocation> originalKeyLocationList = getKeyLocation(5).subList(0, 2);
+    List<OmKeyLocationInfo> originalKeyLocationInfos = originalKeyLocationList
+        .stream().map(OmKeyLocationInfo::getFromProtobuf)
+        .collect(Collectors.toList());
+    addKeyToOpenKeyTable(volumeName, bucketName, keyName, clientID,
+        originalKeyLocationInfos);
+    OMRequest commitMultipartRequest = doPreExecuteCommitMPU(volumeName,
+        bucketName, keyName, clientID, multipartUploadID, 1,
+        originalKeyLocationList);
+    getS3MultipartUploadCommitReq(commitMultipartRequest)
+        .validateAndUpdateCache(ozoneManager, 2L);
+
+    OmMultipartPartKey partKey = OmMultipartPartKey.of(multipartUploadID, 1);
+    assertNotNull(omMetadataManager.getMultipartPartsTable().get(partKey));
+
+    // Re-commit part 1 (overwrite, 3 different blocks).
+    clientID = Time.now();
+    List<KeyLocation> overwriteKeyLocationList = getKeyLocation(5).subList(2, 5);
+    List<OmKeyLocationInfo> overwriteKeyLocationInfos = overwriteKeyLocationList
+        .stream().map(OmKeyLocationInfo::getFromProtobuf)
+        .collect(Collectors.toList());
+    addKeyToOpenKeyTable(volumeName, bucketName, keyName, clientID,
+        overwriteKeyLocationInfos);
+    OMRequest overwriteOMRequest = doPreExecuteCommitMPU(volumeName,
+        bucketName, keyName, clientID, multipartUploadID, 1,
+        overwriteKeyLocationList);
+    OMClientResponse overwriteResponse =
+        getS3MultipartUploadCommitReq(overwriteOMRequest)
+            .validateAndUpdateCache(ozoneManager, 3L);
+    assertSame(OzoneManagerProtocolProtos.Status.OK,
+        overwriteResponse.getOMResponse().getStatus());
+
+    // The part row still exists (overwritten with the new part).
+    assertNotNull(omMetadataManager.getMultipartPartsTable().get(partKey));
+
+    // The previously-committed part's blocks must be queued for deletion,
+    // matching the v0 inline behaviour (the 2 original blocks). This proves
+    // the synthesized OmKeyInfo fed the old part's blocks to the GC path.
+    Map<String, RepeatedOmKeyInfo> toDeleteKeyList =
+        ((S3MultipartUploadCommitPartResponse) overwriteResponse)
+            .getKeyToDelete();
+    assertEquals(1, toDeleteKeyList.size());
+    assertEquals(originalKeyLocationList.size(), toDeleteKeyList.values()
+        .stream().findFirst().get().cloneOmKeyInfoList().get(0)
+        .getKeyLocationVersions().get(0).getLocationList().size());
+  }
+
+  @Test
   public void testValidateAndUpdateCacheKeyNotFound() throws Exception {
     String volumeName = UUID.randomUUID().toString();
     String bucketName = UUID.randomUUID().toString();

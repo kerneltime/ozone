@@ -77,7 +77,6 @@ import org.apache.hadoop.ozone.om.helpers.OmMultipartUpload;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartUploadList;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartUploadListParts;
 import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
-import org.apache.hadoop.ozone.om.helpers.OpenKeySession;
 import org.apache.hadoop.ozone.om.helpers.OzoneFileStatus;
 import org.apache.hadoop.ozone.om.protocol.OzoneManagerProtocol;
 import org.apache.hadoop.ozone.om.request.OMRequestTestUtils;
@@ -160,57 +159,36 @@ class TestKeyManagerUnit extends OzoneTestBase {
 
   @Test
   public void listMultipartUploadPartsWithoutEtagField() throws IOException {
-    // For backward compatibility reasons
+    // Backward compatibility: parts committed before HDDS-9680 carry no eTag
+    // metadata. Both schemaVersion 0 and 1 tolerate eTag-less parts (the S3
+    // gateway always sets one; the native client does not). Seed a
+    // schemaVersion 0 upload with eTag-less inline parts directly and verify
+    // listParts still surfaces every part via the eTag-absent fallback.
     final String volume = volumeName();
     final String bucket = "bucketForEtag";
     final String key = "dir/key1";
     createBucket(metadataManager, volume, bucket);
-    OmMultipartInfo omMultipartInfo =
-        initMultipartUpload(writeClient, volume, bucket, key);
 
-
-    // Commit some MPU parts without eTag field
+    String uploadID = UUID.randomUUID().toString();
+    OmMultipartKeyInfo.Builder mpuBuilder = new OmMultipartKeyInfo.Builder()
+        .setUploadID(uploadID)
+        .setCreationTime(Time.now())
+        .setReplicationConfig(
+            RatisReplicationConfig.getInstance(ReplicationFactor.THREE));
     for (int i = 1; i <= 5; i++) {
-      OmKeyArgs partKeyArgs =
-          new OmKeyArgs.Builder()
-              .setVolumeName(volume)
-              .setBucketName(bucket)
-              .setKeyName(key)
-              .setIsMultipartKey(true)
-              .setMultipartUploadID(omMultipartInfo.getUploadID())
-              .setMultipartUploadPartNumber(i)
-              .setAcls(Collections.emptyList())
-              .setReplicationConfig(
-                  RatisReplicationConfig.getInstance(ReplicationFactor.THREE))
-              .setOwnerName(UserGroupInformation.getCurrentUser().getShortUserName())
-              .build();
-
-      OpenKeySession openKey = writeClient.openKey(partKeyArgs);
-
-      OmKeyArgs commitPartKeyArgs =
-          new OmKeyArgs.Builder()
-              .setVolumeName(volume)
-              .setBucketName(bucket)
-              .setKeyName(key)
-              .setIsMultipartKey(true)
-              .setMultipartUploadID(omMultipartInfo.getUploadID())
-              .setMultipartUploadPartNumber(i)
-              .setAcls(Collections.emptyList())
-              .setReplicationConfig(
-                  RatisReplicationConfig.getInstance(ReplicationFactor.THREE))
-              .setLocationInfoList(Collections.emptyList())
-              .build();
-
-      writeClient.commitMultipartUploadPart(commitPartKeyArgs, openKey.getId());
+      mpuBuilder.addPartKeyInfoList(i,
+          OMRequestTestUtils.createPartKeyInfo(volume, bucket, key, uploadID, i));
     }
-
+    // schemaVersion defaults to 0 (legacy inline layout).
+    metadataManager.getMultipartInfoTable().addCacheEntry(
+        new CacheKey<>(metadataManager.getMultipartKey(volume, bucket, key,
+            uploadID)),
+        CacheValue.get(RandomUtils.secure().randomInt(), mpuBuilder.build()));
 
     OmMultipartUploadListParts omMultipartUploadListParts = keyManager
-        .listParts(volume, bucket, key, omMultipartInfo.getUploadID(),
-            0, 10);
+        .listParts(volume, bucket, key, uploadID, 0, 10);
     assertEquals(5,
         omMultipartUploadListParts.getPartInfoList().size());
-
   }
 
   private String volumeName() {

@@ -19,6 +19,8 @@ package org.apache.hadoop.ozone.om.helpers;
 
 import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationFactor.THREE;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.Collections;
@@ -64,8 +66,6 @@ public class TestOmMultipartPartInfo {
     assertThrows(IllegalArgumentException.class,
         () -> OmMultipartPartInfo.getFromProto(base.toBuilder().clearPartNumber().build()));
     assertThrows(IllegalArgumentException.class,
-        () -> OmMultipartPartInfo.getFromProto(base.toBuilder().clearETag().build()));
-    assertThrows(IllegalArgumentException.class,
         () -> OmMultipartPartInfo.getFromProto(base.toBuilder().clearKeyLocationList().build()));
     assertThrows(IllegalArgumentException.class,
         () -> OmMultipartPartInfo.getFromProto(base.toBuilder().clearDataSize().build()));
@@ -86,10 +86,36 @@ public class TestOmMultipartPartInfo {
   }
 
   @Test
-  public void testFromOmKeyInfoRejectsMissingETag() {
+  public void testFromOmKeyInfoAllowsMissingETag() {
+    // eTag is optional at schemaVersion 1: native-client / pre-HDDS-9680 parts
+    // carry none and must be stored (mirroring the inline v0 path), not rejected.
     OmKeyInfo keyInfo = createOmKeyInfoWithoutEtag();
-    assertThrows(IllegalArgumentException.class,
-        () -> OmMultipartPartInfo.from("part-name", 1, keyInfo));
+    OmMultipartPartInfo info = OmMultipartPartInfo.from("part-name", 1, keyInfo);
+    assertNull(info.getETag());
+  }
+
+  @Test
+  public void testGetFromProtoAllowsMissingETag() {
+    // An eTag-less part row round-trips: deserialize yields a null eTag and
+    // re-serializing omits the optional ETAG field entirely.
+    MultipartPartInfo proto = createValidProto().toBuilder().clearETag().build();
+    OmMultipartPartInfo decoded = OmMultipartPartInfo.getFromProto(proto);
+    assertNull(decoded.getETag());
+    assertFalse(decoded.getProto().hasETag());
+  }
+
+  @Test
+  public void testBlankETagNormalizedToNull() {
+    // A blank (empty-string) eTag is canonically stored as null, so every
+    // reader agrees: no ETAG="" leaks into the reconstructed key, matching the
+    // inline (schemaVersion 0) path and the persisted-proto round-trip.
+    OmMultipartPartInfo info = OmMultipartPartInfo.from(
+        "part-name", 1, createOmKeyInfoWithEtag(""));
+    assertNull(info.getETag());
+    assertFalse(info.toOmKeyInfo("vol", "bucket", "key",
+            RatisReplicationConfig.getInstance(THREE))
+        .getMetadata().containsKey(OzoneConsts.ETAG));
+    assertFalse(info.getProto().hasETag());
   }
 
   private static MultipartPartInfo createValidProto() {

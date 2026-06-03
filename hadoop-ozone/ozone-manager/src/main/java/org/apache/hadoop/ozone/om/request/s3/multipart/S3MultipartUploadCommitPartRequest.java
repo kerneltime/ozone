@@ -235,16 +235,24 @@ public class S3MultipartUploadCommitPartRequest extends OMKeyRequest {
           oldCommittedPart = oldPart.toOmKeyInfo(volumeName, bucketName,
               keyName, multipartKeyInfo.getReplicationConfig());
         }
-        // A split-table part must carry an eTag and block locations.
-        // OmMultipartPartInfo.from() would otherwise throw an unchecked
-        // exception, which in this apply path would terminate the OM; fail the
-        // request with a client error instead.
-        String partETag = omKeyInfo.getMetadata().get(OzoneConsts.ETAG);
-        if (partETag == null || partETag.isEmpty()
-            || omKeyInfo.getKeyLocationVersions() == null
+        // A split-table part must carry block locations: OmMultipartPartInfo
+        // requires them (and Complete reads the first location group), so reject
+        // a location-less commit with a client error rather than let from() throw
+        // an unchecked exception that would terminate the OM apply path.
+        //
+        // TODO(HDDS-14661 follow-up): the part eTag is intentionally NOT required
+        // here. schemaVersion 1 tolerates eTag-less parts to mirror the legacy
+        // schemaVersion 0 (inline) path, so the native Ozone client MPU path
+        // (OzoneBucket.createMultipartKey + write + close, which never sets an
+        // eTag) commits at schemaVersion 1. The S3 gateway always sets an eTag,
+        // so S3 clients are unaffected. Harden later (HDDS-9680-style): enforce
+        // or server-side auto-compute the part eTag (md5 of content) so the
+        // Complete final-key hash is content-derived for every part instead of
+        // falling back to the part name for eTag-less parts.
+        if (omKeyInfo.getKeyLocationVersions() == null
             || omKeyInfo.getKeyLocationVersions().isEmpty()) {
           throw new OMException("Multipart part " + partNumber + " is missing "
-              + "an eTag or block locations required by the split parts table.",
+              + "block locations required by the split parts table.",
               OMException.ResultCodes.INVALID_REQUEST);
         }
         newPartInfo = OmMultipartPartInfo.from(partName, partNumber, omKeyInfo);
