@@ -20,10 +20,10 @@ package org.apache.hadoop.ozone.om.helpers;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Objects;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.fs.FileChecksum;
 import org.apache.hadoop.fs.FileEncryptionInfo;
+import org.apache.hadoop.hdds.client.ReplicationConfig;
 import org.apache.hadoop.hdds.utils.db.Codec;
 import org.apache.hadoop.hdds.utils.db.DelegatedCodec;
 import org.apache.hadoop.hdds.utils.db.Proto2Codec;
@@ -69,9 +69,10 @@ public final class OmMultipartPartInfo {
     if (b.partNumber <= 0) {
       throw new IllegalArgumentException("partNumber is required and > 0");
     }
-    if (StringUtils.isBlank(b.eTag)) {
-      throw new IllegalArgumentException("eTag is required");
-    }
+    // eTag is intentionally optional: parts committed through the native Ozone
+    // client MPU path (and pre-HDDS-9680 legacy data) carry no eTag, mirroring
+    // the schemaVersion 0 inline path. Block locations remain required -- a
+    // committed part always has data, and Complete reads its first location.
     if (b.keyLocationInfos == null || b.keyLocationInfos.isEmpty()) {
       throw new IllegalArgumentException("keyLocationList is required");
     }
@@ -150,10 +151,11 @@ public final class OmMultipartPartInfo {
     }
 
     public Builder setETag(String eTagValue) {
-      if (StringUtils.isBlank(eTagValue)) {
-        throw new IllegalArgumentException("eTag is required");
-      }
-      this.eTag = eTagValue;
+      // Optional: a blank/absent eTag is canonically stored as null so that
+      // every reader agrees -- toOmKeyInfo (eTag != null), getProto and
+      // getFromProto (isNotBlank) must not diverge on an empty-string eTag,
+      // which would otherwise leak an ETAG="" into the in-memory part key.
+      this.eTag = StringUtils.isBlank(eTagValue) ? null : eTagValue;
       return this;
     }
 
@@ -186,9 +188,16 @@ public final class OmMultipartPartInfo {
         .setPartNumber(multipartPartInfo.getPartNumber())
         .setDataSize(multipartPartInfo.getDataSize())
         .setModificationTime(multipartPartInfo.getModificationTime())
-        .setETag(multipartPartInfo.getETag())
         .setKeyLocationInfos(getKeyLocationInfosFromProto(multipartPartInfo))
         .setEncInfo(null);
+
+    // eTag is optional: only set it when the persisted row actually carries one
+    // (the native-client / legacy v0 path stores none). Leaving it null keeps
+    // toOmKeyInfo from emitting an empty ETAG and matches the inline path.
+    if (multipartPartInfo.hasETag()
+        && StringUtils.isNotBlank(multipartPartInfo.getETag())) {
+      builder.setETag(multipartPartInfo.getETag());
+    }
 
     if (!multipartPartInfo.hasObjectID()) {
       LOG.warn("MultipartPartInfo missing objectID for part {}",
@@ -238,9 +247,13 @@ public final class OmMultipartPartInfo {
         .setDataSize(dataSize)
         .setModificationTime(modificationTime)
         .setObjectID(objectID)
-        .setUpdateID(updateID)
-        .setETag(Objects.requireNonNull(eTag, "eTag is required"));
+        .setUpdateID(updateID);
 
+    // eTag is optional (see constructor note); omit it when absent. The proto
+    // field is `optional string eTag`, so absence round-trips cleanly.
+    if (StringUtils.isNotBlank(eTag)) {
+      builder.setETag(eTag);
+    }
     if (encInfo != null) {
       builder.setFileEncryptionInfo(OMPBHelper.convert(encInfo));
     }
@@ -312,6 +325,31 @@ public final class OmMultipartPartInfo {
     return builder.build();
   }
 
+  /**
+   * Reconstruct this committed part as an {@link OmKeyInfo} for quota
+   * accounting and block cleanup. The part row stores no volume/bucket/key or
+   * replication config (those live on the parent multipart upload), so the
+   * caller supplies them. The result mirrors the part key the legacy inline
+   * path keeps in MultipartKeyInfo, so quota deltas and deleted-table entries
+   * match the schemaVersion 0 behavior for the same blocks.
+   */
+  public OmKeyInfo toOmKeyInfo(String volumeName, String bucketName,
+      String keyName, ReplicationConfig replicationConfig) {
+    return new OmKeyInfo.Builder()
+        .setVolumeName(volumeName)
+        .setBucketName(bucketName)
+        .setKeyName(keyName)
+        .setReplicationConfig(replicationConfig)
+        .setOmKeyLocationInfos(keyLocationInfos)
+        .setDataSize(dataSize)
+        .setCreationTime(modificationTime)
+        .setModificationTime(modificationTime)
+        .setObjectID(objectID)
+        .setUpdateID(updateID)
+        .setFileEncryptionInfo(encInfo)
+        .build();
+  }
+
   private KeyLocationList getKeyLocationInfosAsProto() {
     if (keyLocationInfos == null || keyLocationInfos.isEmpty()) {
       throw new IllegalArgumentException("keyLocationList is required");
@@ -333,9 +371,7 @@ public final class OmMultipartPartInfo {
     if (!partInfo.hasPartNumber()) {
       throw new IllegalArgumentException("MultipartPartInfo missing partNumber");
     }
-    if (!partInfo.hasETag() || StringUtils.isBlank(partInfo.getETag())) {
-      throw new IllegalArgumentException("MultipartPartInfo missing eTag");
-    }
+    // eTag is optional (native-client / legacy v0 parts carry none).
     if (!partInfo.hasKeyLocationList()) {
       throw new IllegalArgumentException("MultipartPartInfo missing keyLocationList");
     }

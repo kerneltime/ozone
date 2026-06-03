@@ -41,6 +41,8 @@ import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfo;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartKey;
 import org.apache.hadoop.ozone.om.helpers.RepeatedOmKeyInfo;
 import org.apache.hadoop.ozone.om.request.key.OMKeyRequest;
 import org.apache.hadoop.ozone.om.request.util.OmResponseUtil;
@@ -201,18 +203,60 @@ public class S3MultipartUploadCommitPartRequest extends OMKeyRequest {
           OMException.ResultCodes.NOT_SUPPORTED_OPERATION_PRIOR_FINALIZATION);
       }
 
-      oldPartKeyInfo = multipartKeyInfo.getPartKeyInfo(partNumber);
+      // Resolve the previously-committed part (if this part number is being
+      // re-committed) as an OmKeyInfo so its blocks can be reclaimed, and stage
+      // the new part. schemaVersion 0 keeps parts inline in multipartKeyInfo;
+      // schemaVersion 1 stores each part in the split parts table.
+      OmKeyInfo oldCommittedPart = null;
+      OmMultipartPartKey partsTableKey = null;
+      OmMultipartPartInfo newPartInfo = null;
+      if (multipartKeyInfo.getSchemaVersion() == 0) {
+        oldPartKeyInfo = multipartKeyInfo.getPartKeyInfo(partNumber);
+        if (oldPartKeyInfo != null) {
+          oldCommittedPart =
+              OmKeyInfo.getFromProtobuf(oldPartKeyInfo.getPartKeyInfo());
+        }
 
-      // Build this multipart upload part info.
-      OzoneManagerProtocolProtos.PartKeyInfo.Builder partKeyInfo =
-          OzoneManagerProtocolProtos.PartKeyInfo.newBuilder();
-      partKeyInfo.setPartName(partName);
-      partKeyInfo.setPartNumber(partNumber);
-      partKeyInfo.setPartKeyInfo(omKeyInfo.getProtobuf(
-          getOmRequest().getVersion()));
-
-      // Add this part information in to multipartKeyInfo.
-      multipartKeyInfo.addPartKeyInfo(partKeyInfo.build());
+        // Build this multipart upload part info and add it inline.
+        OzoneManagerProtocolProtos.PartKeyInfo.Builder partKeyInfo =
+            OzoneManagerProtocolProtos.PartKeyInfo.newBuilder();
+        partKeyInfo.setPartName(partName);
+        partKeyInfo.setPartNumber(partNumber);
+        partKeyInfo.setPartKeyInfo(omKeyInfo.getProtobuf(
+            getOmRequest().getVersion()));
+        multipartKeyInfo.addPartKeyInfo(partKeyInfo.build());
+      } else {
+        // Read the previous part cache-aware so an unflushed re-commit of the
+        // same part number within this double-buffer batch is visible.
+        partsTableKey = OmMultipartPartKey.of(uploadID, partNumber);
+        OmMultipartPartInfo oldPart =
+            omMetadataManager.getMultipartPartsTable().get(partsTableKey);
+        if (oldPart != null) {
+          oldCommittedPart = oldPart.toOmKeyInfo(volumeName, bucketName,
+              keyName, multipartKeyInfo.getReplicationConfig());
+        }
+        // A split-table part must carry block locations: OmMultipartPartInfo
+        // requires them (and Complete reads the first location group), so reject
+        // a location-less commit with a client error rather than let from() throw
+        // an unchecked exception that would terminate the OM apply path.
+        //
+        // TODO(HDDS-14661 follow-up): the part eTag is intentionally NOT required
+        // here. schemaVersion 1 tolerates eTag-less parts to mirror the legacy
+        // schemaVersion 0 (inline) path, so the native Ozone client MPU path
+        // (OzoneBucket.createMultipartKey + write + close, which never sets an
+        // eTag) commits at schemaVersion 1. The S3 gateway always sets an eTag,
+        // so S3 clients are unaffected. Harden later (HDDS-9680-style): enforce
+        // or server-side auto-compute the part eTag (md5 of content) so the
+        // Complete final-key hash is content-derived for every part instead of
+        // falling back to the part name for eTag-less parts.
+        if (omKeyInfo.getKeyLocationVersions() == null
+            || omKeyInfo.getKeyLocationVersions().isEmpty()) {
+          throw new OMException("Multipart part " + partNumber + " is missing "
+              + "block locations required by the split parts table.",
+              OMException.ResultCodes.INVALID_REQUEST);
+        }
+        newPartInfo = OmMultipartPartInfo.from(partName, partNumber, omKeyInfo);
+      }
 
       // Set the UpdateID to current transactionLogIndex
       multipartKeyInfo = multipartKeyInfo.toBuilder()
@@ -223,14 +267,19 @@ public class S3MultipartUploadCommitPartRequest extends OMKeyRequest {
       // S3MultipartUploadCommitPartResponse before being added to
       // DeletedKeyTable.
 
-      // Add to cache.
-
-      // Delete from open key table and add it to multipart info table.
-      // No need to add cache entries to delete table, as no
-      // read/write requests that info for validation.
+      // Add to cache. Delete from open key table and add it to multipart info
+      // table; for schemaVersion 1 also stage the new part row. No need to add
+      // cache entries to delete table, as no read/write requests use that info
+      // for validation.
       omMetadataManager.getMultipartInfoTable().addCacheEntry(
           new CacheKey<>(multipartKey),
           CacheValue.get(trxnLogIndex, multipartKeyInfo));
+
+      if (newPartInfo != null) {
+        omMetadataManager.getMultipartPartsTable().addCacheEntry(
+            new CacheKey<>(partsTableKey),
+            CacheValue.get(trxnLogIndex, newPartInfo));
+      }
 
       omMetadataManager.getOpenKeyTable(getBucketLayout()).addCacheEntry(
           new CacheKey<>(openKey),
@@ -244,16 +293,14 @@ public class S3MultipartUploadCommitPartRequest extends OMKeyRequest {
       Map<String, RepeatedOmKeyInfo> keyVersionsToDeleteMap = null;
 
       long correctedSpace = omKeyInfo.getReplicatedSize();
-      if (null != oldPartKeyInfo) {
-        OmKeyInfo partKeyToBeDeleted =
-            OmKeyInfo.getFromProtobuf(oldPartKeyInfo.getPartKeyInfo());
-        correctedSpace -= partKeyToBeDeleted.getReplicatedSize();
-        RepeatedOmKeyInfo oldVerKeyInfo = getOldVersionsToCleanUp(partKeyToBeDeleted, omBucketInfo.getObjectID(),
+      if (null != oldCommittedPart) {
+        correctedSpace -= oldCommittedPart.getReplicatedSize();
+        RepeatedOmKeyInfo oldVerKeyInfo = getOldVersionsToCleanUp(oldCommittedPart, omBucketInfo.getObjectID(),
             trxnLogIndex);
         // Unlike normal key commit, we can reuse the objectID for MPU part key because MPU part key
         // always use a new object ID regardless whether there is an existing key.
         String delKeyName = omMetadataManager.getOzoneDeletePathKey(
-            partKeyToBeDeleted.getObjectID(), multipartKey);
+            oldCommittedPart.getObjectID(), multipartKey);
 
         if (!oldVerKeyInfo.getOmKeyInfoList().isEmpty()) {
           keyVersionsToDeleteMap = new HashMap<>();
@@ -279,7 +326,8 @@ public class S3MultipartUploadCommitPartRequest extends OMKeyRequest {
       omResponse.setCommitMultiPartUploadResponse(commitResponseBuilder);
       omClientResponse =
           getOmClientResponse(ozoneManager, keyVersionsToDeleteMap, openKey,
-              omKeyInfo, multipartKey, multipartKeyInfo, omResponse.build(),
+              omKeyInfo, multipartKey, multipartKeyInfo, partsTableKey,
+              newPartInfo, omResponse.build(),
               omBucketInfo.copyObject(), bucketId);
 
       result = Result.SUCCESS;
@@ -288,7 +336,7 @@ public class S3MultipartUploadCommitPartRequest extends OMKeyRequest {
       exception = ex;
       omClientResponse =
           getOmClientResponse(ozoneManager, null, openKey,
-              omKeyInfo, multipartKey, multipartKeyInfo,
+              omKeyInfo, multipartKey, multipartKeyInfo, null, null,
               createErrorOMResponse(omResponse, exception), copyBucketInfo, bucketId);
     } finally {
       if (acquiredLock) {
@@ -317,11 +365,12 @@ public class S3MultipartUploadCommitPartRequest extends OMKeyRequest {
   protected S3MultipartUploadCommitPartResponse getOmClientResponse(
       OzoneManager ozoneManager, Map<String, RepeatedOmKeyInfo> keyToDeleteMap,
       String openKey, OmKeyInfo omKeyInfo, String multipartKey,
-      OmMultipartKeyInfo multipartKeyInfo, OMResponse build,
+      OmMultipartKeyInfo multipartKeyInfo, OmMultipartPartKey partsTableKey,
+      OmMultipartPartInfo newPartInfo, OMResponse build,
       OmBucketInfo omBucketInfo, long bucketId) {
 
     return new S3MultipartUploadCommitPartResponse(build, multipartKey, openKey,
-        multipartKeyInfo, keyToDeleteMap, omKeyInfo,
+        multipartKeyInfo, keyToDeleteMap, omKeyInfo, partsTableKey, newPartInfo,
         omBucketInfo, bucketId, getBucketLayout());
   }
 
