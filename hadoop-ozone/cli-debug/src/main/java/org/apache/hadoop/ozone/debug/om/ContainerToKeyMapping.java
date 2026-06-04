@@ -52,7 +52,10 @@ import org.apache.hadoop.ozone.om.codec.OMDBDefinition;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.helpers.OmDirectoryInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfoGroup;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartKey;
 import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.PartKeyInfo;
 import picocli.CommandLine;
@@ -100,6 +103,7 @@ public class ContainerToKeyMapping extends AbstractSubcommand implements Callabl
   private Table<String, OmKeyInfo> openFileTable;
   private Table<String, OmKeyInfo> openKeyTable;
   private Table<String, OmMultipartKeyInfo> multipartInfoTable;
+  private Table<OmMultipartPartKey, OmMultipartPartInfo> multipartPartsTable;
   private DBStore dirTreeDbStore;
   private Table<Long, String> dirTreeTable;
   // Cache volume IDs to avoid repeated lookups
@@ -138,6 +142,7 @@ public class ContainerToKeyMapping extends AbstractSubcommand implements Callabl
       openFileTable = OMDBDefinition.OPEN_FILE_TABLE_DEF.getTable(omDbStore, CacheType.NO_CACHE);
       openKeyTable = OMDBDefinition.OPEN_KEY_TABLE_DEF.getTable(omDbStore, CacheType.NO_CACHE);
       multipartInfoTable = OMDBDefinition.MULTIPART_INFO_TABLE_DEF.getTable(omDbStore, CacheType.NO_CACHE);
+      multipartPartsTable = OMDBDefinition.MULTIPART_PARTS_TABLE_DEF.getTable(omDbStore, CacheType.NO_CACHE);
 
       retrieve(dbPath, writer, containerIDs);
     } catch (Exception e) {
@@ -317,11 +322,34 @@ public class ContainerToKeyMapping extends AbstractSubcommand implements Callabl
         String dbKey = entry.getKey();
         OmMultipartKeyInfo mpuInfo = entry.getValue();
 
-        // Collect all target containers that have parts of this MPU
+        // Collect all target containers that have parts of this MPU. Before
+        // finalization (schemaVersion 0) parts are inline in this row; after
+        // finalization (schemaVersion 1) they live in the split parts table,
+        // keyed by uploadId.
         Set<Long> matchedContainers = new HashSet<>();
-        for (PartKeyInfo partKeyInfo : mpuInfo.getPartKeyInfoMap()) {
-          OmKeyInfo partKey = OmKeyInfo.getFromProtobuf(partKeyInfo.getPartKeyInfo());
-          matchedContainers.addAll(getKeyContainers(partKey, containerIds));
+        if (mpuInfo.getSchemaVersion() == 0) {
+          for (PartKeyInfo partKeyInfo : mpuInfo.getPartKeyInfoMap()) {
+            OmKeyInfo partKey = OmKeyInfo.getFromProtobuf(partKeyInfo.getPartKeyInfo());
+            matchedContainers.addAll(getKeyContainers(partKey, containerIds));
+          }
+        } else if (multipartPartsTable == null) {
+          // An OM DB created before the parts-table split has no
+          // multipartPartsTable; schemaVersion 1 uploads cannot exist there, so
+          // there is nothing to scan.
+          err().println("multipartPartsTable not available (older OM DB?); "
+              + "skipping schemaVersion 1 MPU parts for " + dbKey);
+        } else {
+          try (Table.KeyValueIterator<OmMultipartPartKey, OmMultipartPartInfo> partIterator =
+              multipartPartsTable.iterator(OmMultipartPartKey.prefix(mpuInfo.getUploadID()))) {
+            while (partIterator.hasNext()) {
+              OmMultipartPartInfo part = partIterator.next().getValue();
+              if (part == null) {
+                continue;
+              }
+              matchedContainers.addAll(
+                  getContainersFromLocations(part.getKeyLocationInfos(), containerIds));
+            }
+          }
         }
 
         if (!matchedContainers.isEmpty()) {
@@ -336,16 +364,22 @@ public class ContainerToKeyMapping extends AbstractSubcommand implements Callabl
   }
 
   private Set<Long> getKeyContainers(OmKeyInfo keyInfo, Set<Long> targetContainerIds) {
-    Set<Long> keyContainers = new HashSet<>();
-    keyInfo.getKeyLocationVersions().forEach(
+    return getContainersFromLocations(keyInfo.getKeyLocationVersions(),
+        targetContainerIds);
+  }
+
+  private Set<Long> getContainersFromLocations(
+      List<OmKeyLocationInfoGroup> locationVersions, Set<Long> targetContainerIds) {
+    Set<Long> matchedContainers = new HashSet<>();
+    locationVersions.forEach(
         e -> e.getLocationList().forEach(
             blk -> {
               long cid = blk.getBlockID().getContainerID();
               if (targetContainerIds.contains(cid)) {
-                keyContainers.add(cid);
+                matchedContainers.add(cid);
               }
             }));
-    return keyContainers;
+    return matchedContainers;
   }
 
   private void prepareDirIdTree(Map<Long, Pair<Long, String>> bucketVolMap) throws Exception {

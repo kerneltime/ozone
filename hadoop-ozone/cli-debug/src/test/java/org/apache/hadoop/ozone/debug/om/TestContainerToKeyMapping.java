@@ -31,6 +31,7 @@ import org.apache.hadoop.hdds.client.BlockID;
 import org.apache.hadoop.hdds.client.StandaloneReplicationConfig;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
+import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.debug.OzoneDebug;
 import org.apache.hadoop.ozone.om.OMMetadataManager;
 import org.apache.hadoop.ozone.om.OmMetadataManagerImpl;
@@ -41,6 +42,8 @@ import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfoGroup;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartKey;
 import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.KeyInfo;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.PartKeyInfo;
@@ -83,6 +86,10 @@ public class TestContainerToKeyMapping {
   private static final long MPU_KEY_ID = 700L;
   private static final long MPU_PART1_ID = 710L;
   private static final long MPU_PART2_ID = 720L;
+  private static final long CONTAINER_ID_5 = 5L;
+  private static final long MPU_V1_KEY_ID = 750L;
+  private static final long MPU_V1_PART1_ID = 760L;
+  private static final long MPU_V1_PART2_ID = 770L;
 
   @BeforeEach
   public void setup() throws Exception {
@@ -190,7 +197,19 @@ public class TestContainerToKeyMapping {
   }
 
   @Test
+  public void testContainerToKeyMappingWithV1MPU() {
+    int exitCode = execute("--containers", String.valueOf(CONTAINER_ID_5), "--in-progress");
+    assertEquals(0, exitCode);
 
+    String output = outWriter.toString();
+
+    // Parts of the schemaVersion 1 MPU are found via the split parts table.
+    assertThat(output).contains("\"" + CONTAINER_ID_5 + "\"");
+    assertThat(output).contains("\"openKeys\"");
+    assertThat(output).contains("/vol1/obs-bucket/mpuKeyV1/v1-upload-id");
+  }
+
+  @Test
   public void testNonExistentContainer() {
     long nonExistentContainerId = 999L;
     
@@ -292,6 +311,9 @@ public class TestContainerToKeyMapping {
 
     // Create MPU (multipart upload) for OBS bucket with parts in container 5
     createMultipartUpload();
+
+    // Create a schemaVersion 1 MPU whose parts live in the split parts table.
+    createV1MultipartUpload();
   }
 
   /**
@@ -337,6 +359,66 @@ public class TestContainerToKeyMapping {
     String mpuKey = omMetadataManager.getMultipartKey(
         VOLUME_NAME, OBS_BUCKET_NAME, mpuKeyName, uploadId);
     omMetadataManager.getMultipartInfoTable().put(mpuKey, mpuInfo);
+  }
+
+  /**
+   * Helper method to create a schemaVersion 1 multipart upload: the inline part
+   * map is empty and the parts live in the dedicated multipartPartsTable.
+   */
+  private void createV1MultipartUpload() throws Exception {
+    String mpuKeyName = "mpuKeyV1";
+    String uploadId = "v1-upload-id";
+
+    OmMultipartPartInfo part1 = createPart(
+        mpuKeyName + "/" + uploadId + "/part-1", 1, MPU_V1_PART1_ID, CONTAINER_ID_5);
+    OmMultipartPartInfo part2 = createPart(
+        mpuKeyName + "/" + uploadId + "/part-2", 2, MPU_V1_PART2_ID, CONTAINER_ID_5);
+
+    OmMultipartKeyInfo mpuInfo = new OmMultipartKeyInfo.Builder()
+        .setUploadID(uploadId)
+        .setCreationTime(System.currentTimeMillis())
+        .setReplicationConfig(StandaloneReplicationConfig.getInstance(HddsProtos.ReplicationFactor.ONE))
+        .setPartKeyInfoList(Collections.emptySortedMap())
+        .setObjectID(MPU_V1_KEY_ID)
+        .setParentID(0)
+        .setUpdateID(1)
+        .setSchemaVersion((byte) 1)
+        .build();
+
+    String mpuKey = omMetadataManager.getMultipartKey(
+        VOLUME_NAME, OBS_BUCKET_NAME, mpuKeyName, uploadId);
+    omMetadataManager.getMultipartInfoTable().put(mpuKey, mpuInfo);
+    omMetadataManager.getMultipartPartsTable().put(
+        OmMultipartPartKey.of(uploadId, 1), part1);
+    omMetadataManager.getMultipartPartsTable().put(
+        OmMultipartPartKey.of(uploadId, 2), part2);
+  }
+
+  /**
+   * Helper method to create a split-table part with a block in a container.
+   */
+  private OmMultipartPartInfo createPart(String partName, int partNumber,
+      long objectId, long containerId) {
+    OmKeyLocationInfo locationInfo = new OmKeyLocationInfo.Builder()
+        .setBlockID(new BlockID(containerId, 1L))
+        .setLength(1024)
+        .setOffset(0)
+        .build();
+    OmKeyInfo partKeyInfo = new OmKeyInfo.Builder()
+        .setVolumeName(VOLUME_NAME)
+        .setBucketName(OBS_BUCKET_NAME)
+        .setKeyName(partName)
+        .setReplicationConfig(StandaloneReplicationConfig.getInstance(HddsProtos.ReplicationFactor.ONE))
+        .setDataSize(1024)
+        .setObjectID(objectId)
+        .setUpdateID(1)
+        .setCreationTime(System.currentTimeMillis())
+        .setModificationTime(System.currentTimeMillis())
+        .addOmKeyLocationInfoGroup(new OmKeyLocationInfoGroup(0,
+            Collections.singletonList(locationInfo)))
+        .addMetadata(OzoneConsts.ETAG, "etag-" + partNumber)
+        .build();
+    return OmMultipartPartInfo.from(partName, partNumber, partKeyInfo);
   }
 
   /**
