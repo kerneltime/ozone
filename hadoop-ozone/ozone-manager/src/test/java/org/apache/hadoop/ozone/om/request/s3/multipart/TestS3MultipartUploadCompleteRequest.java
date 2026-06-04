@@ -28,7 +28,9 @@ import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -40,12 +42,15 @@ import org.apache.hadoop.hdds.utils.db.cache.CacheKey;
 import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartInfo;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartPartKey;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartUploadCompleteList;
 import org.apache.hadoop.ozone.om.helpers.RepeatedOmKeyInfo;
 import org.apache.hadoop.ozone.om.request.OMRequestTestUtils;
 import org.apache.hadoop.ozone.om.response.OMClientResponse;
 import org.apache.hadoop.ozone.om.upgrade.OMLayoutFeature;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.MultipartCommitUploadPartRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Part;
 import org.apache.hadoop.util.Time;
@@ -195,6 +200,97 @@ public class TestS3MultipartUploadCompleteRequest
     // The split-table part row was deleted on completion.
     assertNull(omMetadataManager.getMultipartPartsTable()
         .get(OmMultipartPartKey.of(multipartUploadID, 1)));
+  }
+
+  @Test
+  public void testValidateAndUpdateCacheV1NativeETaglessComplete()
+      throws Exception {
+    // Native (non-S3) multipart upload, schemaVersion 1, end to end. The native
+    // Ozone client commits parts with NO eTag (only the S3 gateway computes one)
+    // and at Complete supplies each part NAME, which OmMultipartUploadCompleteList
+    // mirrors into both the partName and eTag proto fields. This exercises the
+    // load-bearing eTag-less contract: the OM must (a) accept the eTag-less
+    // commit, (b) validate each part via the "eTag equals the stored part name"
+    // fallback in eTagBasedValidator, and (c) derive the final-object ETag from
+    // the part NAMES -- md5(concat(partNames))-N -- not from content MD5s.
+    when(ozoneManager.getVersionManager().getMetadataLayoutVersion())
+        .thenReturn(OMLayoutFeature.MPU_PARTS_TABLE_SPLIT.layoutVersion());
+
+    String volumeName = UUID.randomUUID().toString();
+    String bucketName = UUID.randomUUID().toString();
+    String keyName = getKeyName();
+    OMRequestTestUtils.addVolumeAndBucketToDB(volumeName, bucketName,
+        omMetadataManager, getBucketLayout());
+
+    OMRequest initiateMPURequest =
+        doPreExecuteInitiateMPU(volumeName, bucketName, keyName);
+    String multipartUploadID =
+        getS3InitiateMultipartUploadReq(initiateMPURequest)
+            .validateAndUpdateCache(ozoneManager, 1L).getOMResponse()
+            .getInitiateMultiPartUploadResponse().getMultipartUploadID();
+
+    // Commit one part as the NATIVE client does -- with NO eTag. Build the
+    // normal commit request and strip the ETag metadata that the S3 gateway
+    // would have set, then preExecute. The schemaVersion 1 commit guard requires
+    // only block locations (supplied by the open key), so the eTag-less part
+    // still commits (HDDS-14661 relaxation).
+    long clientID = Time.now();
+    OMRequest rawCommit = OMRequestTestUtils.createCommitPartMPURequest(
+        volumeName, bucketName, keyName, clientID, 0L, multipartUploadID, 1,
+        Collections.emptyList());
+    MultipartCommitUploadPartRequest commitPart =
+        rawCommit.getCommitMultiPartUploadRequest();
+    OMRequest eTaglessCommit = rawCommit.toBuilder()
+        .setCommitMultiPartUploadRequest(commitPart.toBuilder().setKeyArgs(
+            commitPart.getKeyArgs().toBuilder().clearMetadata().build()))
+        .build();
+    OMRequest commitMultipartRequest =
+        getS3MultipartUploadCommitReq(eTaglessCommit).preExecute(ozoneManager);
+    S3MultipartUploadCommitPartRequest commitReq =
+        getS3MultipartUploadCommitReq(commitMultipartRequest);
+    addKeyToTable(volumeName, bucketName, keyName, clientID);
+    OMClientResponse commitResp =
+        commitReq.validateAndUpdateCache(ozoneManager, 2L);
+    assertEquals(OzoneManagerProtocolProtos.Status.OK,
+        commitResp.getOMResponse().getStatus());
+
+    // The committed split-table part carries no eTag.
+    OmMultipartPartInfo storedPart = omMetadataManager.getMultipartPartsTable()
+        .get(OmMultipartPartKey.of(multipartUploadID, 1));
+    assertNotNull(storedPart);
+    assertNull(storedPart.getETag());
+
+    // Complete as the native client does: supply the part NAME, which
+    // OmMultipartUploadCompleteList mirrors into both partName and eTag.
+    String partName = storedPart.getPartName();
+    Map<Integer, String> nativePartsMap = new LinkedHashMap<>();
+    nativePartsMap.put(1, partName);
+    List<Part> partList =
+        new OmMultipartUploadCompleteList(nativePartsMap).getPartsList();
+
+    OMRequest completeMultipartRequest = doPreExecuteCompleteMPU(volumeName,
+        bucketName, keyName, multipartUploadID, partList);
+    S3MultipartUploadCompleteRequest completeReq =
+        getS3MultipartUploadCompleteReq(completeMultipartRequest);
+    OMClientResponse omClientResponse =
+        completeReq.validateAndUpdateCache(ozoneManager, 3L);
+    BatchOperation batchOperation =
+        omMetadataManager.getStore().initBatchOperation();
+    omClientResponse.checkAndUpdateDB(omMetadataManager, batchOperation);
+    omMetadataManager.getStore().commitBatchOperation(batchOperation);
+
+    // Complete succeeds for the eTag-less native upload (validated via the
+    // eTag-equals-stored-part-name fallback)...
+    assertEquals(OzoneManagerProtocolProtos.Status.OK,
+        omClientResponse.getOMResponse().getStatus());
+    // ...and the final-object ETag is identifier-derived from the part name,
+    // not content-derived.
+    OmKeyInfo finalKey = omMetadataManager
+        .getKeyTable(completeReq.getBucketLayout())
+        .get(getOzoneDBKey(volumeName, bucketName, keyName));
+    assertNotNull(finalKey);
+    assertEquals(DigestUtils.md5Hex(partName) + "-1",
+        finalKey.getMetadata().get(OzoneConsts.ETAG));
   }
 
   /** Commits one part of a schemaVersion 1 upload and returns its eTag. */

@@ -88,6 +88,37 @@ defect.
   collection (deleted-table entries on overwrite, complete-with-discards, and
   abort) are byte-for-byte identical between the two layouts.
 
+# ETags and non-S3 clients
+
+The part ETag is an S3 concept, and only the S3 gateway computes its value (the
+content MD5); the Ozone Manager and the generic Ozone client never derive it --
+they store, validate, and concatenate whatever string they are handed. This
+matters because multipart upload is also reachable through the **native Ozone
+client**, which does not set an ETag at all. Both schemaVersion 0 and 1 tolerate
+such eTag-less parts (this feature deliberately did not change that), so:
+
+- **S3 uploads** get the canonical, content-derived multipart ETag:
+  `md5(concat(per-part content MD5s)) + "-<partCount>"`.
+- **Native (non-S3) uploads** complete successfully but their final-object ETag
+  is **identifier-derived, not content-derived**:
+  `md5(concat(part names)) + "-<partCount>"`. It is a stable, valid S3-shaped
+  ETag but carries no content-integrity meaning, and it differs from the value
+  an S3 upload of byte-identical content would produce.
+
+Two pieces of code make the native path work and are easy to mistake for dead
+defensiveness; both carry cross-reference comments so they are not removed:
+
+1. `OmMultipartUploadCompleteList#getPartsList` mirrors the supplied per-part
+   identifier into BOTH the proto `partName` and `eTag` fields, so a native
+   (eTag-less) Complete still satisfies the OM's `allMatch(Part::hasETag)` gate.
+2. `S3MultipartUploadCompleteRequest#eTagBasedValidator` accepts a part when the
+   supplied value matches the stored eTag **or** the stored part name; native
+   parts (no stored eTag) pass only via the part-name clause.
+
+Making native-client multipart ETags content-derived (computing the MD5 in the
+client output stream, the only layer below the gateway that sees the bytes) is a
+tracked follow-up (`TODO(HDDS-14661 follow-up)`); it is out of scope here.
+
 # The one-way door
 
 **Finalization cannot be undone, and it removes the ability to downgrade the OM
