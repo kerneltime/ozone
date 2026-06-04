@@ -139,6 +139,7 @@ import org.apache.hadoop.hdds.utils.db.cache.CacheValue;
 import org.apache.hadoop.net.CachedDNSToSwitchMapping;
 import org.apache.hadoop.net.DNSToSwitchMapping;
 import org.apache.hadoop.net.ScriptBasedMapping;
+import org.apache.hadoop.ozone.ClientVersion;
 import org.apache.hadoop.ozone.OmUtils;
 import org.apache.hadoop.ozone.OzoneAcl;
 import org.apache.hadoop.ozone.common.BlockGroup;
@@ -156,6 +157,7 @@ import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfoGroup;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartInfo;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartUpload;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartUploadList;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartUploadListParts;
@@ -169,6 +171,7 @@ import org.apache.hadoop.ozone.om.helpers.WithParentObjectId;
 import org.apache.hadoop.ozone.om.request.OMClientRequest;
 import org.apache.hadoop.ozone.om.request.file.OMFileRequest;
 import org.apache.hadoop.ozone.om.request.key.OMKeyRequest;
+import org.apache.hadoop.ozone.om.request.s3.multipart.MultipartPartScanUtil;
 import org.apache.hadoop.ozone.om.request.util.OMMultipartUploadUtils;
 import org.apache.hadoop.ozone.om.service.CompactionService;
 import org.apache.hadoop.ozone.om.service.DirectoryDeletingService;
@@ -1139,7 +1142,10 @@ public class KeyManagerImpl implements KeyManager {
             ResultCodes.NO_SUCH_MULTIPART_UPLOAD_ERROR);
       } else {
         Iterator<PartKeyInfo> partKeyInfoMapIterator =
-            multipartKeyInfo.getPartKeyInfoMap().iterator();
+            multipartKeyInfo.getSchemaVersion() == 0
+                ? multipartKeyInfo.getPartKeyInfoMap().iterator()
+                : listV1PartKeyInfos(volumeName, bucketName, keyName, uploadID,
+                    multipartKeyInfo, partNumberMarker, maxParts).iterator();
 
         ReplicationConfig replicationConfig = null;
 
@@ -1224,6 +1230,47 @@ public class KeyManagerImpl implements KeyManager {
       metadataManager.getLock().releaseReadLock(BUCKET_LOCK, volumeName,
           bucketName);
     }
+  }
+
+  /**
+   * Adapt a schemaVersion 1 (split parts table) upload's parts into the same
+   * {@link PartKeyInfo} shape the inline (schemaVersion 0) map produced, so the
+   * listParts pagination, eTag, replication, and part-name logic consume both
+   * layouts through one code path. The scan is cache-aware
+   * ({@link MultipartPartScanUtil#scanParts}) so a CommitPart that has applied
+   * but not yet flushed to RocksDB is still listed (read-your-writes within the
+   * OM). Parts come back ordered by part number; the stored partName matches
+   * what the inline path wrote, so {@code getPartName} reconstruction (FSO full
+   * path) is identical. All listParts-displayed fields (modificationTime,
+   * dataSize, replication, eTag-in-metadata) are repopulated by
+   * {@link OmMultipartPartInfo#toOmKeyInfo}.
+   */
+  private List<PartKeyInfo> listV1PartKeyInfos(String volumeName,
+      String bucketName, String keyName, String uploadID,
+      OmMultipartKeyInfo multipartKeyInfo, int partNumberMarker, int maxParts)
+      throws IOException {
+    List<PartKeyInfo> partKeyInfos = new ArrayList<>();
+    for (OmMultipartPartInfo part : MultipartPartScanUtil.scanParts(
+        metadataManager, uploadID).values()) {
+      // Only the parts the caller will actually page over need the expensive
+      // toOmKeyInfo + protobuf conversion: skip parts at or below the marker,
+      // and stop one past maxParts -- the extra entry lets the caller detect
+      // truncation, exactly as the inline schemaVersion 0 path does.
+      if (part.getPartNumber() <= partNumberMarker) {
+        continue;
+      }
+      if (partKeyInfos.size() > maxParts) {
+        break;
+      }
+      partKeyInfos.add(PartKeyInfo.newBuilder()
+          .setPartNumber(part.getPartNumber())
+          .setPartName(part.getPartName())
+          .setPartKeyInfo(part.toOmKeyInfo(volumeName, bucketName, keyName,
+              multipartKeyInfo.getReplicationConfig())
+              .getProtobuf(ClientVersion.CURRENT_VERSION))
+          .build());
+    }
+    return partKeyInfos;
   }
 
   private String getPartName(PartKeyInfo partKeyInfo, String volName,

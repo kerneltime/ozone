@@ -82,9 +82,11 @@ import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartCommitUploadPartInfo;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartInfo;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartInfo;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartUploadCompleteInfo;
 import org.apache.hadoop.ozone.om.helpers.OzoneFSUtils;
 import org.apache.hadoop.ozone.om.helpers.QuotaUtil;
+import org.apache.hadoop.ozone.om.request.s3.multipart.MultipartPartScanUtil;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
 import org.apache.ozone.test.NonHATests;
 import org.junit.jupiter.api.AfterAll;
@@ -657,20 +659,34 @@ public abstract class TestOzoneClientMultipartUploadWithFSO implements NonHATest
         metadataMgr.getMultipartInfoTable().get(multipartKey);
     assertNotNull(omMultipartKeyInfo);
 
-    for (OzoneManagerProtocolProtos.PartKeyInfo partKeyInfo :
-        omMultipartKeyInfo.getPartKeyInfoMap()) {
-      String partKeyName = partKeyInfo.getPartName();
+    // reconstruct full part name with volume, bucket, keyName; every stored
+    // part name must start with this, regardless of schemaVersion.
+    String fullKeyPartName =
+        metadataMgr.getOzoneKey(volumeName, bucketName, keyName);
 
-      // reconstruct full part name with volume, bucket, partKeyName
-      String fullKeyPartName =
-          metadataMgr.getOzoneKey(volumeName, bucketName, keyName);
-
-      // partKeyName format in DB - partKeyName + ClientID
-      assertTrue(partKeyName.startsWith(fullKeyPartName),
-          "Invalid partKeyName format in DB: " + partKeyName
-              + ", expected name:" + fullKeyPartName);
-
-      listPartNames.remove(partKeyName);
+    if (omMultipartKeyInfo.getSchemaVersion() == 0) {
+      // schemaVersion 0 keeps part entries inline in multipartInfoTable.
+      for (OzoneManagerProtocolProtos.PartKeyInfo partKeyInfo :
+          omMultipartKeyInfo.getPartKeyInfoMap()) {
+        String partKeyName = partKeyInfo.getPartName();
+        // partKeyName format in DB - partKeyName + ClientID
+        assertTrue(partKeyName.startsWith(fullKeyPartName),
+            "Invalid partKeyName format in DB: " + partKeyName
+                + ", expected name:" + fullKeyPartName);
+        listPartNames.remove(partKeyName);
+      }
+    } else {
+      // schemaVersion 1 (HDDS-10611) moves part entries out of the inline map
+      // into the dedicated multipartPartsTable, so the inline map is empty;
+      // read the split table the same way production listParts does.
+      for (OmMultipartPartInfo partInfo :
+          MultipartPartScanUtil.scanParts(metadataMgr, uploadID).values()) {
+        String partKeyName = partInfo.getPartName();
+        assertTrue(partKeyName.startsWith(fullKeyPartName),
+            "Invalid partKeyName format in DB: " + partKeyName
+                + ", expected name:" + fullKeyPartName);
+        listPartNames.remove(partKeyName);
+      }
     }
     assertThat(listPartNames).withFailMessage("Wrong partKeyName format in DB!").isEmpty();
   }
