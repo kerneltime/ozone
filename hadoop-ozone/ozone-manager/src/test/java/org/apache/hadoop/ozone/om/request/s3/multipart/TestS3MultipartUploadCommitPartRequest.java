@@ -33,6 +33,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import org.apache.hadoop.hdds.client.RatisReplicationConfig;
+import org.apache.hadoop.hdds.client.ReplicationConfig;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationFactor;
 import org.apache.hadoop.hdds.utils.db.BatchOperation;
@@ -131,6 +132,46 @@ public class TestS3MultipartUploadCommitPartRequest
     assertNull(omMetadataManager
         .getOpenKeyTable(s3MultipartUploadCommitPartRequest.getBucketLayout())
         .get(partKey));
+  }
+
+  @Test
+  public void testValidateAndUpdateCacheRejectsPartReplicationMismatch()
+      throws Exception {
+    String volumeName = UUID.randomUUID().toString();
+    String bucketName = UUID.randomUUID().toString();
+    String keyName = getKeyName();
+
+    OMRequestTestUtils.addVolumeAndBucketToDB(volumeName, bucketName,
+        omMetadataManager, getBucketLayout());
+    createParentPath(volumeName, bucketName);
+
+    OMRequest initiateMPURequest = doPreExecuteInitiateMPU(volumeName,
+        bucketName, keyName);
+    OMClientResponse initiateResponse = getS3InitiateMultipartUploadReq(
+        initiateMPURequest).validateAndUpdateCache(ozoneManager, 1L);
+    String multipartUploadID = initiateResponse.getOMResponse()
+        .getInitiateMultiPartUploadResponse().getMultipartUploadID();
+
+    long clientID = Time.now();
+    OMRequest commitMultipartRequest = doPreExecuteCommitMPU(volumeName,
+        bucketName, keyName, clientID, multipartUploadID, 1);
+    S3MultipartUploadCommitPartRequest s3MultipartUploadCommitPartRequest =
+        getS3MultipartUploadCommitReq(commitMultipartRequest);
+
+    // The upload resolved to RATIS/ONE (test cluster default). Stage the part's
+    // open key with a DIFFERENT replication (RATIS/THREE). A real client cannot
+    // do this -- the OM forces parts to inherit the upload's config at part-open
+    // -- but a bug or a future code path could. CommitPart must reject it so the
+    // v1 part accounting (which derives a part's size from the upload's config)
+    // can never silently mis-account a divergent part (HDDS-14661).
+    addKeyToOpenKeyTable(volumeName, bucketName, keyName, clientID,
+        RatisReplicationConfig.getInstance(ReplicationFactor.THREE));
+
+    OMClientResponse omClientResponse = s3MultipartUploadCommitPartRequest
+        .validateAndUpdateCache(ozoneManager, 2L);
+
+    assertSame(OzoneManagerProtocolProtos.Status.INVALID_REQUEST,
+        omClientResponse.getOMResponse().getStatus());
   }
 
   @Test
@@ -919,8 +960,15 @@ public class TestS3MultipartUploadCommitPartRequest
 
   protected void addKeyToOpenKeyTable(String volumeName, String bucketName,
       String keyName, long clientID) throws Exception {
+    addKeyToOpenKeyTable(volumeName, bucketName, keyName, clientID,
+        RatisReplicationConfig.getInstance(HddsProtos.ReplicationFactor.ONE));
+  }
+
+  protected void addKeyToOpenKeyTable(String volumeName, String bucketName,
+      String keyName, long clientID, ReplicationConfig replicationConfig)
+      throws Exception {
     OMRequestTestUtils.addKeyToTable(true, true, volumeName, bucketName,
-        keyName, clientID, RatisReplicationConfig.getInstance(HddsProtos.ReplicationFactor.ONE), omMetadataManager);
+        keyName, clientID, replicationConfig, omMetadataManager);
   }
 
   protected String addKeyToOpenKeyTable(String volumeName, String bucketName,

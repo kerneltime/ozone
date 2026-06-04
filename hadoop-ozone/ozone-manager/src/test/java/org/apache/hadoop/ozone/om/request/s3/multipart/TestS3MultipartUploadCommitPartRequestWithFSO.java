@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.UUID;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.hdds.client.RatisReplicationConfig;
+import org.apache.hadoop.hdds.client.ReplicationConfig;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.ozone.om.helpers.BucketLayout;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
@@ -74,9 +75,17 @@ public class TestS3MultipartUploadCommitPartRequestWithFSO
   @Override
   protected void addKeyToOpenKeyTable(String volumeName, String bucketName,
       String keyName, long clientID) throws Exception {
+    addKeyToOpenKeyTable(volumeName, bucketName, keyName, clientID,
+        RatisReplicationConfig.getInstance(HddsProtos.ReplicationFactor.ONE));
+  }
+
+  @Override
+  protected void addKeyToOpenKeyTable(String volumeName, String bucketName,
+      String keyName, long clientID, ReplicationConfig replicationConfig)
+      throws Exception {
     long txnLogId = 0L;
     OmKeyInfo omKeyInfo = OMRequestTestUtils.createOmKeyInfo(volumeName, bucketName, keyName,
-            RatisReplicationConfig.getInstance(HddsProtos.ReplicationFactor.ONE),
+            replicationConfig,
             new OmKeyLocationInfoGroup(0L, new ArrayList<>(), true))
         .setObjectID(parentID + 1)
         .setParentObjectID(parentID)
