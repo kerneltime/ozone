@@ -84,6 +84,7 @@ import org.apache.hadoop.hdds.utils.db.DBStore;
 import org.apache.hadoop.hdds.utils.db.DBStoreBuilder;
 import org.apache.hadoop.hdds.utils.db.Table;
 import org.apache.hadoop.hdds.utils.db.Table.KeyValue;
+import org.apache.hadoop.hdds.utils.db.Table.KeyValueIterator;
 import org.apache.hadoop.hdds.utils.db.TableIterator;
 import org.apache.hadoop.hdds.utils.db.TablePrefixInfo;
 import org.apache.hadoop.hdds.utils.db.cache.CacheKey;
@@ -1528,8 +1529,18 @@ public class OmMetadataManagerImpl implements OMMetadataManager,
           expiredMPUs.get(mapKey)
               .addMultipartUploads(builder.setName(dbMultipartInfoKey)
                   .build());
-          numParts += omMultipartKeyInfo.getPartKeyInfoMap().size();
-          // TODO: Add the expired part handling from the new table when the complete flow is done
+          if (omMultipartKeyInfo.getSchemaVersion() == 0) {
+            numParts += omMultipartKeyInfo.getPartKeyInfoMap().size();
+          } else {
+            // schemaVersion 1: parts live in the split parts table, so the
+            // inline map is empty. Count the part rows (capped at the remaining
+            // budget) so the maxParts throttle still bounds how many parts a
+            // single cleanup cycle reclaims. Without this, every v1 upload adds
+            // 0 and the throttle is defeated -- an expired huge MPU (this
+            // feature's target case) could blow past the cap in one cycle.
+            numParts += countSplitTableParts(
+                expiredMultipartUpload.getUploadId(), maxParts - numParts);
+          }
         }
 
       }
@@ -1538,6 +1549,28 @@ public class OmMetadataManagerImpl implements OMMetadataManager,
     return expiredMPUs.values().stream().map(
             ExpiredMultipartUploadsBucket.Builder::build)
         .collect(Collectors.toList());
+  }
+
+  /**
+   * Count up to {@code limit} part rows of a schemaVersion 1 multipart upload
+   * in the split parts table. This only advances the expired-MPU discovery
+   * throttle, so it stops at the limit rather than walking every part of a
+   * huge upload -- the exact overshoot past maxParts is irrelevant to the
+   * throttle, and the bounded scan keeps discovery cheap.
+   */
+  private int countSplitTableParts(String uploadId, int limit)
+      throws IOException {
+    int count = 0;
+    try (KeyValueIterator<OmMultipartPartKey, OmMultipartPartInfo> iterator =
+        getMultipartPartsTable().iterator(
+            OmMultipartPartKey.prefix(uploadId))) {
+      while (count < limit && iterator.hasNext()) {
+        if (iterator.next().getKey().hasPartNumber()) {
+          count++;
+        }
+      }
+    }
+    return count;
   }
 
   @Override
