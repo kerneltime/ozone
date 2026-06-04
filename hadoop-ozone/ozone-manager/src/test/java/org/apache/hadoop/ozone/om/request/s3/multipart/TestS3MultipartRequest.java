@@ -32,8 +32,9 @@ import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import org.apache.hadoop.hdds.client.ReplicationConfig;
+import org.apache.hadoop.hdds.client.RatisReplicationConfig;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.hdds.utils.db.cache.CacheKey;
 import org.apache.hadoop.hdds.utils.db.cache.CacheValue;
 import org.apache.hadoop.ozone.audit.AuditLogger;
@@ -100,8 +101,12 @@ public class TestS3MultipartRequest {
     when(ozoneManager.getAccessAuthorizer())
         .thenReturn(new OzoneNativeAuthorizer());
     when(ozoneManager.getAuditLogger()).thenReturn(auditLogger);
+    // These MPU unit tests stage parts as RATIS/ONE, so make the resolved
+    // upload replication RATIS/ONE too: a multipart part must always carry the
+    // same replication config as its upload, which CommitPart now enforces
+    // (HDDS-14661). The cluster default would otherwise be RATIS/THREE.
     when(ozoneManager.getDefaultReplicationConfig()).thenReturn(
-        ReplicationConfig.getDefault(ozoneConfiguration));
+        RatisReplicationConfig.getInstance(HddsProtos.ReplicationFactor.ONE));
     doNothing().when(auditLogger).logWrite(any(AuditMessage.class));
     when(ozoneManager.resolveBucketLink(any(KeyArgs.class),
         any(OMClientRequest.class)))

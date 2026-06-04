@@ -26,6 +26,7 @@ import java.nio.file.InvalidPathException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.stream.Collectors;
 import org.apache.hadoop.hdds.utils.db.cache.CacheKey;
 import org.apache.hadoop.hdds.utils.db.cache.CacheValue;
@@ -201,6 +202,25 @@ public class S3MultipartUploadCommitPartRequest extends OMKeyRequest {
         throw new OMException("MPU parts-table split behavior is not allowed " +
           "before cluster finalization for commit part request.",
           OMException.ResultCodes.NOT_SUPPORTED_OPERATION_PRIOR_FINALIZATION);
+      }
+
+      // Invariant (HDDS-14661): every part of a multipart upload must use the
+      // same replication config as the upload. The OM already forces this at
+      // part-open (OMKeyRequest.prepareMultipartFileInfo derives the part's
+      // replication from the MPU's open key and discards any client value), and
+      // schemaVersion 1 cannot represent a divergent part (the parts table holds
+      // no per-part replication -- Complete/abort/Recon all derive a part's size
+      // from the upload's config). This is the belt-and-suspenders check at the
+      // commit boundary: reject a part whose replication still differs so no
+      // future path that bypasses that inheritance can persist a part the v1
+      // readers would mis-account.
+      if (!Objects.equals(omKeyInfo.getReplicationConfig(),
+          multipartKeyInfo.getReplicationConfig())) {
+        throw new OMException("Multipart part " + partNumber
+            + " replication config " + omKeyInfo.getReplicationConfig()
+            + " does not match the multipart upload replication config "
+            + multipartKeyInfo.getReplicationConfig(),
+            OMException.ResultCodes.INVALID_REQUEST);
       }
 
       // Resolve the previously-committed part (if this part number is being

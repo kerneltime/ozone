@@ -1105,6 +1105,14 @@ public abstract class OMKeyRequest extends OMClientRequest {
     }
     // For this upload part we don't need to check in KeyTable. As this
     // is not an actual key, it is a part of the key.
+    // Invariant (HDDS-14661): a multipart part always inherits its upload's
+    // replication config -- taken here from the upload's open key (partKeyInfo),
+    // NOT from the client-supplied args. Every part of an upload therefore
+    // shares one replication config, which the schemaVersion 1 split parts table
+    // relies on: part rows store no replication, so Complete/abort/Recon derive
+    // a part's size from the upload's config. This is the primary enforcement;
+    // S3MultipartUploadCommitPartRequest re-checks it at commit as
+    // defense-in-depth.
     return createFileInfo(args, locations, partKeyInfo.getReplicationConfig(),
             size, encInfo, prefixManager, omBucketInfo, omPathInfo,
             transactionLogIndex, objectID, configuration);
