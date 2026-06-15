@@ -749,7 +749,7 @@ evidence:
 documented here so the framework reserves the seam and so a reader does not mistake its absence
 for a gap — exactly the "state exceptions as deliberate" discipline the locking companion uses.
 
-**Why it is open.** ivandika3 raised the question on #7583: a **batched** Ratis transaction can
+**Why it is open.** ivandika3 raised the question on [#7583](https://github.com/apache/ozone/pull/7583): a **batched** Ratis transaction can
 answer **many** clients, so how do retry/reply caches work
 (RC-ivandika-retry-cache-semantics)? The honest answer is that the mechanism depends on a
 classification that does not yet exist. The framing (master D-OPEN-retry; locking §10): the **DB

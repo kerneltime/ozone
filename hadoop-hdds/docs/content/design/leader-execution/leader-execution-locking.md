@@ -25,9 +25,9 @@ author: Ritesh Shukla
 ## 0. Status, scope, and relationship to the parent design
 
 This document specifies the **concurrency control** for Ozone Manager (OM) write
-operations once request execution moves to the leader (HDDS-11898, parent design
+operations once request execution moves to the leader ([HDDS-11898](https://issues.apache.org/jira/browse/HDDS-11898), parent design
 `leader-planned-execution.md`). It is deliberately a **standalone** locking spec
-(per review feedback on PR #7583 requesting locking be split out) and covers both
+(per review feedback on PR [#7583](https://github.com/apache/ozone/pull/7583) requesting locking be split out) and covers both
 bucket layouts under a single model:
 
 - **OBS** (OBJECT_STORE) — flat namespace.
@@ -406,7 +406,7 @@ These exceptions are stated so a reviewer reads them as deliberate, not as gaps.
 
 ## 10. Open items (to refine as we proceed)
 
-- Multipart upload (FSO/OBS) lock placement and the large-value (HDDS-8238) concern.
+- Multipart upload (FSO/OBS) lock placement and the large-value ([HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)) concern.
 - hsync / lease-recovery interaction with `X(parent, file)` on commit.
 - Exact merge-operator interaction for FSO directory mtime updates on cross-parent rename.
 - Snapshot (`Checkpoint` op) ordering vs. in-flight fine-grained ops.

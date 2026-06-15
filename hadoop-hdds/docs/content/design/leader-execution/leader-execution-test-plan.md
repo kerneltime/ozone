@@ -887,7 +887,7 @@ freshness).
 | **P-1** | Hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey | `T-quota-concurrent`, `T-ryw-from-db`, `T-determinism-follower-byte-identical`, `T-7` (hot parent), `T-holder-lease-negative` | **OBS model green** (`ObsImpl.cfg`: Refinement + LockInv + NoLeak + UsedConsistent) — `obs3-verdict.out` |
 | **P-2** | Hardest multi-step FSO: CreateFile/CreateDirectory (implicit parents), FSO delete, recursive rm-rf + DirectoryDeletingService redesign | `T-1`, `T-2`, `T-3`, `T-4`, `T-5`, `T-6`, `T-7`, `T-8`, `T-deletedir-vs-openfile` | **FSO model green** (`FsoImpl.cfg`/`FsoImplSmall.cfg`: Refinement + LockInv + NoLeak + NoOrphan) — `fso-m2a-full.out`; broader configs planned |
 | **P-3** | Snapshot: CreateSnapshot/Checkpoint op, SnapshotPurge standalone, moves | `T-snapshot-consistency` | (FSO model extension for Checkpoint-vs-op ordering: planned) |
-| **P-4** | MPU (4 ops + AbortExpired) + large-value (HDDS-8238) revisit | `T-mpu-lifecycle` | n/a |
+| **P-4** | MPU (4 ops + AbortExpired) + large-value ([HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)) revisit | `T-mpu-lifecycle` | n/a |
 | **P-5** | Batch/background: DeleteKeys, RenameKey/Keys, DeleteOpenKeys, PurgeKeys/Directories | (multi-slot ordering exercised by the §5-companion bulk-sort path; covered transitively by `T-3`/`T-7` ordering + `NoLeak`) | n/a |
 | **P-6** | Easy Set-A sweep (~22 single-table ops) | (per-command flag-routing parity: `T-flag-routing-both-paths` applied per op) | n/a |
 | **P-7** | Cleanup: remove double buffer + table cache; delete legacy path; finalize | (full regression green with legacy path REMOVED; `T-ryw-from-db` now the only RYW path; `T-rolling-upgrade-mixed-binary` superseded by finalization) | OBS + FSO models green; `QuotaOvercommit.cfg` per `D-OPEN-quota-enforcement` resolution |
@@ -979,7 +979,7 @@ Stated so a reviewer reads the omissions as intentional, not as gaps:
 - **Synchronous quota release on `rm -rf`** and **eager empty-intermediate-dir cleanup** —
   `EXC-1` and `B-2` are accepted limitations; the harness asserts *eventual* convergence and
   *bounded, idempotent-on-retry* leftover dirs, not synchronous/eager behavior.
-- **Large-value MPU network overhead** (`RC-xichen-large-value` / HDDS-8238, status `open`).
+- **Large-value MPU network overhead** (`RC-xichen-large-value` / [HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238), status `open`).
   `T-mpu-lifecycle` asserts correctness on the new model and **flags** the whole-object
   overhead; it does not solve or benchmark-gate it (that is the P-4 large-value revisit).
 
@@ -1006,5 +1006,5 @@ Stated so a reviewer reads the omissions as intentional, not as gaps:
   (sole writer; `#TRANSACTION_INFO` atomic with batch; `splitReadyBufferAtCreateSnapshot` barrier);
   `OzoneManagerRatisServer.java:559-567` (retry-cache seam); `OMBucketCreateRequest.java:421,444`
   + `OMLayoutFeature.java:26` (finalization-gating pattern).
-- Background: prototype #7406 (40k ops/sec baseline), review threads #7583 / #10502 / #10503,
-  HDDS-1595 (sequence-diagram exemplar), HDDS-8238 (MPU large value), RATIS-1210.
+- Background: prototype [#7406](https://github.com/apache/ozone/pull/7406) (40k ops/sec baseline), review threads [#7583](https://github.com/apache/ozone/pull/7583) / [#10502](https://github.com/apache/ozone/pull/10502) / [#10503](https://github.com/apache/ozone/pull/10503),
+  [HDDS-1595](https://issues.apache.org/jira/browse/HDDS-1595) (sequence-diagram exemplar), [HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238) (MPU large value), [RATIS-1210](https://issues.apache.org/jira/browse/RATIS-1210).

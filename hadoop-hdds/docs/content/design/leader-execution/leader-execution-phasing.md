@@ -116,7 +116,7 @@ Concretely the order is:
   reference model (D-16). The showstoppers are *retired by the end of P-2/P-3*.
 - **P-3** migrates **snapshot** (CreateSnapshot/Checkpoint op, SnapshotPurge standalone, moves).
 - **P-4** migrates **MPU** (4 ops + AbortExpired) and revisits the large-value concern
-  (HDDS-8238 / RC-xichen-large-value).
+  ([HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238) / RC-xichen-large-value).
 - **P-5** sweeps the **batch/background** ops (DeleteKeys, RenameKey/Keys, DeleteOpenKeys,
   PurgeKeys/Directories).
 - **P-6** sweeps the **easy Set-A** single-table ops (ACLs, tagging, SetTimes, secrets, tokens,
@@ -619,7 +619,7 @@ evidence: ["master §29 P-3", "OMSnapshotCreateRequest.java:166,275", "OMSnapsho
 
 **Command set.** C13 InitiateMultiPartUpload, C14 CommitMultiPartUpload (commit part), C15
 CompleteMultiPartUpload, C16 AbortMultiPartUpload, C17 AbortExpiredMultiPartUploads. Plus the
-**large-value revisit** (RC-xichen-large-value / HDDS-8238): whole-object replication of a
+**large-value revisit** (RC-xichen-large-value / [HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)): whole-object replication of a
 completed multi-GB MPU object is the case xichen01 flagged as big network overhead (master §23, §30
 R-mpu-large-value). This phase confronts it; it is `open` in the master ledger and may produce its
 own sub-decision.

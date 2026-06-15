@@ -125,11 +125,11 @@ evidence: ...
 
 | Doc | Role | Status |
 |---|---|---|
-| `leader-planned-execution.md` (this) | Master: orientation, why, design overview, **rationale spine**, correctness-contract index, delivery plan | scaffold |
-| `leader-execution-locking.md` | Companion: concurrency & locking model (container/slot, linearizability) | drafted |
-| `leader-execution-components.md` (or per-component set) | Companion: the 12 component deep-dives | TO-GENERATE |
-| `leader-execution-test-plan.md` | Companion: full test strategy + T-n catalog | TO-GENERATE |
-| `leader-execution-phasing.md` | Companion: per-command migration playbook | TO-GENERATE |
+| `leader-planned-execution.md` (this) | Master: orientation, why, design overview, **rationale spine**, correctness-contract index, delivery plan | draft |
+| `leader-execution-locking.md` | Companion: concurrency & locking model (container/slot, linearizability) | draft |
+| `leader-execution-components.md` (or per-component set) | Companion: the 12 component deep-dives | draft |
+| `leader-execution-test-plan.md` | Companion: full test strategy + T-n catalog | draft |
+| `leader-execution-phasing.md` | Companion: per-command migration playbook | draft |
 
 ## §C. Consistency lint (CI gate — mechanical, no agent)
 
@@ -159,7 +159,7 @@ right reasons. Read §2 (Executive summary) end-to-end for the whole story, then
 — the rationale spine**: the decision records `D-1`…`D-16` and `D-SPEC-1`…`D-SPEC-3` with their forces
 and consequences, the rejected-alternatives wall (§21, the `ALT-n` entries — the "do-not-re-tread"
 ledger), and the review-and-consensus ledger (§23, the `RC-n` entries that map every reviewer concern
-from PR #7583 / #10502 / #10503 to the decision that settles it). If your concern is concurrency or
+from PR [#7583](https://github.com/apache/ozone/pull/7583) / [#10502](https://github.com/apache/ozone/pull/10502) / [#10503](https://github.com/apache/ozone/pull/10503) to the decision that settles it). If your concern is concurrency or
 linearizability, the contract is **not** in this file — open the companion
 `leader-execution-locking.md`, which is authoritative for the lock model (`I-1`…`I-12` there). If your
 concern is "where could this corrupt data," read §15 (Failure modes) and §19 (blast radius) here, then
@@ -177,7 +177,7 @@ of the task.
 
 **Newcomer.** You want the big picture and the history so you inherit context instead of re-deriving it.
 Read §2 (Executive summary) — it is written to stand alone — then §5 (Project history & prior art: the
-honest archaeology of #7583, #10502, #10503, and the #7406 prototype, including why earlier attempts
+honest archaeology of [#7583](https://github.com/apache/ozone/pull/7583), [#10502](https://github.com/apache/ozone/pull/10502), [#10503](https://github.com/apache/ozone/pull/10503), and the [#7406](https://github.com/apache/ozone/pull/7406) prototype, including why earlier attempts
 stalled and what is different this time), and keep §3 (this part's glossary) open the entire time. The
 terms in §3 are the ones reviewers actually tripped on; reading them first will save you from the same
 traps. Do not start in Part IV — the rationale spine assumes you already know the design.
@@ -204,7 +204,7 @@ and followers alike, the committed request is handed to `runCommand`
 (`hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/ratis/OzoneManagerStateMachine.java:668`,
 verified), which dispatches through the request handler into the per-request
 `validateAndUpdateCache(...)` method
-(invoked at `OzoneManagerStateMachine.java:425`, verified) — and `validateAndUpdateCache` is *the
+(invoked at `OzoneManagerRequestHandler.java:425`, verified) — and `validateAndUpdateCache` is *the
 business logic*. It re-reads metadata, re-checks ACLs, re-validates quota, re-derives object identifiers,
 and stages the resulting changes. In other words, the full request logic does not run once on the node
 that received the request; it runs **N times**, once on each replica, independently.
@@ -264,7 +264,7 @@ the *result* — a deterministic, domain-agnostic **DB patch** made of four prim
 **zero business logic**: no ACL re-check, no quota re-validation, no objectID re-derivation, no path
 re-resolution. They write what the leader computed. Consensus goes back to doing what consensus is good
 at — agreeing on a sequence of opaque changes — and stops trying to agree on the output of complex code
-re-run independently. The prototype that proved this approach (#7406) reached roughly **40,000
+re-run independently. The prototype that proved this approach ([#7406](https://github.com/apache/ozone/pull/7406)) reached roughly **40,000
 operations per second**, more than triple the baseline, because the followers' work shrinks to a memcpy
 and the leader's path sheds the double buffer and the bucket lock.
 
@@ -286,8 +286,8 @@ replication format, the design replicates a *domain-agnostic* DB patch: a `Batch
 deserializes a domain object** (`I-inner-domain-agnostic`). The alternative of replicating a *journal of
 abstract commands* (`ALT-journal-not-dbchanges`, raised by xichen01) was rejected precisely because
 "apply an abstract command" is the per-command-unique step that causes today's divergence — replicating
-DB changes is how consensus normally works, and Ethan's reply on #7583 made the case. The alternative of
-raw Put/Delete only (`ALT-raw-putdelete-only` — what #10503 regressed to) was rejected because it cannot
+DB changes is how consensus normally works, and Ethan's reply on [#7583](https://github.com/apache/ozone/pull/7583) made the case. The alternative of
+raw Put/Delete only (`ALT-raw-putdelete-only` — what [#10503](https://github.com/apache/ozone/pull/10503) regressed to) was rejected because it cannot
 express commutative quota or the snapshot barrier. The module lands in `hadoop-hdds/framework` and is
 *not* extracted to its own Maven module yet (`D-2`); locking the API surface in place now, and extracting
 later as a no-behavior-change PR, avoids premature structure while still letting Recon-as-listener,
@@ -439,7 +439,7 @@ read two ways, says explicitly which reading is correct.
 logic exactly **once** and replicates the *resulting DB patch*; **followers** apply that patch's bytes
 with **no business logic**. Contrast the status quo, where the request is replicated and
 `validateAndUpdateCache` re-runs the logic independently on every node
-(`OzoneManagerStateMachine.java:425`, verified). "Leader-side" qualifies *where execution happens*, not
+(`OzoneManagerRequestHandler.java:425`, verified). "Leader-side" qualifies *where execution happens*, not
 where data lives — all replicas still hold the full data.
 
 **Replicated-DB module.** Ethan Rose's domain-agnostic module (in `hadoop-hdds/framework`, per `D-2`)
@@ -525,20 +525,11 @@ in the `ozone-11898-leaderexec` worktree (the objectID encoding, the state-machi
 double-buffer sole-writer and `#TRANSACTIONINFO` atomicity, the bucket write lock, the FSO path-key
 keying, and the finalization `isAllowed` gating pattern). The quantitative figures — the ~12,000 ops/s
 baseline, the ~40,000 ops/s prototype result, and the ~1.2-request average flush batch — are **inferred
-from the prototype performance data (#7406) and the design grill**, not from a `file:line`, and should be
+from the prototype performance data ([#7406](https://github.com/apache/ozone/pull/7406)) and the design grill**, not from a `file:line`, and should be
 read as benchmark-derived rather than code-cited. Where Part IV records a decision as `locked`, the
 provenance and evidence are carried in that decision's `yaml` block; this part does not restate them.
 
 # PART II — Why
-
-> Authoring note: this part fills the scaffold's §4–§8 "TO-GENERATE" slots. It is
-> the *motivation and grounding* half of the master spec. It defines no new design;
-> it establishes the pain (§4), the lineage (§5, §5b), the boundary (§6), the
-> principles every later component must honour (§7), and the load-bearing assumptions
-> (§8). Every code claim is tagged `verified` with a `file:line` resolved in the
-> HDDS-11898 worktree, or `inferred`. Decisions referenced as `D-n` and concerns as
-> `RC-n` are defined in Part IV of the master; assumptions emitted here as `A-n` are
-> consumed by the component and decision blocks (e.g. `D-3 depends_on A-nvme`).
 
 ## 4. Background & problem statement
 
@@ -556,7 +547,7 @@ carry a latent *correctness* hazard. This section quantifies each and cites the 
 write ops/s** (`F-perf-current`, inferred — operational measurement, not a code
 constant). The standalone prototype that moved execution to the leader and replicated a
 DB patch sustained on the order of **~40,000 write ops/s** on comparable hardware
-(`F-perf-proto`, inferred — prototype PR #7406, see §5). The Ratis consensus layer
+(`F-perf-proto`, inferred — prototype PR [#7406](https://github.com/apache/ozone/pull/7406), see §5). The Ratis consensus layer
 itself is not the bottleneck in this regime: a tuned Ratis ring can commit on the order
 of **~25,000 entries/s** for OM-sized payloads (`F-ratis-cap`, inferred). The gap
 between 12k and the 25k consensus cap, and the further gap to 40k, is the OM
@@ -733,9 +724,9 @@ honest archaeology. All PR references are `inferred` in the sense that the claim
 about GitHub pull-request state and review threads, not about code resolvable in the
 worktree; they are cited by PR number so a reader can verify the thread directly.
 
-### 5.1 PR #7583 — Sumit Agrawal's deep design (stalled to auto-close, Nov 2025)
+### 5.1 PR [#7583](https://github.com/apache/ozone/pull/7583) — Sumit Agrawal's deep design (stalled to auto-close, Nov 2025)
 
-The first serious attempt was **PR #7583** (Sumit Agrawal), a deep design that worked
+The first serious attempt was **PR [#7583](https://github.com/apache/ozone/pull/7583)** (Sumit Agrawal), a deep design that worked
 out much of the substance the current spec inherits: replicating DB changes rather than
 re-executing commands, a `createKey` beachhead, the objectID/managed-index question, and
 the locking direction. It drew the most consequential review of the whole effort. **Ethan
@@ -747,7 +738,7 @@ in-memory reserved state (this becomes `D-1` and `D-7`; the review concern is lo
 back from two directions — that syncing *DB changes* rather than a *command journal*
 might constrain future features like FSO in-memory inode trees (`RC-xichen-journal-vs-
 dbchanges`, ultimately addressed by `D-1`), and that **large DB values** (MPU, the
-HDDS-8238 large-value concern) would impose big network overhead when whole objects ride
+[HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238) large-value concern) would impose big network overhead when whole objects ride
 the patch (`RC-xichen-large-value`, still **open**; see §6 non-goals and §30 risks).
 **Szetszwo (Tsz-Wo Nicholas Sze)** raised the locking model (should ancestors be locked?
 why no volume/root lock? what about volume rename?) and asked that **OBS locking be split
@@ -759,7 +750,7 @@ retry-cache-semantics`, **deferred** to `D-OPEN-retry`), a terminology correctio
 **`retryCache`, not `replayCache`** to align with Ratis (`RC-ivandika-terminology`,
 adopted), the observation that **write audit logs become leader-only**
 (`RC-ivandika-audit`, addressed by `D-10`), and a request for **detailed sequence
-diagrams** in the HDDS-1595 style (`RC-ivandika-seqdiagram`, **open** — to be satisfied
+diagrams** in the [HDDS-1595](https://issues.apache.org/jira/browse/HDDS-1595) style (`RC-ivandika-seqdiagram`, **open** — to be satisfied
 by §13). **Kerneltime (Ritesh, this spec's author)** set the engineering guardrails: keep
 apply **minimal and idempotent**, no read-modify-write in apply (rolling-upgrade safety),
 migrate **incrementally**, and **benchmark before adding complexity**
@@ -767,33 +758,33 @@ migrate **incrementally**, and **benchmark before adding complexity**
 
 The design's substance was sound; its *process* stalled. The PR accumulated review but
 no merge path, went inactive, and was **auto-closed by staleness automation in
-November 2025** (`F-pr7583-autoclose`, inferred — GitHub PR #7583 state). The lesson the
+November 2025** (`F-pr7583-autoclose`, inferred — GitHub PR [#7583](https://github.com/apache/ozone/pull/7583) state). The lesson the
 current spec internalises: a deep, intrusive, single-large-PR design for the OM write
 path is at high risk of dying by inactivity, because there is never a moment it is small
 enough to merge. That risk directly shapes `D-13` (hard-first, incremental landing in
 master).
 
-### 5.2 PR #10502 — closed in minutes
+### 5.2 PR [#10502](https://github.com/apache/ozone/pull/10502) — closed in minutes
 
-**PR #10502** was a short-lived attempt that was **closed within minutes of opening**
-(`F-pr10502`, inferred — GitHub PR #10502 state). It contributes nothing technical to
-inherit; it is recorded here only so the numbering gap between #7583 and #10503 is not a
+**PR [#10502](https://github.com/apache/ozone/pull/10502)** was a short-lived attempt that was **closed within minutes of opening**
+(`F-pr10502`, inferred — GitHub PR [#10502](https://github.com/apache/ozone/pull/10502) state). It contributes nothing technical to
+inherit; it is recorded here only so the numbering gap between [#7583](https://github.com/apache/ozone/pull/7583) and [#10503](https://github.com/apache/ozone/pull/10503) is not a
 mystery to a newcomer reading the thread history, and as one more data point that ad-hoc
 restarts without the rationale spine do not gain traction.
 
-### 5.3 PR #10503 — Abhishek's condensed revival (the live thread)
+### 5.3 PR [#10503](https://github.com/apache/ozone/pull/10503) — Abhishek's condensed revival (the live thread)
 
-**PR #10503** (Abhishek Pal) is the **current, live** revival: a condensed restatement of
+**PR [#10503](https://github.com/apache/ozone/pull/10503)** (Abhishek Pal) is the **current, live** revival: a condensed restatement of
 the design intended to get a tractable thread moving again (`F-pr10503`, inferred —
-GitHub PR #10503). Abhishek is collaborative and has explicitly signalled he wants to
+GitHub PR [#10503](https://github.com/apache/ozone/pull/10503)). Abhishek is collaborative and has explicitly signalled he wants to
 **co-author with kerneltime and Sumit** rather than fork the effort — this spec is the
-joint, full-fidelity artifact that #10503's condensation pointed at. Being condensed, the
-#10503 write-up *regressed* on four points that #7583 and the design grill had already
+joint, full-fidelity artifact that [#10503](https://github.com/apache/ozone/pull/10503)'s condensation pointed at. Being condensed, the
+[#10503](https://github.com/apache/ozone/pull/10503) write-up *regressed* on four points that [#7583](https://github.com/apache/ozone/pull/7583) and the design grill had already
 resolved, and naming them is the whole reason this master spec restores them:
 
 - **Quota** — condensed toward raw `Put/Delete` without the commutative `Merge` operator,
   which cannot express parallel-safe quota; restored as `D-7` (the `ALT-raw-putdelete-
-  only` "do-not-re-tread" entry exists precisely because #10503 drifted there).
+  only` "do-not-re-tread" entry exists precisely because [#10503](https://github.com/apache/ozone/pull/10503) drifted there).
 - **Retry / idempotency** — left implicit; restored as the explicitly-`deferred`
   `D-OPEN-retry`, gated on a per-operation idempotency audit (§30, locking companion §10).
 - **Batching** — the throughput rationale (why batching is the lever, §4.1) was thin;
@@ -801,27 +792,27 @@ resolved, and naming them is the whole reason this master spec restores them:
 - **Upgrade / mixed-mode** — the backwards-compatibility and finalization-gating story
   was under-specified; restored as `D-11`/`D-12`/`D-14` and §16.
 
-The `@ivandika3` reviewer on #10503 additionally asked for a **prior-art comparison to
+The `@ivandika3` reviewer on [#10503](https://github.com/apache/ozone/pull/10503) additionally asked for a **prior-art comparison to
 how other distributed databases separate transaction processing from replication** —
 that request is answered directly in §5b below.
 
-### 5.4 The prototype — PR #7406 (proved 40k)
+### 5.4 The prototype — PR [#7406](https://github.com/apache/ozone/pull/7406) (proved 40k)
 
-The throughput claim is not aspirational. **PR #7406** is a working **prototype** of
+The throughput claim is not aspirational. **PR [#7406](https://github.com/apache/ozone/pull/7406)** is a working **prototype** of
 leader-side execution that demonstrated on the order of **~40,000 write ops/s**, roughly
 3× the current ~12k, on comparable hardware (`F-perf-proto` / `F-pr7406`, inferred —
-prototype PR #7406 and its attached performance data; the raw data lives in §34
+prototype PR [#7406](https://github.com/apache/ozone/pull/7406) and its attached performance data; the raw data lives in §34
 appendices). The prototype also already carried **per-command runtime flags** to route
 each migrated command between legacy and new paths (`F-pr7406-flags`, inferred), which is
 the empirical basis for `D-14` (per-command runtime config flag, default legacy). The
 prototype is the existence proof that the architecture pays off; this spec is the
 production-grade, correctness-first realisation of it.
 
-### 5.5 What is different now (why this attempt should land where #7583 stalled)
+### 5.5 What is different now (why this attempt should land where [#7583](https://github.com/apache/ozone/pull/7583) stalled)
 
-Three things changed between #7583's stall and this spec:
+Three things changed between [#7583](https://github.com/apache/ozone/pull/7583)'s stall and this spec:
 
-1. **Hard-first ordering (`D-13`).** #7583's implicit plan was a large design landing as
+1. **Hard-first ordering (`D-13`).** [#7583](https://github.com/apache/ozone/pull/7583)'s implicit plan was a large design landing as
    a unit; this spec deliberately migrates the *hardest* scenarios first (multi-step FSO,
    recursive delete, quota, snapshot) so the showstoppers are retired early and the
    feature cannot die in a permanent half-migrated mixed mode after the "easy wins" were
@@ -833,8 +824,8 @@ Three things changed between #7583's stall and this spec:
    counterexample that keeps `D-OPEN-quota-enforcement` honest — see
    `leader-execution-locking.md §8 EXC-3` and §30). An FSO model is planned. A formal tier
    that can *fail the build* on a divergence claim is a different level of assurance than
-   #7583 had.
-3. **The rationale spine (Part IV).** #7583's most expensive asset — the reasoning behind
+   [#7583](https://github.com/apache/ozone/pull/7583) had.
+3. **The rationale spine (Part IV).** [#7583](https://github.com/apache/ozone/pull/7583)'s most expensive asset — the reasoning behind
    each choice and each rejected alternative — lived only in a review thread that then
    auto-closed and is hard to address. This spec captures it as a CI-checkable graph of
    `D-n`/`ALT-n`/`RC-n` blocks (the "do-not-re-tread wall"), so the next reviewer who
@@ -843,7 +834,7 @@ Three things changed between #7583's stall and this spec:
 
 ## 5b. Prior art — concurrency & replication in other distributed databases
 
-> This section is the direct answer to the `@ivandika3` review gate on PR #10503: compare
+> This section is the direct answer to the `@ivandika3` review gate on PR [#10503](https://github.com/apache/ozone/pull/10503): compare
 > how production Raft/Paxos systems separate transaction **processing** from
 > state-machine **replication**, and state what each implies for OM. Every claim here is
 > `inferred` (from public papers and design docs, named per subsection) and is **not**
@@ -1110,12 +1101,12 @@ versus a sequential model, not as serializability of transactions.**
   DB-changes approach might constrain) is **not** designed here. The design keeps FSO
   entries in their existing on-disk, parent-objectID-keyed form (`F-1` in the locking
   companion).
-- **N-5 The MPU large-value redesign (HDDS-8238).** The concern that large DB values (MPU
+- **N-5 The MPU large-value redesign ([HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)).** The concern that large DB values (MPU
   with many parts) impose big network overhead when whole objects ride the replicated
   patch (`RC-xichen-large-value`, raised by xichen01, endorsed by ivandika3, **open**) is
   **acknowledged as a risk** (§30) but its **resolution is out of scope** for this design.
   MPU migration is phased late (P-4) and the large-value optimization is tracked as the
-  separate HDDS-8238 effort. This design does not redesign how large values are stored or
+  separate [HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238) effort. This design does not redesign how large values are stored or
   shipped.
 
 > Non-goals N-1..N-5 are stated so a reviewer reads each as a deliberate boundary, not a
@@ -1782,6 +1773,21 @@ later phases sweep the rest and finally remove the legacy path (P-7).
 
 ---
 
+## 11. Component designs
+
+The twelve buildable components (`C-1`…, the `C-n` blocks) — the replicated-DB module, the
+`ManagedIndexService`, the lean lock manager, the orchestrator/`LeaderPlanner`, the
+`PlannedRequest` + change recorder, the dual-path state machine, the `OMLayoutFeature` gate, the
+quota merge operator, the (deferred) retry mechanism, the per-command subclasses, the test
+harness, and the late legacy removal — live in the companion `leader-execution-components.md` (see
+the §B document map). Each carries `target_files`, the exact seam into existing code, its
+`implements`/`tests`/`anti_patterns`, and the `P-n` phase it lands in. They are **not** re-derived
+here; this section is the pointer the orientation in §1 and the references in §10.3 resolve to.
+
+See the companion `leader-execution-components.md`.
+
+---
+
 ## 12. Proto & API contracts
 
 This section freezes the **wire contract**. It is a **two-layer** message design (D-2): a
@@ -1978,12 +1984,12 @@ field and the spec records the constraint.
 > **components** that produce and consume these messages (the replicated-DB module, the change
 > recorder/`PlannedRequest`, the dual-path state machine, the merge operator, the
 > `ManagedIndexService`) are §11 in the component companion. The **bound** on `Batch` size for
-> large values (the MPU / HDDS-8238 concern, RC-xichen-large-value, still open) is B-batch-size
+> large values (the MPU / [HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238) concern, RC-xichen-large-value, still open) is B-batch-size
 > in §25.
 
 ```yaml
 # RC-xichen-large-value remains OPEN (§23): whole-object Puts for large MPU values
-# (HDDS-8238) inflate the Batch crossing Ratis. Tracked as R-mpu-large-value (§30),
+# ([HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)) inflate the Batch crossing Ratis. Tracked as R-mpu-large-value (§30),
 # bounded by B-batch-size (§25); revisited in P-4. Not resolved by this proto.
 ```
 
@@ -1995,7 +2001,7 @@ field and the spec records the constraint.
 > linearizability checker (locking companion §7) must accept, and each "asserts:" line maps
 > to a `T-n` in the test catalog. They satisfy the standing review request
 > `RC-ivandika-seqdiagram` (@ivandika3, PR#7583 — "add detailed sequence diagrams,
-> HDDS-1595 style"). The diagrams deliberately surface the four seams that the prose tends
+> [HDDS-1595](https://issues.apache.org/jira/browse/HDDS-1595) style"). The diagrams deliberately surface the four seams that the prose tends
 > to gloss: where the **lock** is taken and dropped (per the locking companion's I-2 hold
 > span), where the **Ratis submit / quorum-commit / local-apply** boundary sits, where the
 > **DB patch** (`Put / Delete / Merge / Checkpoint` — D-1) is the only thing replicated,
@@ -2476,6 +2482,20 @@ evidence: ["leader-execution-locking.md §4.3", "leader-execution-locking.md I-1
 
 ---
 
+## 14. Concurrency & locking model
+
+The concurrency contract the planner must honor — the container/slot lock model, lock identities
+(objectID for containers, `(parentObjectID, name)` for slots), the per-operation lock matrix, the
+hold span, the deadlock-free total order, the multi-step inter-step gaps, the no-holder-lease rule,
+and the linearizability correctness model with invariants `I-1`…`I-12` — is owned by the companion
+`leader-execution-locking.md`. It is the authoritative source for anything that acquires a lock and
+is **not** re-derived here; the master summarizes it where needed (§10.1, §15, §16) and points at
+it everywhere else (§1 reviewer/implementer paths, the §10.2 diagrams' "fine-grained lock (§14)").
+
+See the companion `leader-execution-locking.md`.
+
+---
+
 ## 15. Failure modes & recovery
 
 > This section applies the failure-injection lens uniformly: walk **every I/O seam** in the
@@ -2683,7 +2703,7 @@ mistake:
    (Phase P-1), `ozone.om.leader.execution.fso.enabled` (P-2), `...snapshot.enabled` (P-3).
    This is the **operational** switch: even after finalization, an operator can route a
    command back to the legacy path without a binary downgrade (D-14 consequences). The
-   prototype #7406 already carried per-command flags (D-14 evidence).
+   prototype [#7406](https://github.com/apache/ozone/pull/7406) already carried per-command flags (D-14 evidence).
 
 Negative constraint: the runtime flag MUST NOT enable the new path on a cluster that is not
 yet finalized — the finalization gate dominates. The flag is "which path, *given* the
@@ -3077,8 +3097,8 @@ evidence: ["OzoneManager.java:4656", "OMKeyCommitRequest.java:383-384", "OzoneMa
 > it, and what it costs. It exists so that a future reviewer, a new contributor, or a
 > later version of any of us cannot quietly re-open a settled question without first
 > hitting the documented wall. Every entry below is back-filled from two sources: the
-> design grill of 2026-06-12 through 2026-06-15, and the review threads on PR #7583
-> (the deep, stalled first attempt), PR #10502 (closed within minutes), and PR #10503
+> design grill of 2026-06-12 through 2026-06-15, and the review threads on PR [#7583](https://github.com/apache/ozone/pull/7583)
+> (the deep, stalled first attempt), PR [#10502](https://github.com/apache/ozone/pull/10502) (closed within minutes), and PR [#10503](https://github.com/apache/ozone/pull/10503)
 > (the condensed re-attempt that regressed on quota, retry, batching, and upgrade).
 >
 > The reading contract for this part:
@@ -3128,8 +3148,8 @@ Replicate only raw `Put`/`Delete` byte operations — rejected as `ALT-raw-putde
 because it cannot express two things the design needs: a *commutative* quota update
 (two concurrent commits to the same bucket must both land without a read-modify-write
 under an exclusive lock) and the *snapshot barrier* (a consistent checkpoint at an exact
-log index). #10503 regressed to exactly this raw shape and lost both. (3) Ethan Rose's
-proposal on #7583: replicate a small, **domain-agnostic** instruction set —
+log index). [#10503](https://github.com/apache/ozone/pull/10503) regressed to exactly this raw shape and lost both. (3) Ethan Rose's
+proposal on [#7583](https://github.com/apache/ozone/pull/7583): replicate a small, **domain-agnostic** instruction set —
 `Put / Delete / Merge / Checkpoint` — where `Merge` carries a commutative operator
 (quota) and `Checkpoint` carries the snapshot barrier. This is how consensus systems
 normally work: the leader computes, the followers apply bytes.
@@ -3145,7 +3165,7 @@ module is intentionally Ozone-agnostic so that Recon (as a passive listener), fo
 reads, and even SCM could reuse it later — a width benefit Ethan called out and
 nandakumar131 endorsed with a +1.
 
-**Consensus state.** Raised by ethan-rose on PR #7583; the `Put/Delete/Merge/Checkpoint`
+**Consensus state.** Raised by ethan-rose on PR [#7583](https://github.com/apache/ozone/pull/7583); the `Put/Delete/Merge/Checkpoint`
 shape and the "quota via merge operator" idea are his. Endorsed by nandakumar131 (+1 on
 the module direction). Decided by kerneltime. This settles review concerns
 `RC-ethan-merge-module` and `RC-xichen-journal-vs-dbchanges` (xichen01 worried that syncing
@@ -3157,7 +3177,7 @@ whatever the OM needs — see D-2).
 by Recon/SCM (the width win). The `Checkpoint` op subsumes today's snapshot barrier (one
 fewer special case). The cost is that the leader now owns *all* non-determinism resolution
 (D-10) and that large values are shipped whole on the wire (the open `RC-xichen-large-value`
-and the deferred HDDS-8238 MPU concern).
+and the deferred [HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238) MPU concern).
 
 ```yaml
 id: D-1
@@ -3207,7 +3227,7 @@ agnostic promise: the inner `Batch` is bytes the follower applies without interp
 that might grow (xichen01's FSO-inode-tree worry) — lives in the outer envelope where it can
 evolve freely.
 
-**Consensus state.** Raised jointly by ethan-rose and kerneltime on PR #7583 and refined in
+**Consensus state.** Raised jointly by ethan-rose and kerneltime on PR [#7583](https://github.com/apache/ozone/pull/7583) and refined in
 the grill of 2026-06-12. Decided by kerneltime. The "inner never deserializes a domain
 object" line is the load-bearing invariant this decision exists to protect.
 
@@ -3246,7 +3266,7 @@ real correctness bugs.
 
 **Alternatives on the table.** (1) Keep the OM table caches (`ALT-keep-cache`). (2) Keep a
 cache but make updates asynchronous via column-family callbacks (`ALT-cf-callback-cache`,
-ethan-rose's softer suggestion on #7583 that serialized apply makes write-through caching
+ethan-rose's softer suggestion on [#7583](https://github.com/apache/ozone/pull/7583) that serialized apply makes write-through caching
 hard, so do non-fatal CF-level callbacks instead). (3) Remove the cache entirely for
 migrated commands and serve reads straight from RocksDB, relying on the lock-hold-to-commit
 discipline (D-5) for read-your-writes.
@@ -3343,8 +3363,8 @@ id: D-4
 title: Striped non-thread-affine semaphore-RW lock manager keyed by objectID/slot
 status: locked
 depends_on: [F-12]
-rejects: [ALT-reuse-ozonemanagerlock]
-addresses: [RC-szetszwo-split-locking-doc]
+rejects: [ALT-reuse-ozonemanagerlock, ALT-mgl-ancestor-locking]
+addresses: [RC-szetszwo-mgl, RC-szetszwo-split-locking-doc]
 raised_by: [kerneltime]
 deciders: [kerneltime]
 consequences: ["releasable on a different thread than acquired (async orchestration)", "no per-type maps/trackers/reentrancy"]
@@ -3477,7 +3497,7 @@ apply order, with no exclusive lock and no lost update. D-1's `Merge` verb is th
 the question is *how* the merge is represented and resolved.
 
 **Alternatives on the table.** (1) In-memory reserved-quota state in static `AtomicLong`
-maps (`ALT-quota-reserved-static`, sumitagrawl's approach from prototype #7406's
+maps (`ALT-quota-reserved-static`, sumitagrawl's approach from prototype [#7406](https://github.com/apache/ozone/pull/7406)'s
 `QuotaResource.java`). (2) Whole-row bucket PUT under the bucket write lock
 (`ALT-quota-wholerow-put`). (3) RocksDB-*native* merge operator with operands stored on disk
 (`ALT-quota-rocksdb-native`, ethan-rose's suggestion). (4) **Option B**: a `Merge` op in the
@@ -3502,7 +3522,7 @@ killed, because it remains a legitimate future optimization if whole-row writes 
 bottleneck. The decisive property of Option B is that it changes *no on-disk bytes' shape*,
 which is what lets D-11 keep the on-disk schema invariant.
 
-**Consensus state.** Raised by ethan-rose (the merge-operator idea on #7583) and nandakumar131
+**Consensus state.** Raised by ethan-rose (the merge-operator idea on [#7583](https://github.com/apache/ozone/pull/7583)) and nandakumar131
 (endorsement). The specific choice of *Option B* — module-applied, whole-row, no native merge —
 was made in the grill of 2026-06-14. Decided by kerneltime. This settles `RC-ethan-merge-module`
 (the merge-module direction) and `RC-kerneltime-minimal-apply` (keep apply minimal/idempotent,
@@ -3755,12 +3775,12 @@ managed index, two different objects cannot receive the same index, so they cann
 same objectID — and seeding the managed index above the legacy high-water mark means even objects
 created *before* and *after* the cutover are disjoint. This is the structural guarantee D-8 relies
 on to retire the 256-window safely (D-8 `depends_on` D-12), and it is exactly the "use managed
-index in both flows" point from PR #7583. Because it is a *prerequisite* — collisions would
+index in both flows" point from PR [#7583](https://github.com/apache/ozone/pull/7583). Because it is a *prerequisite* — collisions would
 corrupt data the moment the first command migrates — it is sequenced into Phase 0, ahead of any
 command migration.
 
 **Consensus state.** Raised by kerneltime; the mixed-mode collision risk was the catch of
-2026-06-15 and the "use managed index in both flows" framing comes from the #7583 thread. Decided
+2026-06-15 and the "use managed index in both flows" framing comes from the [#7583](https://github.com/apache/ozone/pull/7583) thread. Decided
 by kerneltime.
 
 **Consequences.** Prevents legacy(Ratis-idx) vs new(managed-idx) objectID collision during
@@ -3788,7 +3808,7 @@ evidence: ["PR#7583 ('use managed index in both flows')", "grill catch 2026-06-1
 political/technical failure mode: if the *easy, high-value* commands migrate first and "prove
 value," the organization's appetite to finish the *hard* commands (multi-step FSO, recursive
 delete, commutative quota, snapshot) can evaporate — leaving the cluster stuck in permanent
-mixed mode, carrying two execution paths forever, with the showstoppers never retired. PR #7583
+mixed mode, carrying two execution paths forever, with the showstoppers never retired. PR [#7583](https://github.com/apache/ozone/pull/7583)
 itself stalled to an auto-close; the abandonment risk is not hypothetical for this project.
 
 **Alternatives on the table.** (1) Value-first: migrate the easy, high-value commands first to
@@ -3801,7 +3821,7 @@ end of P2-P3, then even if momentum later flags, the irreversible architectural 
 behind us and the remaining work is mechanical leg-work that is safe to finish at any pace.
 Value-first inverts this: it banks the cheap wins and leaves the existential risk hanging, which
 is precisely the trap that leaves an intrusive refactor half-done. The user explicitly overruled
-value-first during the grill of 2026-06-14. (Note the alignment with prior art: Sumit's #7583
+value-first during the grill of 2026-06-14. (Note the alignment with prior art: Sumit's [#7583](https://github.com/apache/ozone/pull/7583)
 work used `createKey` as a beachhead; hard-first generalizes that instinct — establish the
 hardest path works before spending effort on breadth.)
 
@@ -3849,12 +3869,12 @@ fine-grained revert that finalization cannot: flip one command back to legacy at
 every other migrated command on the new path, no downgrade. This makes master *always stable*
 (every migrated command can fall back independently) and makes long-lived mixed mode a *first-
 class* operating state rather than a transient to be rushed through — which is exactly what D-13's
-hard-first, land-incrementally plan needs. The prototype #7406 already carried per-command flags,
+hard-first, land-incrementally plan needs. The prototype [#7406](https://github.com/apache/ozone/pull/7406) already carried per-command flags,
 so this is proven, not speculative. The flag and finalization are deliberately separate: the flag
 is the *operational revert*, finalization is the *binary-safety gate* (Q8 in the grill).
 
 **Consensus state.** Raised by kerneltime and sumitagrawl. Decided by kerneltime. Evidence: the
-prototype #7406 had per-command flags; the flag-vs-finalization separation is Q8 from the grill.
+prototype [#7406](https://github.com/apache/ozone/pull/7406) had per-command flags; the flag-vs-finalization separation is Q8 from the grill.
 
 **Consequences.** Operational revert without downgrade. Master always stable; long-lived mixed mode
 is first-class. Each migrated command is independently routable to legacy or new
@@ -3871,7 +3891,7 @@ consequences: ["operational revert without downgrade", "master always stable; lo
 tests: [T-flag-routing-both-paths]
 phase: P-0
 provenance: verified
-evidence: ["prototype #7406 had per-command flags", "grill Q8"]
+evidence: ["prototype [#7406](https://github.com/apache/ozone/pull/7406) had per-command flags", "grill Q8"]
 ```
 
 ### D-15 — Lock permit pool = large constant (writer-drains-all)
@@ -4035,7 +4055,7 @@ retry-cache contract.** It is pending a per-operation idempotency audit and must
 decided.
 
 **Context and forces.** A single batched Ratis transaction under leader-side execution answers many
-clients at once, which ivandika3 flagged on #7583: *how do the retry / reply caches work* when one
+clients at once, which ivandika3 flagged on [#7583](https://github.com/apache/ozone/pull/7583): *how do the retry / reply caches work* when one
 txn serves many `(clientId, callId)` pairs (`RC-ivandika-retry-cache-semantics`)? The deeper
 question is which operations are *safe to re-execute* on a client retry. The DB batch itself is
 largely idempotent — whole-object `Put`s and `Delete`s applied twice yield the same bytes — so the
@@ -4131,7 +4151,7 @@ evidence: ["per-command inventory 2026-06-15", "leader-execution-locking.md §10
 - {id: ALT-static-step-decomposition, title: "Pre-compute the full multi-step chain up front", killed_by: D-6, reason: "concurrent deletes can invalidate a statically-planned chain; reval must re-resolve per step", proposed_by: [], evidence: []}
 - {id: ALT-stateless-request-orchestrator, title: "Hold chain state in the orchestrator, stateless requests", killed_by: D-6, reason: "request owns resolution context across the gap; chosen for locality of the decomposition logic", proposed_by: [], evidence: []}
 - {id: ALT-module-extraction-now,  title: "Extract the replicated-DB module to its own Maven module in V1", killed_by: D-2, reason: "premature; lock the API surface in framework, extract later as a no-behavior-change PR", proposed_by: [], evidence: []}
-- {id: ALT-raw-putdelete-only,     title: "Raw Put/Delete bytes only (no Merge/Checkpoint)", killed_by: D-1, reason: "cannot express commutative quota or the snapshot barrier; #10503 regressed to this", proposed_by: [], evidence: ["PR#10503"]}
+- {id: ALT-raw-putdelete-only,     title: "Raw Put/Delete bytes only (no Merge/Checkpoint)", killed_by: D-1, reason: "cannot express commutative quota or the snapshot barrier; [#10503](https://github.com/apache/ozone/pull/10503) regressed to this", proposed_by: [], evidence: ["PR#10503"]}
 - {id: ALT-journal-not-dbchanges,  title: "Replicate a journal of commands, not DB changes", killed_by: D-1, reason: "abstract-command apply is the per-command-unique step that causes today's divergence; DB-changes is how consensus normally works", proposed_by: [xichen01], evidence: ["PR#7583 review (errose28 reply)"]}
 - {id: ALT-forward-only-record,    title: "Forward-only decision record", killed_by: D-SPEC-3, reason: "discards the most expensive asset (the rationale); a transcript is not addressable or CI-checkable", proposed_by: [], evidence: []}
 ```
@@ -4179,9 +4199,9 @@ flowchart LR
 > the ground it stood on was removed (`RC-ethan-caching` → D-3 deletes the cache, so the
 > hard-to-cache problem ceases to exist); **deferred** — acknowledged and parked with a named
 > owning decision (`RC-ivandika-retry-cache-semantics` → D-OPEN-retry); **open** — genuinely
-> unresolved and tracked as such (`RC-ivandika-seqdiagram`, the request for HDDS-1595-style
+> unresolved and tracked as such (`RC-ivandika-seqdiagram`, the request for [HDDS-1595](https://issues.apache.org/jira/browse/HDDS-1595)-style
 > sequence diagrams, to be satisfied in §13; and `RC-xichen-large-value`, the whole-object-on-the-
-> wire concern for large DB values / MPU HDDS-8238, endorsed by ivandika3 and tracked as a risk
+> wire concern for large DB values / MPU [HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238), endorsed by ivandika3 and tracked as a risk
 > in §30). Two open entries are *not* failures of this process — they are honest "not yet," and the
 > linter requires only that every `RC-n` carry a `status`, not that it be closed. The block below
 > is the frozen contract.
@@ -4195,8 +4215,8 @@ flowchart LR
 - {id: RC-ivandika-retry-cache-semantics, raised_by: ivandika3, concern: "Batched Ratis txn answers many clients; how do retry/reply caches work?", raised_on: "PR#7583", status: deferred, resolved_by: [D-OPEN-retry], endorsed_by: []}
 - {id: RC-ivandika-terminology, raised_by: ivandika3, concern: "Use 'retryCache' not 'replayCache' (align with Ratis)", raised_on: "PR#7583", status: adopted, resolved_by: [], endorsed_by: []}
 - {id: RC-ivandika-audit, raised_by: ivandika3, concern: "Write audit logs will be leader-only now", raised_on: "PR#7583", status: addressed, resolved_by: [D-10], endorsed_by: []}
-- {id: RC-ivandika-seqdiagram, raised_by: ivandika3, concern: "Add detailed sequence diagrams (HDDS-1595 style)", raised_on: "PR#7583", status: open, resolved_by: [], endorsed_by: []}
-- {id: RC-xichen-large-value, raised_by: xichen01, concern: "Large DB values (MPU, HDDS-8238) → big network overhead sending whole objects", raised_on: "PR#7583", status: open, resolved_by: [], endorsed_by: [ivandika3]}
+- {id: RC-ivandika-seqdiagram, raised_by: ivandika3, concern: "Add detailed sequence diagrams ([HDDS-1595](https://issues.apache.org/jira/browse/HDDS-1595) style)", raised_on: "PR#7583", status: open, resolved_by: [], endorsed_by: []}
+- {id: RC-xichen-large-value, raised_by: xichen01, concern: "Large DB values (MPU, [HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)) → big network overhead sending whole objects", raised_on: "PR#7583", status: open, resolved_by: [], endorsed_by: [ivandika3]}
 - {id: RC-xichen-journal-vs-dbchanges, raised_by: xichen01, concern: "Syncing DB changes (vs a journal) may limit future features (FSO inode trees)", raised_on: "PR#7583", status: addressed, resolved_by: [D-1], endorsed_by: []}
 - {id: RC-kerneltime-minimal-apply, raised_by: kerneltime, concern: "Keep apply minimal/idempotent; no read-modify-write in apply (rolling-upgrade); migrate incrementally; benchmark before complexity", raised_on: "PR#7583", status: adopted, resolved_by: [D-7, D-10, D-11, D-13], endorsed_by: []}
 ```
@@ -4459,7 +4479,7 @@ tests: [T-quota-concurrent, T-quota-failover]
 The quota counter's **truth lives in the DB** (the bucket row), updated atomically with the
 rest of the patch (I-txninfo-atomic-with-patch). No **in-memory reserved-quota state** is
 load-bearing for the counter's correctness (this is why `ALT-quota-reserved-static`, the
-static `AtomicLong` reserve maps from the #7406 prototype, was killed by D-7: reserve state
+static `AtomicLong` reserve maps from the [#7406](https://github.com/apache/ozone/pull/7406) prototype, was killed by D-7: reserve state
 living **outside** the DB forces crash-recovery + reset-on-failure complexity). On any
 crash or leader failover, the new leader reads `usedBytes`/`usedNamespace` straight from
 RocksDB and is immediately correct — there is **nothing to replay into an in-memory reserve**
@@ -5054,7 +5074,7 @@ terminal `create open-file`). The batch size is therefore bounded by the **worki
 single transition**: typically a handful of `Put`/`Delete`/`Merge` ops over small rows. The
 **unbounded tail** is the **whole-object value** for large-value operations — because the
 patch replicates **whole objects** (D-1/D-7 Option B whole-row writes), an op whose row is
-large (multipart upload metadata, the HDDS-8238 large-value case) sends that whole value over
+large (multipart upload metadata, the [HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238) large-value case) sends that whole value over
 Ratis. xichen01 raised exactly this (RC-xichen-large-value, status **open**, endorsed by
 ivandika3) and it remains an **open** sizing concern, deferred to P-4 (MPU + large-value
 revisit) and tracked as R-mpu-large-value (§30). This bound is therefore stated as
@@ -5070,7 +5090,7 @@ is closed.
 
 ```yaml
 id: B-batch-size
-statement: "A replicated Batch covers exactly ONE transition (D-6 decomposition: 1 step = 1 batch; single-step = N=1), bounding the common case to a single transition's small working set. The open tail is whole-object replication for large values (MPU / HDDS-8238): such a batch carries the whole row over Ratis. No fixed numeric cap is asserted because RC-xichen-large-value is OPEN (P-4 / R-mpu-large-value)."
+statement: "A replicated Batch covers exactly ONE transition (D-6 decomposition: 1 step = 1 batch; single-step = N=1), bounding the common case to a single transition's small working set. The open tail is whole-object replication for large values (MPU / [HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)): such a batch carries the whole row over Ratis. No fixed numeric cap is asserted because RC-xichen-large-value is OPEN (P-4 / R-mpu-large-value)."
 rationale: "Per-transition decomposition (D-6) keeps the common batch structurally small; the only large batch is a large single-object value, which is the explicitly-open large-value concern. A fixed cap would either under-bound large-value ops or falsely close an open question."
 provenance: verified
 evidence:
@@ -5191,7 +5211,7 @@ gates**, generated into the traceability matrix (§28).
 
 ### 27.1 Baseline and the number that justifies the project
 
-The prototype (#7406) **demonstrated ~40k ops/sec** on the leader-side-execution model,
+The prototype ([#7406](https://github.com/apache/ozone/pull/7406)) **demonstrated ~40k ops/sec** on the leader-side-execution model,
 versus today's OM ceiling of **~12k ops/sec** (current-architecture problem statement, §4),
 with the double buffer batching at only **~1.2x** and a **~25k Ratis** entry cap as the next
 ceiling above the OM (§4). The **~40k prototype baseline** (a ≈3.3x improvement over 12k) is
@@ -5295,7 +5315,7 @@ ledger (§30), the per-phase and overall definition of done (§31), and the oper
 runbook for revert and mixed-mode operation (§32). Where Parts III–V say *what is true* and
 *what must always hold*, Part VI says *what we land, in what sequence, behind what flag, and
 gated by which acceptance check.* The structured `P-n` blocks in §29 are the frozen delivery
-contract (seeded in the scaffold); the prose around each block is the rationale that keeps a
+contract; the prose around each block is the rationale that keeps a
 future implementer from re-sequencing the work in a way that re-introduces the abandonment
 risk this ordering exists to avoid.
 
@@ -5356,11 +5376,11 @@ half-finished migration. The price of this property is paid up front in P0 (the 
 retrofit and dual-path index durability, below), which exists *solely* to make mixed mode
 safe.
 
-**Why this matches the prior art.** Sumit Agrawal's stalled PR #7583 already chose `createKey`
+**Why this matches the prior art.** Sumit Agrawal's stalled PR [#7583](https://github.com/apache/ozone/pull/7583) already chose `createKey`
 as its beachhead — the single hardest single-step OBS command, because it sits at the
 intersection of block allocation (SCM I/O), quota, and the open-key lifecycle. P1 deliberately
 re-uses that beachhead (P-1 scope; D-13 consequence "matches Sumit's createKey beachhead").
-The prototype #7406 proved the *ceiling* (~40k ops/s vs. today's ~12k, see §27 and §33) but
+The prototype [#7406](https://github.com/apache/ozone/pull/7406) proved the *ceiling* (~40k ops/s vs. today's ~12k, see §27 and §33) but
 proved it on a narrow path; hard-first is how we carry that ceiling to the commands that
 actually gate the double-buffer removal, rather than to the commands that are easy to convert
 but never blocked the deletion.
@@ -5532,7 +5552,7 @@ per-node-locked background purge that guarantees no orphan (`I-7 FSO-PURGE`, loc
 gap comes from reval `I-6`, resolve-fail `I-5`, and purge `I-7`, never from a held lock).
 
 **The showstopper it retires.** Three of them, and they are the showstoppers that sank the
-prior attempts. First, **multi-step FSO atomicity** — the condensed PR #10503 regressed on
+prior attempts. First, **multi-step FSO atomicity** — the condensed PR [#10503](https://github.com/apache/ozone/pull/10503) regressed on
 exactly this by reducing the replicated patch to raw Put/Delete only, which `ALT-raw-putdelete-
 only` (killed by D-1) notes "cannot express … the snapshot barrier" and which cannot express
 an iterative parent-create chain that revalidates between steps. D-6's request-owned dynamic
@@ -5620,7 +5640,7 @@ applied. `T-snapshot-consistency` passes (`must_satisfy: I-checkpoint-exact-inde
 
 ---
 
-#### P-4 — MPU (4 ops + AbortExpired) + large-value (HDDS-8238) revisit
+#### P-4 — MPU (4 ops + AbortExpired) + large-value ([HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)) revisit
 
 **What it proves.** That multipart upload — the five command families
 (`InitiateMultipartUpload`, `MultipartUploadCommitPart`, `MultipartUploadComplete`,
@@ -5637,7 +5657,7 @@ multipart object is a large DB value. Under leader-side execution the leader rep
 *whole object's bytes* in the DB patch (the whole-row Put model of D-7/D-1), so a large MPU
 value becomes a large network payload on every replicated patch — Xichen's standing concern
 (`RC-xichen-large-value`, status `open`, endorsed by ivandika3: "Large DB values (MPU,
-HDDS-8238) → big network overhead sending whole objects"). HDDS-8238 is the MPU large-value /
+[HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)) → big network overhead sending whole objects"). [HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238) is the MPU large-value /
 WAL-growth concern (the same family of problem the existing `mpu-gc-optimization.md` design
 notes as "RocksDB WAL logs each full write → WAL growth", verified at
 `mpu-gc-optimization.md:2`). P4 is where that concern is *revisited*, not necessarily fully
@@ -5654,7 +5674,7 @@ risk, not gated as an invariant here.
 commit parts → complete/abort, plus expired-abort background cleanup).
 
 ```yaml
-- {id: P-4, scope: "MPU (4 ops + AbortExpired) + large-value (HDDS-8238) revisit", depends_on_phases: [P-3], must_satisfy: [], must_pass: [T-mpu-lifecycle], config_flag: "ozone.om.leader.execution.mpu.enabled", acceptance: "MPU on new model"}
+- {id: P-4, scope: "MPU (4 ops + AbortExpired) + large-value ([HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)) revisit", depends_on_phases: [P-3], must_satisfy: [], must_pass: [T-mpu-lifecycle], config_flag: "ozone.om.leader.execution.mpu.enabled", acceptance: "MPU on new model"}
 ```
 
 ---
@@ -5844,13 +5864,13 @@ Deferred, not decided (D-OPEN-retry, `status: deferred`). The shape of the defer
 ### R-mpu-large-value — large MPU DB values inflate the replicated patch (OPEN review concern)
 
 ```yaml
-- {id: R-mpu-large-value, statement: "An MPU Complete assembles a key value enumerating every part; the whole-object Put model (D-7/D-1) replicates that whole value in the DB patch, so a large multipart object becomes a large network payload on every replicated patch.", rationale: "Replicating DB changes (not a journal) means whole objects cross the wire; for MPU and other large values this is real network/WAL overhead. A full large-value redesign (HDDS-8238) is an explicit non-goal of this design.", provenance: verified, evidence: ["RC-xichen-large-value (status open, endorsed ivandika3)", "leader-planned-execution.md §6 non-goals", "mpu-gc-optimization.md:2 (WAL growth)", "HDDS-8238"]}
+- {id: R-mpu-large-value, statement: "An MPU Complete assembles a key value enumerating every part; the whole-object Put model (D-7/D-1) replicates that whole value in the DB patch, so a large multipart object becomes a large network payload on every replicated patch.", rationale: "Replicating DB changes (not a journal) means whole objects cross the wire; for MPU and other large values this is real network/WAL overhead. A full large-value redesign ([HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)) is an explicit non-goal of this design.", provenance: verified, evidence: ["RC-xichen-large-value (status open, endorsed ivandika3)", "leader-planned-execution.md §6 non-goals", "mpu-gc-optimization.md:2 (WAL growth)", "[HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)"]}
 ```
 
 Carried as a risk because the design *accepts* the whole-object replication model (D-1) and
 explicitly scopes a large-value redesign OUT (§6 non-goals: "MPU large-value redesign
-HDDS-8238"). P4 *revisits* this — it must either demonstrate the payload is acceptable for
-realistic part counts or carve a follow-on (HDDS-8238). It is not closed by this design; it is
+[HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)"). P4 *revisits* this — it must either demonstrate the payload is acceptable for
+realistic part counts or carve a follow-on ([HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)). It is not closed by this design; it is
 bounded by it. (The journal-vs-DB-changes alternative that would sidestep whole-object
 replication, `ALT-journal-not-dbchanges`, is killed by D-1 for unrelated correctness reasons —
 abstract-command apply is exactly the per-command-unique step that causes today's divergence —
@@ -5870,7 +5890,7 @@ Mitigation is the Checkpoint op design (D-1); closure is P3's `T-snapshot-consis
 ### R-abandonment — intrusive hot-path refactor stalls in permanent mixed mode (MITIGATED by D-13)
 
 ```yaml
-- {id: R-abandonment, statement: "An intrusive refactor of the OM write hot path can be abandoned after the easy commands are migrated and 'prove value', leaving the cluster permanently in mixed mode with two execution engines and the double buffer never removed.", rationale: "This is the historical failure mode of the prior attempts (#7583 stalled to auto-close; #10502 closed in minutes; #10503 regressed). Hard-first phasing (D-13) front-loads the showstoppers so abandonment, if it happens, happens before false confidence and with the legacy path fully intact.", provenance: verified, evidence: ["D-13 (hard-first)", "ALT-value-first-phasing (killed by D-13)", "leader-planned-execution.md §5 project history", "PR#7583 (auto-close Nov 2025)"]}
+- {id: R-abandonment, statement: "An intrusive refactor of the OM write hot path can be abandoned after the easy commands are migrated and 'prove value', leaving the cluster permanently in mixed mode with two execution engines and the double buffer never removed.", rationale: "This is the historical failure mode of the prior attempts ([#7583](https://github.com/apache/ozone/pull/7583) stalled to auto-close; [#10502](https://github.com/apache/ozone/pull/10502) closed in minutes; [#10503](https://github.com/apache/ozone/pull/10503) regressed). Hard-first phasing (D-13) front-loads the showstoppers so abandonment, if it happens, happens before false confidence and with the legacy path fully intact.", provenance: verified, evidence: ["D-13 (hard-first)", "ALT-value-first-phasing (killed by D-13)", "leader-planned-execution.md §5 project history", "PR#7583 (auto-close Nov 2025)"]}
 ```
 
 This risk is *mitigated by the entire structure of §29*, not by a single test. D-13's hard-first
@@ -5944,7 +5964,7 @@ The project is done — and P7 may finalize — when **all** of the following ho
    *requires* the legacy path for correctness.
 2. **The performance target is hit.** The new model meets or exceeds the prototype-proven
    ceiling on the commands that gate the double-buffer removal — the ~40k ops/s the prototype
-   (#7406) demonstrated versus today's ~12k (§27, §33). The target is not "faster than legacy
+   ([#7406](https://github.com/apache/ozone/pull/7406)) demonstrated versus today's ~12k (§27, §33). The target is not "faster than legacy
    on a microbenchmark"; it is "the throughput thesis the project was funded on, realized on
    real commands."
 3. **Every `I-n` is tested.** The global zero-test-invariant rule (§A, §C rule 2) holds across
@@ -6088,7 +6108,7 @@ the relevant section; collected here for the reader who wants the provenance in 
 
 **Pull requests (the design and review thread — `github.com/apache/ozone`).**
 
-- **#7583** — Sumit Agrawal's deep, original leader-side-execution PR. The richest review
+- **[#7583](https://github.com/apache/ozone/pull/7583)** — Sumit Agrawal's deep, original leader-side-execution PR. The richest review
   thread: Ethan Rose's replicated-DB module proposal (Put/Delete/Merge/Checkpoint + quota merge
   operator — the seed of D-1 and D-7, endorsed by nandakumar131), the caching discussion
   (RC-ethan-caching → superseded by D-3), szetszwo's MGL/ancestor-locking and split-the-locking-
@@ -6097,30 +6117,30 @@ the relevant section; collected here for the reader who wants the provenance in 
   (RC-ivandika-* ), and xichen01's journal-vs-DB-changes and large-value concerns
   (RC-xichen-* ). Stalled to auto-close (Nov 2025) — the abandonment data point behind D-13 and
   R-abandonment. Provenance: verified (cited throughout Part IV).
-- **#10502** — a leader-side-execution attempt closed within minutes; recorded in the project
+- **[#10502](https://github.com/apache/ozone/pull/10502)** — a leader-side-execution attempt closed within minutes; recorded in the project
   history (§5) as a false start. Provenance: verified (scaffold §5, §33 seed).
-- **#10503** — Abhishek's condensed leader-side-execution PR. Regressed on quota/retry/batching/
+- **[#10503](https://github.com/apache/ozone/pull/10503)** — Abhishek's condensed leader-side-execution PR. Regressed on quota/retry/batching/
   upgrade; in particular reduced the replicated patch toward raw Put/Delete (the `ALT-raw-
   putdelete-only` shape that D-1 rejects) and motivated `ALT-no-backwards-compat` being killed
   by D-11 (PR#10503 §3 cited as evidence for ALT-no-backwards-compat). Provenance: verified.
-- **#7406** — the **prototype** that proved the ceiling (~40k ops/s vs. today's ~12k). Source of
-  the per-command-flag pattern (D-14 evidence: "prototype #7406 had per-command flags") and the
+- **[#7406](https://github.com/apache/ozone/pull/7406)** — the **prototype** that proved the ceiling (~40k ops/s vs. today's ~12k). Source of
+  the per-command-flag pattern (D-14 evidence: "prototype [#7406](https://github.com/apache/ozone/pull/7406) had per-command flags") and the
   reserved-quota static-AtomicLong approach later rejected (`ALT-quota-reserved-static`,
   evidence `QuotaResource.java (PR#7406)`). The performance baseline of §27 and the overall DoD
   perf target (§31). Provenance: verified (cited D-14, §27).
 
 **External / cross-project.**
 
-- **RATIS-1210** — the Ratis-layer capability this design relies on for batched/replicated
-  application semantics. (Cited in §33 per the scaffold; the dependency is the
+- **[RATIS-1210](https://issues.apache.org/jira/browse/RATIS-1210)** — the Ratis-layer capability this design relies on for batched/replicated
+  application semantics. (Cited in §33; the dependency is the
   apply-exactly-once and replicated-application contract the leader-side model assumes — A-2
   "Ratis applies a committed entry exactly once".) Provenance: inferred (named in scaffold §33;
-  the exact RATIS-1210 scope is not re-derived here — confirm against the Ratis JIRA before
+  the exact [RATIS-1210](https://issues.apache.org/jira/browse/RATIS-1210) scope is not re-derived here — confirm against the Ratis JIRA before
   relying on a specific guarantee).
-- **HDDS-1595** — the **sequence-diagram exemplar**. ivandika3 asked for detailed sequence
-  diagrams in HDDS-1595 style (RC-ivandika-seqdiagram, status open); §13 (worked examples)
+- **[HDDS-1595](https://issues.apache.org/jira/browse/HDDS-1595)** — the **sequence-diagram exemplar**. ivandika3 asked for detailed sequence
+  diagrams in [HDDS-1595](https://issues.apache.org/jira/browse/HDDS-1595) style (RC-ivandika-seqdiagram, status open); §13 (worked examples)
   owes that debt. Provenance: verified (RC-ivandika-seqdiagram).
-- **HDDS-8238** — the **MPU large-value** concern. The whole-object-replication cost for large
+- **[HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)** — the **MPU large-value** concern. The whole-object-replication cost for large
   multipart values (R-mpu-large-value, RC-xichen-large-value); explicitly a non-goal of this
   design (§6) and the P4 "revisit" target. Related design context in
   `mpu-gc-optimization.md` (WAL-growth from full writes, `mpu-gc-optimization.md:2`).
@@ -6138,16 +6158,16 @@ the relevant section; collected here for the reader who wants the provenance in 
   (including the soft-quota over-commit, §8), and the open items §10. Cross-referenced
   throughout Parts V and VI.
 - **`leader-execution-components.md`** (or the per-component set) — the twelve component
-  deep-dives (§11). Status: TO-GENERATE.
+  deep-dives (§11). Status: draft.
 - **`leader-execution-test-plan.md`** — the full test strategy and the complete T-n catalog
-  (§26). Status: TO-GENERATE.
+  (§26). Status: draft.
 - **`leader-execution-phasing.md`** — the per-command migration playbook: for each P-n, the
   exact request subclasses, DB tables, proto fields, and JIRA sub-tasks (§29 points here for
-  per-command detail). Status: TO-GENERATE.
+  per-command detail). Status: draft.
 
 **Prototype performance data.**
 
-- The **prototype performance PDF** (the #7406 benchmark write-up) — the source of the ~40k
+- The **prototype performance PDF** (the [#7406](https://github.com/apache/ozone/pull/7406) benchmark write-up) — the source of the ~40k
   ops/s figure, the methodology, and the regression-guard baselines referenced by §27 and §31.
   Provenance: referenced in scaffold §33; the raw data is reproduced/pointed-to in §34.2.
 
@@ -6169,7 +6189,7 @@ materializing a domain type.
 
 ### 34.2 Prototype performance data
 
-The prototype (#7406) is the empirical backbone of the performance thesis. The data referenced
+The prototype ([#7406](https://github.com/apache/ozone/pull/7406)) is the empirical backbone of the performance thesis. The data referenced
 across this spec:
 
 - **Throughput ceiling:** ~40,000 ops/s on the prototype path versus today's production
@@ -6183,8 +6203,8 @@ across this spec:
   sourced from the prototype performance PDF (§33). The per-phase perf gate (P1 "perf ≥
   baseline") and the overall target (§31.2 item 2) draw their numbers from here.
 
-Provenance note: the ~40k/~12k/~25k/1.2× figures are carried forward from the scaffold's
-authoring guidance (§2, §4, §5, §27) and the prototype PDF; they are **inferred** at the level
+Provenance note: the ~40k/~12k/~25k/1.2× figures are carried forward from the motivation
+sections (§2, §4, §5, §27) and the prototype PDF; they are **inferred** at the level
 of this appendix (not independently re-measured in this worktree) and must be confirmed against
 the prototype PDF and a fresh benchmark run before being cited as a release gate. The
 *structural* claims they rest on are verified: that every follower re-runs business logic today
