@@ -5,6 +5,8 @@ date: 2026-06-15
 jira: HDDS-11898
 status: draft
 author: Ritesh Shukla
+evidence_commit: 25585523eeb
+evidence_branch: HDDS-11898-design-docs
 ---
 <!--
   Licensed under the Apache License, Version 2.0 (the "License");
@@ -1727,7 +1729,7 @@ buffer is removed last (P-7).
      independently re-derived,                                 │             │             │
      nothing checks byte-identity                          Put/Delete verbatim; Merge via registered
         │                 │                 │              operator in Ratis order (D-7, A-5);
-        ▼                 ▼                 ▼              Checkpoint at exact index (F-10a → I-checkpoint)
+        ▼                 ▼                 ▼              Checkpoint at exact index (F-10a → I-checkpoint-exact-index)
    table cache, epoch = Ratis idx (F-8)                       NO validateAndUpdateCache on followers
         │                                                     NO table cache on migrated path (D-3)
         ▼                                                         │
@@ -1757,7 +1759,7 @@ flowchart TD
   subgraph AFTER["AFTER (proposed)"]
     B1[client OMRequest] --> B2["Leader: PLAN ONCE\nlock(§14) + resolve + authorize\n+ managed-index identity (D-8/12)\n+ record row changes"]
     B2 --> B3["Ratis: replicate the PATCH (the EFFECT)\nenvelope{managedIndex, retry[], OMResponse}\nwrapping Batch{Put|Delete|Merge|Checkpoint}"]
-    B3 --> B4["apply bytes on EVERY node (D-10)\nPut/Delete verbatim; Merge via registered op (D-7,A-5);\nCheckpoint at exact index (I-checkpoint)\nNO business logic on followers"]
+    B3 --> B4["apply bytes on EVERY node (D-10)\nPut/Delete verbatim; Merge via registered op (D-7,A-5);\nCheckpoint at exact index (I-checkpoint-exact-index)\nNO business logic on followers"]
     B4 --> B5["#TRANSACTIONINFO in SAME batch (F-9 preserved)\nNO table cache on migrated path (D-3)"]
     B5 --> B6[(RocksDB NVMe)]
   end
@@ -4108,21 +4110,27 @@ evidence: ["per-command inventory 2026-06-15", "leader-execution-locking.md §10
 
 ```mermaid
 flowchart LR
-  D_1[D-1] --> D_10[D-10]
   D_1[D-1] --> D_2[D-2]
-  D_1[D-1] --> D_7[D-7]
-  D_11[D-11] --> D_12[D-12]
-  D_11[D-11] --> D_14[D-14]
-  D_12[D-12] --> D_8[D-8]
-  D_14[D-14] --> D_13[D-13]
-  D_3[D-3] --> D_7[D-7]
-  D_4[D-4] --> D_15[D-15]
-  D_4[D-4] --> D_5[D-5]
   D_5[D-5] --> D_3[D-3]
+  D_4[D-4] --> D_5[D-5]
   D_5[D-5] --> D_6[D-6]
-  D_6[D-6] --> D_13[D-13]
-  D_6[D-6] --> D_16[D-16]
+  D_1[D-1] --> D_7[D-7]
+  D_3[D-3] --> D_7[D-7]
+  D_12[D-12] --> D_8[D-8]
+  D_1[D-1] --> D_10[D-10]
   D_7[D-7] --> D_11[D-11]
+  D_11[D-11] --> D_12[D-12]
+  D_6[D-6] --> D_13[D-13]
+  D_14[D-14] --> D_13[D-13]
+  D_11[D-11] --> D_14[D-14]
+  D_4[D-4] --> D_15[D-15]
+  D_6[D-6] --> D_16[D-16]
+  D_3[D-3] --> D_17[D-17]
+  D_4[D-4] --> D_17[D-17]
+  D_7[D-7] --> D_17[D-17]
+  D_11[D-11] --> D_17[D-17]
+  D_12[D-12] --> D_17[D-17]
+  D_14[D-14] --> D_17[D-17]
   D_7[D-7] --> D_OPEN_quota_enforcement[D-OPEN-quota-enforcement]
   D_7[D-7] --> D_OPEN_retry[D-OPEN-retry]
 ```
@@ -4881,7 +4889,6 @@ statement: >
 rationale: >
   Prevents a fuzzy snapshot boundary (an image containing a post-index transition or missing an
   at-or-before-index one), which would corrupt SnapshotDiff and snapshot-scoped reclaim accounting.
-covers: []
 provenance: verified
 evidence:
   - "OzoneManagerDoubleBuffer.java:340,445-473 splitReadyBufferAtCreateSnapshot (today's barrier; F-10/F-10a: checkpoint contains exactly the txns committed before the create and none after)"
@@ -5291,13 +5298,13 @@ it directly.
 | I-5 | T-1, T-4, T-5, T-deletedir-vs-openfile |
 | I-6 | T-1, T-2, T-4, T-5, T-deletedir-vs-openfile |
 | I-7 | T-1 |
-| I-8 | T-8, T-holder-lease-negative |
+| I-8 | T-holder-lease-negative |
 | I-9 | T-cross-thread-release |
 | I-apply-failure-resync | T-apply-failure-resync |
 | I-cache-free-ryw | T-full-suite-green-after-removal, T-no-cache-correctness, T-ryw-from-db |
 | I-checkpoint-exact-index | T-snapshot-consistency |
 | I-determinism-followers-pure | T-apply-failure-resync, T-determinism-follower-byte-identical, T-observability-leader-only-metrics, T-security-leader-only-authz-audit |
-| I-inner-domain-agnostic | T-apply-failure-resync, T-determinism-follower-byte-identical, T-mpu-lifecycle, T-proto-roundtrip, T-rolling-upgrade-mixed-binary |
+| I-inner-domain-agnostic | T-determinism-follower-byte-identical, T-mpu-lifecycle, T-proto-roundtrip, T-rolling-upgrade-mixed-binary |
 | I-managed-index-monotonic | T-flag-routing-both-paths, T-managed-index-monotonic, T-managed-index-restart-continuity, T-mixed-mode-no-collision, T-objectid-disjoint, T-rolling-upgrade-mixed-binary |
 | I-mixed-mode-cache-coherent | T-mixed-mode-stale-read |
 | I-mixed-mode-lock-gate | T-mixed-mode-cross-model-race |
@@ -5479,7 +5486,7 @@ requires and `ReentrantReadWriteLock` cannot provide, see locking I-9), `T-objec
 ever materializing a domain object) all pass.
 
 ```yaml
-- {id: P-0, scope: "framework substrate (12 components) unwired + legacy→ManagedIndex objectID retrofit + dual-path index durability + cross-model shared bucket-lock gate + migrated-apply cache invalidate/update (D-17)", depends_on_phases: [], must_satisfy: [I-inner-domain-agnostic, I-txninfo-atomic-with-patch, I-managed-index-monotonic, I-mixed-mode-lock-gate, I-mixed-mode-cache-coherent], must_pass: [T-cross-thread-release, T-objectid-disjoint, T-proto-roundtrip], config_flag: "n/a (inert)", acceptance: "zero behavior change; all unit tests green; lint-spec passes"}
+- {id: P-0, scope: "framework substrate (12 components) unwired + legacy→ManagedIndex objectID retrofit + dual-path index durability + cross-model shared bucket-lock gate + migrated-apply cache invalidate/update (D-17)", depends_on_phases: [], must_satisfy: [I-inner-domain-agnostic, I-txninfo-atomic-with-patch, I-managed-index-monotonic, I-mixed-mode-lock-gate, I-mixed-mode-cache-coherent], must_pass: [T-cross-thread-release, T-objectid-disjoint, T-proto-roundtrip, T-mixed-mode-cross-model-race, T-mixed-mode-stale-read], config_flag: "n/a (inert)", acceptance: "zero behavior change; all unit tests green; lint-spec passes"}
 ```
 
 ---

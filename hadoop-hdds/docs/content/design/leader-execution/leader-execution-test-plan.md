@@ -5,6 +5,8 @@ date: 2026-06-15
 jira: HDDS-11898
 status: draft
 author: Ritesh Shukla
+evidence_commit: 25585523eeb
+evidence_branch: HDDS-11898-design-docs
 ---
 <!--
   Licensed under the Apache License, Version 2.0 (the "License");
@@ -726,7 +728,7 @@ statement: >
   abort, + AbortExpiredMultiPartUploads), P-4. Assert linearizable MPU semantics under
   concurrency and that part objectIDs are minted from the managed index (S3InitiateMultipart
   currently calls getObjectIdFromTxId). Note the OPEN large-value concern (RC-xichen-large-
-  value / HDDS-8238): completing an MPU writes a large value; this test asserts CORRECTNESS on
+  value / [HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)): completing an MPU writes a large value; this test asserts CORRECTNESS on
   the new model and FLAGS (does not yet solve) the whole-object network-overhead concern.
 covers: [I-inner-domain-agnostic]
 provenance: inferred
@@ -956,21 +958,34 @@ so that "phase done" is mechanically checkable. The master §29 blocks are the a
 `must_pass`; any divergence here is a spec defect to reconcile (master §C rule 5 projection-
 freshness).
 
+The `Gating T-n (must pass)` column below restates master §29 `must_pass` **verbatim** — no
+phase adds or drops a gating test here. The cross-cutting tests that apply to *every* migrated
+command (and therefore belong to no single phase) are listed once, below the table, exactly as
+the master §29 prose treats them.
+
 | Phase | Scope (abbrev.) | Gating T-n (must pass) | Formal-tier gate |
 |---|---|---|---|
-| **P-0** | Framework substrate (12 components) unwired + legacy→ManagedIndex objectID retrofit + dual-path index durability | `T-cross-thread-release`, `T-objectid-disjoint`, `T-proto-roundtrip`, `T-mixed-mode-no-collision`, `T-flag-routing-both-paths` | (substrate; no model gate — models exercise P-1/P-2 behavior) |
-| **P-1** | Hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey | `T-quota-concurrent`, `T-ryw-from-db`, `T-determinism-follower-byte-identical`, `T-7` (hot parent), `T-holder-lease-negative` | **OBS model green** (`ObsImpl.cfg`: Refinement + LockInv + NoLeak + UsedConsistent) — `obs3-verdict.out` |
-| **P-2** | Hardest multi-step FSO: CreateFile/CreateDirectory (implicit parents), FSO delete, recursive rm-rf + DirectoryDeletingService redesign | `T-1`, `T-2`, `T-3`, `T-4`, `T-5`, `T-6`, `T-7`, `T-8`, `T-deletedir-vs-openfile` | **FSO model green** (Refinement + LockInv + NoLeak + NoOrphan/Accounted) — M2a `fso-m2a-full.out` (26.8M distinct), M2b directory rename `fso-m2b-full.out` (32.4M distinct), M3 recursive delete green at tight bound `FsoM3.cfg`; broader M3 `MAX_OPS=2` pass confirming |
+| **P-0** | Framework substrate (12 components) unwired + legacy→ManagedIndex objectID retrofit + dual-path index durability | `T-cross-thread-release`, `T-objectid-disjoint`, `T-proto-roundtrip`, `T-mixed-mode-cross-model-race`, `T-mixed-mode-stale-read` | (substrate; no model gate — models exercise P-1/P-2 behavior) |
+| **P-1** | Hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey | `T-quota-concurrent`, `T-ryw-from-db` | **OBS model green** (`ObsImpl.cfg`: Refinement + LockInv + NoLeak + UsedConsistent) — `obs3-verdict.out` |
+| **P-2** | Hardest multi-step FSO: CreateFile/CreateDirectory (implicit parents), FSO delete, recursive rm-rf + DirectoryDeletingService redesign | `T-1`, `T-2`, `T-3`, `T-4`, `T-5`, `T-6`, `T-7`, `T-8` | **FSO model green** (Refinement + LockInv + NoLeak + NoOrphan/Accounted) — M2a `fso-m2a-full.out` (26.8M distinct), M2b directory rename `fso-m2b-full.out` (32.4M distinct), M3 recursive delete green at tight bound `FsoM3.cfg`; broader M3 `MAX_OPS=2` pass confirming |
 | **P-3** | Snapshot: CreateSnapshot/Checkpoint op, SnapshotPurge standalone, moves | `T-snapshot-consistency` | (FSO model extension for Checkpoint-vs-op ordering: planned) |
 | **P-4** | MPU (4 ops + AbortExpired) + large-value ([HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)) revisit | `T-mpu-lifecycle` | n/a |
-| **P-5** | Batch/background: DeleteKeys, RenameKey/Keys, DeleteOpenKeys, PurgeKeys/Directories | (multi-slot ordering exercised by the §5-companion bulk-sort path; covered transitively by `T-3`/`T-7` ordering + `NoLeak`) | n/a |
-| **P-6** | Easy Set-A sweep (~22 single-table ops) | (per-command flag-routing parity: `T-flag-routing-both-paths` applied per op) | n/a |
-| **P-7** | Cleanup: remove double buffer + table cache; delete legacy path; finalize | (full regression green with legacy path REMOVED; `T-ryw-from-db` now the only RYW path; `T-rolling-upgrade-mixed-binary` superseded by finalization) | OBS + FSO models green; `QuotaOvercommit.cfg` per `D-OPEN-quota-enforcement` resolution |
+| **P-5** | Batch/background: DeleteKeys, RenameKey/Keys, DeleteOpenKeys, PurgeKeys/Directories | (none — leg work; multi-slot ordering covered transitively by `T-3` ordering + `NoLeak`, and by the cross-cutting set below) | n/a |
+| **P-6** | Easy Set-A sweep (~22 single-table ops) | (none — leg work; per-command flag-routing parity is the cross-cutting `T-flag-routing-both-paths` applied per op, below) | n/a |
+| **P-7** | Cleanup: remove double buffer + table cache; delete legacy path; finalize | (none — full regression green with legacy path REMOVED; `T-ryw-from-db` now the only RYW path; `T-rolling-upgrade-mixed-binary` superseded by finalization) | OBS + FSO models green; `QuotaOvercommit.cfg` per `D-OPEN-quota-enforcement` resolution |
 
-Cross-cutting (every phase that migrates a command):
+**Cross-cutting (applies to every migrated command — NOT a per-phase `must_pass`).** These
+tests gate no single phase because they re-run for *every* command migration; the master §29
+P-n `must_pass` sets deliberately exclude them, and so does the table above:
 - `T-determinism-follower-byte-identical` and `T-apply-failure-resync` (the `D-10`
   determinism + crash-and-resync contract) apply to **every** migrated command, not one phase.
-- `T-flag-routing-both-paths` (`D-14`) applies to **every** migrated command.
+- `T-flag-routing-both-paths` (`D-14`) applies to **every** migrated command (it is the
+  per-command on/off parity check, run per op in P-6 and everywhere else a command migrates).
+- `T-rolling-upgrade-mixed-binary` and `T-mixed-mode-no-collision` (mixed-mode safety across
+  the whole migration window, `D-11`/`D-12`) hold for every command until finalization.
+- `T-7` (hot-parent contention) and `T-deletedir-vs-openfile` / `T-holder-lease-negative`
+  (cross-command adversarial races) are exercised wherever the relevant command pair is
+  migrated, not pinned to one phase.
 - `T-quota-exact-tlc` is a **standing** formal artifact tracking `D-OPEN-quota-enforcement`;
   it is run on every change that touches the quota path and its expected verdict is governed by
   the open decision's current state (today: documents the limitation; on `exact` resolution:
@@ -989,31 +1004,36 @@ authority `leader-execution-locking.md` §9) and **master invariants** (slugs) a
 
 | Invariant | Covered by | Source (companion §9 / this catalog) |
 |---|---|---|
-| `I-1` lock identity (objectID / (parentObjectID,name), never path) | `T-2`, `T-5`, `T-6` (every reval/rendezvous reads by objectID/slot key) | companion §3; this §4.1 |
+| `I-1` lock identity (objectID / (parentObjectID,name), never path) | `T-2` | companion §3; this §4.1 (`T-2.covers` is the only catalog entry asserting identity) |
 | `I-2` hold span (leader, pre-submit → quorum-commit+apply) | `T-4`, `T-6`, `T-holder-lease-negative` | companion §9 (I-2 via T-4,T-6) |
-| `I-3` no lock across the gate (per-step in multi-step) | `T-5` (chain interleaved by rename in the gap), `T-1` | D-16/D-6; this §4.1 |
+| `I-3` no lock across the gate (per-step in multi-step) | `T-5` (chain interleaved by rename in the gap) | D-16/D-6; this §4.1 |
 | `I-4` creates don't serialize | `T-7`, `T-hot-stripe` | companion §9 (I-4 via T-7) |
 | `I-5` FSO-RESOLVE-FAIL (tombstone ⇒ resolution fails) | `T-1`, `T-4`, `T-5`, `T-deletedir-vs-openfile` | companion §9 (I-5 via T-1,T-5) |
-| `I-6` FSO-REVAL (re-read by (parentObjectID,name); ABA-safe) | `T-2`, `T-5`, `T-deletedir-vs-openfile` | companion §9 (I-6 via T-2,T-5) |
+| `I-6` FSO-REVAL (re-read by (parentObjectID,name); ABA-safe) | `T-1`, `T-2`, `T-4`, `T-5`, `T-deletedir-vs-openfile` | companion §9 (I-6 via T-2,T-5) |
 | `I-7` FSO-PURGE no orphan | `T-1` | companion §9 (I-7 via T-1); FSO `NoOrphan` (green) |
 | `I-8` no holder lease (correctness-critical) | `T-holder-lease-negative` | companion §9 (I-8 via design + T-holder-lease-negative) |
 | `I-9` non-thread-affine (release on different thread) | `T-cross-thread-release` | companion §9 (I-9 unit: acquire A release B) |
 | `I-10` leader-local (lock table discarded on failover) | `T-8` | companion §9 (I-10 via T-8) |
-| `I-11` deadlock-free by total order | `T-3`, `T-5`, `T-hot-stripe` | companion §9 (I-11 via T-3,T-5) |
+| `I-11` deadlock-free by total order | `T-3`, `T-hot-stripe` | companion §9 (I-11 via T-3) |
 | `I-12` cache-free RYW | `T-7`, `T-ryw-from-db` | companion §9 (I-12 via T-7) |
 
 ### 6.2 Master-level invariants (slugs from `leader-planned-execution.md` §24)
 
 | Invariant (slug) | Covered by | Source |
 |---|---|---|
-| `I-inner-domain-agnostic` | `T-proto-roundtrip`, `T-determinism-follower-byte-identical`, `T-mpu-lifecycle`, `T-rolling-upgrade-mixed-binary` | D-1/D-2 |
-| `I-cache-free-ryw` | `T-ryw-from-db` (+ folded `T-no-cache-correctness`) | D-3 |
-| `I-quota-commutative` | `T-quota-concurrent`, `T-quota-exact-tlc` | D-7; `ObsImpl` UsedConsistent green |
-| `I-quota-crash-safe` | `T-quota-failover`, `T-quota-concurrent` | D-7; `ObsImpl` green |
-| `I-determinism-followers-pure` | `T-determinism-follower-byte-identical`, `T-apply-failure-resync` | D-10 |
-| `I-managed-index-monotonic` | `T-objectid-disjoint`, `T-mixed-mode-no-collision`, `T-flag-routing-both-paths`, `T-rolling-upgrade-mixed-binary` | D-8/D-12; P-0 must_satisfy |
-| `I-objectid-disjoint` | `T-objectid-disjoint`, `T-mixed-mode-no-collision` | D-8/D-12 |
-| `I-txninfo-atomic-with-patch` (#TRANSACTIONINFO atomic with patch) | `T-apply-failure-resync` (the #TRANSACTION_INFO-in-same-batch atomicity is what makes resync-to-a-consistent-index sound) | P-0 must_satisfy; `OzoneManagerDoubleBuffer.java:354-382` |
+| `I-inner-domain-agnostic` | `T-determinism-follower-byte-identical`, `T-mpu-lifecycle`, `T-proto-roundtrip`, `T-rolling-upgrade-mixed-binary` | D-1/D-2 |
+| `I-cache-free-ryw` | `T-full-suite-green-after-removal`, `T-no-cache-correctness`, `T-ryw-from-db` | D-3 |
+| `I-quota-commutative` | `T-quota-concurrent`, `T-quota-exact-tlc`, `T-quota-failover` | D-7; `ObsImpl` UsedConsistent green |
+| `I-quota-crash-safe` | `T-quota-concurrent`, `T-quota-exact-tlc`, `T-quota-failover` | D-7; `ObsImpl` green |
+| `I-determinism-followers-pure` | `T-apply-failure-resync`, `T-determinism-follower-byte-identical`, `T-observability-leader-only-metrics`, `T-security-leader-only-authz-audit` | D-10 |
+| `I-apply-failure-resync` | `T-apply-failure-resync` | D-10 (crash-and-resync half) |
+| `I-managed-index-monotonic` | `T-flag-routing-both-paths`, `T-managed-index-monotonic`, `T-managed-index-restart-continuity`, `T-mixed-mode-no-collision`, `T-objectid-disjoint`, `T-rolling-upgrade-mixed-binary` | D-8/D-12; P-0 must_satisfy |
+| `I-objectid-disjoint` | `T-mixed-mode-no-collision`, `T-objectid-disjoint` | D-8/D-12 |
+| `I-mixed-mode-safe` | `T-mixed-mode-no-collision`, `T-rolling-upgrade-mixed-binary` | D-11/D-12 |
+| `I-mixed-mode-lock-gate` | `T-mixed-mode-cross-model-race` | D-17 |
+| `I-mixed-mode-cache-coherent` | `T-mixed-mode-stale-read` | D-17 |
+| `I-ondisk-invariance-shield` | `T-rolling-upgrade-mixed-binary` | D-11/§19 |
+| `I-txninfo-atomic-with-patch` (#TRANSACTIONINFO atomic with patch) | `T-apply-failure-resync`, `T-txninfo-crash-atomicity` | P-0 must_satisfy; `OzoneManagerDoubleBuffer.java:354-382` |
 | `I-checkpoint-exact-index` | `T-snapshot-consistency` | P-3 must_satisfy |
 
 ### 6.3 Audit result

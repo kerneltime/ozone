@@ -5,6 +5,8 @@ date: 2026-06-15
 jira: HDDS-11898
 status: draft
 author: Ritesh Shukla
+evidence_commit: 25585523eeb
+evidence_branch: HDDS-11898-design-docs
 ---
 <!--
   Licensed under the Apache License, Version 2.0 (the "License");
@@ -323,8 +325,8 @@ migration-core 8, migration-hard 17".)
 | B3 | RenameKeys (batch) | `OMKeysRenameRequest` | keyTable (N renames) | no | no | **YES** (N target slots sorted, locking §5) | **yes** (whole-row, no quota) | P-5 | switch `:298-303`; factory `:152-153`; class `OMKeysRenameRequest.java` |
 | B4 | DeleteOpenKeys | `OMOpenKeysDeleteRequest` | openKeyTable (remove N), deletedTable (orphaned blocks) | usage (decr for orphaned data) | no | **YES** (batch cleanup of expired open keys) | **yes** (re-delete of gone open key is a no-op) | P-5 | `OMOpenKeysDeleteRequest.java:188,205`; switch `:234-240` |
 | B5 | PurgeKeys | `OMKeyPurgeRequest` | deletedTable (final block-purge), snapshotInfoTable (snapshot-scoped) | no (already decremented at delete) | no | **YES** (background batch; snapshot-aware) | **yes** (purge of absent is a no-op) | P-5 | `OMKeyPurgeRequest.java:83,100,137`; switch `:196-197` |
-| B6 | CreateBucket | `OMBucketCreateRequest` | bucketTable (put), volumeTable (cache) | **usage** (`incrUsedNamespace(1L)` on volume) | no | no | **yes** (exists-check rejects dup) | P-1-adjacent (structural; lands with key path) | `OMBucketCreateRequest.java:248,273,277,279`; switch `:162-163` |
-| B7 | DeleteBucket | `OMBucketDeleteRequest` | bucketTable (remove), volumeTable (cache update) | **usage** (volume `usedNamespace` decremented via volume-args path) | no | no | **yes** (non-empty rejected; absent is rejected) | P-1-adjacent (structural) | switch `:164-165`; `OMBucketDeleteRequest.java:167` (bucketTable),`:177,186` (volumeTable) |
+| B6 | CreateBucket | `OMBucketCreateRequest` | bucketTable (put), volumeTable (cache) | **usage** (`incrUsedNamespace(1L)` on volume) | no | no | **yes** (exists-check rejects dup) | P-1 (structural; lands with key path) | `OMBucketCreateRequest.java:248,273,277,279`; switch `:162-163` |
+| B7 | DeleteBucket | `OMBucketDeleteRequest` | bucketTable (remove), volumeTable (cache update) | **usage** (volume `usedNamespace` decremented via volume-args path) | no | no | **yes** (non-empty rejected; absent is rejected) | P-1 (structural) | switch `:164-165`; `OMBucketDeleteRequest.java:167` (bucketTable),`:177,186` (volumeTable) |
 | B8 | SetBucketProperty | `OMBucketSetPropertyRequest` / `OMBucketSetOwnerRequest` | bucketTable (put) | **limit** (`setQuotaInBytes` — the quota *limit*, not usage) | no | no | **yes** (whole-row property put) | P-6 (simple) but **quota-limit aware** | `OMBucketSetPropertyRequest.java:189,211,280-316`; switch `:166-173` |
 
 > **Why B6/B7/CreateBucket are "core" not "simple" despite being single structural ops.** They
@@ -387,7 +389,7 @@ per-command flag, after the hard machinery is proven.
 > this fan-out latitude; the inventory is intentionally listed at the finer class grain so no class
 > is missed, and the count reconciles to ~22 *migration units* at the `Type` grain. **`QuotaRepair`
 > (A31) is listed in Group A as a single-bucket reconcile**, but note it is also the *mitigation
-> path* for the open quota-enforcement question (see §5.3): if D-OPEN-quota-enforcement settles on
+> path* for the open quota-enforcement question (see §6.1): if D-OPEN-quota-enforcement settles on
 > approximate enforcement, `QuotaRepair` is what converges `usedBytes` back to exact, so its own
 > migration ordering may be pulled earlier than P-6 — flagged as a dependency, not yet decided.
 
@@ -402,7 +404,7 @@ acceptance gate.
 ### P-0 — Framework substrate + the three prerequisites (inert)
 
 ```yaml
-- {id: P-0, scope: "framework substrate (12 components) unwired + legacy→ManagedIndex objectID retrofit + dual-path index durability + cross-model shared bucket-lock gate + migrated-apply cache invalidate/update (D-17)", depends_on_phases: [], must_satisfy: [I-inner-domain-agnostic, I-txninfo-atomic-with-patch, I-managed-index-monotonic, I-mixed-mode-lock-gate, I-mixed-mode-cache-coherent], must_pass: [T-cross-thread-release, T-objectid-disjoint, T-proto-roundtrip], config_flag: "n/a (inert)", acceptance: "zero behavior change; all unit tests green; lint-spec passes"}
+- {id: P-0, scope: "framework substrate (12 components) unwired + legacy→ManagedIndex objectID retrofit + dual-path index durability + cross-model shared bucket-lock gate + migrated-apply cache invalidate/update (D-17)", depends_on_phases: [], must_satisfy: [I-inner-domain-agnostic, I-txninfo-atomic-with-patch, I-managed-index-monotonic, I-mixed-mode-lock-gate, I-mixed-mode-cache-coherent], must_pass: [T-cross-thread-release, T-objectid-disjoint, T-proto-roundtrip, T-mixed-mode-cross-model-race, T-mixed-mode-stale-read], config_flag: "n/a (inert)", acceptance: "zero behavior change; all unit tests green; lint-spec passes"}
 ```
 
 **Command set.** None migrated. This phase builds the 12 components (master §11) and the three
@@ -446,7 +448,7 @@ id: P-0
 scope: "12 framework components unwired + 3 prerequisites: ManagedIndex objectID retrofit (PR-0a), dual-path applied-index durability (PR-0b), OMLayoutFeature finalization gate (PR-0c) + cross-model shared bucket-lock gate + migrated-apply cache invalidate/update (D-17)"
 depends_on_phases: []
 must_satisfy: [I-inner-domain-agnostic, I-txninfo-atomic-with-patch, I-managed-index-monotonic, I-mixed-mode-lock-gate, I-mixed-mode-cache-coherent]
-must_pass: [T-cross-thread-release, T-objectid-disjoint, T-mixed-mode-no-collision, T-proto-roundtrip, T-rolling-upgrade-mixed-binary]
+must_pass: [T-cross-thread-release, T-objectid-disjoint, T-proto-roundtrip, T-mixed-mode-cross-model-race, T-mixed-mode-stale-read]
 config_flag: "n/a (inert)"
 acceptance: "zero behavior change; PR-0a/b/c merged; merge operator registered on all nodes (A-5); lint-spec green"
 provenance: inferred
@@ -473,7 +475,7 @@ the Merge model under the key path (§4.2 note).
 - **PR-1.2** `CommitKeyPlannedRequest` (OBS) — plan: keyTable `Put`, openKeyTable `Delete`,
   deletedTable `Put` for overwrite soft-delete, **quota `Merge`** for `usedBytes`/`usedNamespace`
   (C2 evidence `:407,410,378`). Tests: `T-quota-concurrent` (N parallel commits, soft over-commit
-  per EXC-3 / D-OPEN-quota-enforcement — see §5.3), `T-quota-failover`.
+  per EXC-3 / D-OPEN-quota-enforcement — see §6.1), `T-quota-failover`.
 - **PR-1.3** `AllocateBlockPlannedRequest` (OBS) — plan: leader SCM `allocateBlock`, openKeyTable
   block-append `Put` (C3 evidence `:115`).
 - **PR-1.4** `DeleteKeyPlannedRequest` (OBS) — plan: keyTable tombstone, deletedTable `Put`, quota
@@ -494,7 +496,7 @@ FSO creates).
 `T-ryw-from-db` green; benchmark ≥ prototype 40k baseline (master §27); flag-routing equivalence
 holds; quota counter `UsedConsistent` (locking EXC-3 — the counter is exact even though the limit
 gate is soft). **The soft-vs-exact limit behavior is governed by the OPEN D-OPEN-quota-enforcement
-(§5.3); P-1 lands the commutative Merge regardless, and the enforcement-mode decision is layered on
+(§6.1); P-1 lands the commutative Merge regardless, and the enforcement-mode decision is layered on
 top without re-migrating the command.**
 
 ```yaml
@@ -502,7 +504,7 @@ id: P-1
 scope: "OBS halves of CreateKey, CommitKey, AllocateBlock, DeleteKey; structural CreateBucket/DeleteBucket"
 depends_on_phases: [P-0]
 must_satisfy: [I-quota-commutative, I-cache-free-ryw]
-must_pass: [T-quota-concurrent, T-quota-failover, T-ryw-from-db, T-flag-routing-both-paths]
+must_pass: [T-quota-concurrent, T-ryw-from-db]
 config_flag: "ozone.om.leader.execution.obs.key.enabled"
 acceptance: "OBS key lifecycle on new model; perf ≥ 40k baseline; UsedConsistent holds; flag-routing byte-identical; production flag gated on D-OPEN-retry closure (durable retry) for the four non-idempotent ops — dev/staging may precede"
 provenance: inferred
@@ -557,7 +559,7 @@ clear before P-3/P-4.
 id: P-2
 scope: "FSO CreateFile/CreateDirectory (multi-step mkdir-p), FSO commit/allocate/delete, rm-rf root tombstone, DirectoryDeletingService redesign + PurgeDirectories"
 depends_on_phases: [P-1]
-must_satisfy: [I-3, I-5, I-6, I-7, I-11, I-cache-free-ryw]
+must_satisfy: [I-3, I-5, I-6, I-7, I-11]
 must_pass: [T-1, T-2, T-3, T-4, T-5, T-6, T-7, T-8]
 config_flag: "ozone.om.leader.execution.fso.enabled"
 acceptance: "linearizable under T-1..T-8; no orphan (I-7); deadlock-free (I-11); showstoppers retired"
@@ -587,7 +589,7 @@ along here or defer to P-6 — they carry no Checkpoint/move hazard.)
 - **PR-3.3** `SnapshotMoveDeletedKeysPlannedRequest` / `SnapshotMoveTableKeysPlannedRequest` — the
   cross-snapshot deletedTable/deletedDirTable **moves**. These are **non-idempotent on
   re-execution** (C11/C12) and are therefore prime candidates for the durable retry entry once
-  D-OPEN-retry settles (§5.4).
+  D-OPEN-retry settles (§6.2).
 - **PR-3.4** flag `ozone.om.leader.execution.snapshot.enabled` + `T-snapshot-consistency`.
 
 **Config flag.** `ozone.om.leader.execution.snapshot.enabled`.
@@ -614,7 +616,7 @@ evidence: ["master §29 P-3", "OMSnapshotCreateRequest.java:166,275", "OMSnapsho
 ### P-4 — MPU + large-value revisit
 
 ```yaml
-- {id: P-4, scope: "MPU (4 ops + AbortExpired) + large-value (HDDS-8238) revisit", depends_on_phases: [P-3], must_satisfy: [], must_pass: [T-mpu-lifecycle], config_flag: "ozone.om.leader.execution.mpu.enabled", acceptance: "MPU on new model"}
+- {id: P-4, scope: "MPU (4 ops + AbortExpired) + large-value ([HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)) revisit", depends_on_phases: [P-3], must_satisfy: [], must_pass: [T-mpu-lifecycle], config_flag: "ozone.om.leader.execution.mpu.enabled", acceptance: "MPU on new model"}
 ```
 
 **Command set.** C13 InitiateMultiPartUpload, C14 CommitMultiPartUpload (commit part), C15
@@ -695,7 +697,7 @@ leg-work complete. No new invariant beyond those proven in P-1/P-2.
 id: P-5
 scope: "DeleteKeys, RenameKey, RenameKeys, DeleteOpenKeys, PurgeKeys (PurgeDirectories code-homes in P-2)"
 depends_on_phases: [P-2]
-must_satisfy: [I-11]
+must_satisfy: []
 must_pass: []
 config_flag: "per-command"
 acceptance: "batch ops linearizable; multi-slot deadlock-free; leg work complete"
@@ -735,7 +737,7 @@ id: P-6
 scope: "Group A simple ops (~22 units): volume ops, ACL family, tokens, S3 secrets, tenancy, snapshot props, SetTimes, object tagging, prepare/finalize, RecoverLease, EchoRPC, QuotaRepair, SetBucketProperty(limit)"
 depends_on_phases: [P-1]
 must_satisfy: []
-must_pass: [T-flag-routing-both-paths]
+must_pass: []
 config_flag: "per-command"
 acceptance: "legacy path retired for simple ops; flag-routing byte-identical"
 provenance: inferred
@@ -782,7 +784,7 @@ tiers green (master §31 Definition of Done).
 id: P-7
 scope: "delete double buffer (PR-7.1), remove table caches (PR-7.2), delete legacy validateAndUpdateCache path (PR-7.3, with dead-code sweep), retire per-command flags (PR-7.4)"
 depends_on_phases: [P-3, P-4, P-5, P-6]
-must_satisfy: [I-txninfo-atomic-with-patch]
+must_satisfy: []
 must_pass: []
 config_flag: "n/a"
 acceptance: "double buffer gone; single execution model; legacy path deleted; flags retired; all I-n tested; lint-spec + TLA+ green"
@@ -792,12 +794,12 @@ evidence: ["master §29 P-7", "OzoneManagerDoubleBuffer.java", "OzoneManagerRati
 
 ---
 
-## 5.x Open-decision touchpoints that the phasing must honor (do not pre-settle)
+## 6. Open-decision touchpoints that the phasing must honor (do not pre-settle)
 
 Two decisions are **not settled** and the playbook must route around them without forcing a
 premature resolution. Stating them here prevents a phase from silently assuming an answer.
 
-### 5.3 D-OPEN-quota-enforcement (OPEN — touches P-1, P-4)
+### 6.1 D-OPEN-quota-enforcement (OPEN — touches P-1, P-4)
 
 D-OPEN-quota-enforcement (master, status `open`) asks whether quota admission is **exact**
 (leader-local atomic reservation) or **approximate** (merge-only). This is **not resolved**. The
@@ -828,7 +830,7 @@ provenance: verified
 evidence: ["master D-OPEN-quota-enforcement", "leader-execution-locking.md EXC-3", "TLC counterexample 2026-06-15 (ozone-11898-tla) QuotaOvercommit.cfg"]
 ```
 
-### 5.4 D-OPEN-retry (DEFERRED — scopes which ops in the inventory need a durable retry entry)
+### 6.2 D-OPEN-retry (DEFERRED — scopes which ops in the inventory need a durable retry entry)
 
 D-OPEN-retry (master, status `deferred`) asks whether idempotency uses an in-flight registry +
 **durable replicated `(clientId, callId) → response` table written atomically with the data batch**,
@@ -869,7 +871,7 @@ evidence: ["master D-OPEN-retry", "leader-execution-locking.md §4.3,§10", "inv
 
 ---
 
-## 6. Cross-phase invariants the playbook must not violate (summary)
+## 7. Cross-phase invariants the playbook must not violate (summary)
 
 A compact restatement, so a reviewer can check any single phase's PRs against the whole:
 
@@ -886,8 +888,22 @@ A compact restatement, so a reviewer can check any single phase's PRs against th
   counter (D-12) is the one that bites first and silently if skipped.
 - **Hard-first ordering is a risk control, not a preference (D-13).** P-5/P-6 depend *behind* the
   hard phases; the easy work can never be used to declare premature victory.
-- **The open decisions stay open (§5.3, §5.4).** P-1 lands the quota `Merge` unconditionally but
+- **The open decisions stay open (§6.1, §6.2).** P-1 lands the quota `Merge` unconditionally but
   keeps exact-reservation separable; the non-idempotent ~10 ops keep a retry-cache seam without
   fixing the mechanism. Do not pre-settle either in a phase PR.
 - **P-7 deletes nothing until everything is migrated.** The legacy path's deletion depends on the
   full P-3/P-4/P-5/P-6 set; a dead-code sweep precedes the delete.
+
+**Cross-cutting tests (apply to every migrated command — NOT a per-phase `must_pass`).** The
+master §29 `P-n` blocks (reproduced verbatim above) deliberately keep these *out* of any single
+phase's `must_pass`, and the expanded playbook blocks match that. They re-run for **every**
+command migration, so they gate the migration as a whole, not one phase (this mirrors the
+test-plan companion §5 "Cross-cutting" note):
+- `T-flag-routing-both-paths` (D-14) — per-command on/off byte-identical parity; run per op as
+  each command migrates (heaviest in P-6's Set-A sweep, but applicable everywhere).
+- `T-determinism-follower-byte-identical` and `T-apply-failure-resync` (D-10) — the determinism +
+  crash-and-resync contract every migrated command must uphold.
+- `T-rolling-upgrade-mixed-binary` and `T-mixed-mode-no-collision` (D-11/D-12) — mixed-mode
+  safety across the whole migration window, until finalization retires them.
+- `T-quota-failover` / `T-quota-exact-tlc` — the quota path's standing crash-safety and exactness
+  checks, re-run on every change touching quota (their verdict tracks D-OPEN-quota-enforcement).

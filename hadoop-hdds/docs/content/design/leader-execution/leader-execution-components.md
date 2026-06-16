@@ -5,6 +5,8 @@ date: 2026-06-15
 jira: HDDS-11898
 status: draft
 author: Ritesh Shukla
+evidence_commit: 25585523eeb
+evidence_branch: HDDS-11898-design-docs
 ---
 <!--
   Licensed under the Apache License, Version 2.0 (the "License");
@@ -159,7 +161,7 @@ per-command-unique step that causes today's silent divergence — every follower
 same bytes is the bug surface. Replicating the *bytes themselves* is how consensus systems
 normally work and is what makes byte-identity (T-determinism-follower-byte-identical) checkable.
 Raw-put/delete-only was also rejected because it cannot express the commutative quota counter or
-the snapshot barrier — `#10503` regressed to that shape and lost both.
+the snapshot barrier — [#10503](https://github.com/apache/ozone/pull/10503) regressed to that shape and lost both.
 
 **Failure atomicity at this seam.** The applier holds no lock and performs no network I/O; its
 only failure mode is a RocksDB write error, which is exactly today's `flushBatch` failure mode
@@ -361,7 +363,7 @@ anti_patterns:
   - "MUST NOT hold a lock across the inter-step gap (I-3) — release per step; the gap is intentional."
   - "MUST NOT block the worker thread on the Ratis await — register a continuation and free the thread (I-9 driver); hold the client RPC, not a thread."
   - "MUST NOT write a retry-cache entry on a non-terminal step — only the terminal step records (clientId#callId -> response) (D-6, locking §4.3)."
-phase: P-0
+phase: P-0 / P-2
 provenance: inferred
 evidence:
   - "D-6 (dynamic step-iterator owned by request) + D-16 (createFile = iterative mkdir -p) locked — master §20"
