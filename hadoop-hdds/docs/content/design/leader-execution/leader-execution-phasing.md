@@ -234,7 +234,7 @@ field decls, `:242-269` update logic, `:582` the catch-up loop `while
 (getLastAppliedTermIndex().getIndex() < lastSkippedIndex)`, all verified).
 
 **What must change.** Under leader-side execution the *new* path writes the data patch **and** the
-applied-index stamp together (master invariant `I-txninfo-atomic` — "#TRANSACTIONINFO atomic with
+applied-index stamp together (master invariant `I-txninfo-atomic-with-patch` — "#TRANSACTIONINFO atomic with
 patch"), but during mixed mode the **legacy** double-buffer path and the **new** patch-apply path
 both advance durability *concurrently for different commands*. The applied-index bookkeeping must be
 **dual-path**: a single, monotonic, crash-consistent notion of "last durably applied index" that
@@ -402,7 +402,7 @@ acceptance gate.
 ### P-0 — Framework substrate + the three prerequisites (inert)
 
 ```yaml
-- {id: P-0, scope: "framework substrate (12 components) unwired + legacy→ManagedIndex objectID retrofit + dual-path index durability + cross-model shared bucket-lock gate + migrated-apply cache invalidate/update (D-17)", depends_on_phases: [], must_satisfy: [I-inner-domain-agnostic, I-txninfo-atomic, I-managed-index-monotonic, I-mixed-mode-lock-gate, I-mixed-mode-cache-coherent], must_pass: [T-cross-thread-release, T-objectid-disjoint, T-proto-roundtrip], config_flag: "n/a (inert)", acceptance: "zero behavior change; all unit tests green; lint-spec passes"}
+- {id: P-0, scope: "framework substrate (12 components) unwired + legacy→ManagedIndex objectID retrofit + dual-path index durability + cross-model shared bucket-lock gate + migrated-apply cache invalidate/update (D-17)", depends_on_phases: [], must_satisfy: [I-inner-domain-agnostic, I-txninfo-atomic-with-patch, I-managed-index-monotonic, I-mixed-mode-lock-gate, I-mixed-mode-cache-coherent], must_pass: [T-cross-thread-release, T-objectid-disjoint, T-proto-roundtrip], config_flag: "n/a (inert)", acceptance: "zero behavior change; all unit tests green; lint-spec passes"}
 ```
 
 **Command set.** None migrated. This phase builds the 12 components (master §11) and the three
@@ -445,7 +445,7 @@ to P-1 until all three prerequisites (PR-0a/b/c) are merged.**
 id: P-0
 scope: "12 framework components unwired + 3 prerequisites: ManagedIndex objectID retrofit (PR-0a), dual-path applied-index durability (PR-0b), OMLayoutFeature finalization gate (PR-0c) + cross-model shared bucket-lock gate + migrated-apply cache invalidate/update (D-17)"
 depends_on_phases: []
-must_satisfy: [I-inner-domain-agnostic, I-txninfo-atomic, I-managed-index-monotonic, I-mixed-mode-lock-gate, I-mixed-mode-cache-coherent]
+must_satisfy: [I-inner-domain-agnostic, I-txninfo-atomic-with-patch, I-managed-index-monotonic, I-mixed-mode-lock-gate, I-mixed-mode-cache-coherent]
 must_pass: [T-cross-thread-release, T-objectid-disjoint, T-mixed-mode-no-collision, T-proto-roundtrip, T-rolling-upgrade-mixed-binary]
 config_flag: "n/a (inert)"
 acceptance: "zero behavior change; PR-0a/b/c merged; merge operator registered on all nodes (A-5); lint-spec green"
@@ -456,7 +456,7 @@ evidence: ["master §29 P-0", "OmUtils.java:766-783", "OzoneManagerStateMachine.
 ### P-1 — Hardest single-step OBS key path
 
 ```yaml
-- {id: P-1, scope: "hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey", depends_on_phases: [P-0], must_satisfy: [I-quota-commutative, I-cache-free-ryw], must_pass: [T-quota-concurrent, T-ryw-from-db], config_flag: "ozone.om.leader.execution.obs.key.enabled", acceptance: "OBS key path on new model; perf ≥ baseline; quota correct"}
+- {id: P-1, scope: "hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey", depends_on_phases: [P-0], must_satisfy: [I-quota-commutative, I-cache-free-ryw], must_pass: [T-quota-concurrent, T-ryw-from-db], config_flag: "ozone.om.leader.execution.obs.key.enabled", acceptance: "OBS key path on new model; perf ≥ baseline; quota correct; production flag gated on D-OPEN-retry closure (durable retry) for the four non-idempotent ops — dev/staging may precede"}
 ```
 
 **Command set.** The OBS halves of C1 CreateKey, C2 CommitKey, C3 AllocateBlock, C4 DeleteKey. (The
@@ -504,7 +504,7 @@ depends_on_phases: [P-0]
 must_satisfy: [I-quota-commutative, I-cache-free-ryw]
 must_pass: [T-quota-concurrent, T-quota-failover, T-ryw-from-db, T-flag-routing-both-paths]
 config_flag: "ozone.om.leader.execution.obs.key.enabled"
-acceptance: "OBS key lifecycle on new model; perf ≥ 40k baseline; UsedConsistent holds; flag-routing byte-identical"
+acceptance: "OBS key lifecycle on new model; perf ≥ 40k baseline; UsedConsistent holds; flag-routing byte-identical; production flag gated on D-OPEN-retry closure (durable retry) for the four non-idempotent ops — dev/staging may precede"
 provenance: inferred
 evidence: ["master §29 P-1", "OMKeyCreateRequest.java:165,338,351", "OMKeyCommitRequest.java:407,410,378,288", "OMAllocateBlockRequest.java:115", "OMKeyDeleteRequest.java:155,166,167"]
 ```
@@ -757,7 +757,7 @@ callers.
 **Sub-tasks / PRs:**
 
 - **PR-7.1** delete the double buffer; the replicated-DB module's apply path is now the sole RocksDB
-  writer (the #TRANSACTIONINFO-atomic-with-patch invariant `I-txninfo-atomic` is now the *only*
+  writer (the #TRANSACTIONINFO-atomic-with-patch invariant `I-txninfo-atomic-with-patch` is now the *only*
   durability path, not the dual-path of P-0).
 - **PR-7.2** remove OM table caches (D-3); reads go straight to RocksDB (A-1: NVMe + block cache).
 - **PR-7.3** delete the legacy `validateAndUpdateCache` request classes (the `createClientRequest`
@@ -782,7 +782,7 @@ tiers green (master §31 Definition of Done).
 id: P-7
 scope: "delete double buffer (PR-7.1), remove table caches (PR-7.2), delete legacy validateAndUpdateCache path (PR-7.3, with dead-code sweep), retire per-command flags (PR-7.4)"
 depends_on_phases: [P-3, P-4, P-5, P-6]
-must_satisfy: [I-txninfo-atomic]
+must_satisfy: [I-txninfo-atomic-with-patch]
 must_pass: []
 config_flag: "n/a"
 acceptance: "double buffer gone; single execution model; legacy path deleted; flags retired; all I-n tested; lint-spec + TLA+ green"

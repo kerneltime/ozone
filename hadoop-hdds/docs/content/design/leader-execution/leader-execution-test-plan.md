@@ -1,6 +1,6 @@
 ---
 title: Leader-Side Execution — Test Strategy & Plan
-summary: The correctness contract (linearizability against a single-threaded sequential reference model at transition granularity), the test architecture (reference oracle + randomized concurrent harness + linearizability checker + invariant assertions), the TLA+/TLC formal tier (OBS green, FSO bounded-green, broader configs planned), and the T-n scenario catalog with per-phase acceptance mapping. Companion to leader-planned-execution.md §26.
+summary: The correctness contract (linearizability against a single-threaded sequential reference model at transition granularity), the test architecture (reference oracle + randomized concurrent harness + linearizability checker + invariant assertions), the TLA+/TLC formal tier (OBS green; FSO green at bounded scope across three increments — M2a tree, M2b directory rename, M3 recursive delete; broader configs in progress), and the T-n scenario catalog with per-phase acceptance mapping. Companion to leader-planned-execution.md §26.
 date: 2026-06-15
 jira: HDDS-11898
 status: draft
@@ -283,10 +283,11 @@ search might reach only with a specific interleaving:
 
 - `NoOrphan` (`I-7`): no namespace entry whose parent objectID has been removed. Asserted at
   every purge step and at quiescence.
-- `NoLeak` (`I-8` / lock-handle accounting): every acquired lock handle is eventually released;
-  no permit is leaked from a stripe (the lean semaphore's permit count returns to ceiling at
-  quiescence). This is also the failure-atomicity check — a throw between acquire and release
-  must still release in `finally`.
+- `NoLeak` (TLA+ model invariant — lock-handle/permit accounting): every acquired lock handle
+  is eventually released; no permit is leaked from a stripe (the lean semaphore's permit count
+  returns to ceiling at quiescence). This is also the failure-atomicity check — a throw between
+  acquire and release must still release in `finally`. (`NoLeak` is a model-level accounting
+  property, distinct from `I-8` "no holder lease", which is asserted by `T-holder-lease-negative`.)
 - `UsedConsistent`: the quota counter exactly equals the true committed size (no double count,
   no lost decrement) — the property that survives even under soft-gate over-commit
   (`leader-execution-locking.md` EXC-3, §9).
@@ -336,11 +337,13 @@ The models live in the sibling worktree `ozone-11898-tla` (referenced from
   (`NoLeak`), and never loses/double-counts a quota update (`UsedConsistent`). This is the
   formal backstop for `I-2`, `I-8`, `I-12`, and the soft-quota `UsedConsistent` claim.
 
-### 3.3 The FSO model (now exists; bounded run green; broader configs planned)
+### 3.3 The FSO model (now exists; three bounded-exhaustive increments green)
 
 The master scaffold (§26) described FSO as "planned." **As of 2026-06-15 the FSO model exists
-and a bounded run completed green**; this plan records that updated state faithfully rather
-than the stale "planned" label, and scopes the remaining work as broader-configuration runs.
+and was checked green in three bounded-exhaustive increments — M2a (tree + file rename), M2b
+(directory rename), and M3 (recursive delete)**; this plan records that updated state
+faithfully rather than the stale "planned" label, and scopes the remaining work as
+wider-configuration runs.
 
 - **Spec/config**: `FsoImpl.tla` checked against `FsoAbstract.tla` via `Refinement`, with
   invariants `LockInv`, `NoLeak`, **`NoOrphan`** (the FSO-specific orphan-freedom property,
@@ -350,18 +353,32 @@ than the stale "planned" label, and scopes the remaining work as broader-configu
   rename vs delete) all surface at this scale (small-scope hypothesis)."
   *(evidence: `ozone-11898-tla/FsoImpl.cfg`, `ozone-11898-tla/FsoImplSmall.cfg`,
   `ozone-11898-tla/FsoAbstract.tla`)*
-- **Verdict — GREEN (bounded).** `Model checking completed. No error has been found.` —
-  **69,290,922 states generated, 26,828,240 distinct**, state-graph depth **41**, finished in
-  **42min 12s** (2026-06-15). *(evidence: `ozone-11898-tla/fso-m2a-full.out` tail — "No error
-  has been found"; "69290922 states generated, 26828240 distinct states found"; "depth … 41";
-  "Finished in 42min 12s")*
-- **What it establishes**: at the bounded FSO scope the namespace model **refines** the
-  abstract oracle and holds `LockInv`, `NoLeak`, and `NoOrphan` — the formal backstop for the
-  hardest FSO claims (`I-5`, `I-6`, `I-7`, `I-11`) that the adversarial `T-1 … T-8` scenarios
-  exercise in the Java harness.
-- **Remaining (planned)**: larger `MAXOID`, `MAX_OPS≥3`, and `Procs={1,2,3}` runs to widen the
-  small-scope hypothesis; an explicit failover/crash action in the FSO model to mirror `T-8` at
-  the formal tier. These are the open items behind master `P-2` DoD.
+- **Verdict — GREEN (bounded-exhaustive, three increments).** All report `Model checking
+  completed. No error has been found.`
+  - **M2a** (tree: createDir/createFile/commitFile/deleteFile/deleteDir-empty + file rename),
+    `MAX_OPS=2`: **69,290,922 states generated, 26,828,240 distinct**, state-graph depth **41**,
+    finished in **42min 12s**. *(evidence: `ozone-11898-tla/fso-m2a-full.out` tail — "No error
+    has been found"; "69290922 states generated, 26828240 distinct states found"; "depth … 41";
+    "Finished in 42min 12s")*
+  - **M2b** (directory rename with objectID/rename stability + cycle prevention), `MAX_OPS=2`:
+    **80,746,288 states generated, 32,400,283 distinct**, depth **41**, finished in **1h 15min**.
+    *(evidence: `ozone-11898-tla/fso-m2b-full.out` tail — "No error has been found"; "80746288
+    states generated, 32400283 distinct states found")*
+  - **M3** (recursive delete: tombstone + decomposed per-node-locked purge), green at its tight
+    bound (`FsoM3.cfg`, `MAX_OPS=1`); the broader `MAX_OPS=2` pass (`FsoM3Full.cfg`,
+    `ozone-11898-tla/fso-m3-full.out`) is confirming. M3 checks **`Accounted`** (no *permanent*
+    unaccounted orphan) instead of strict `NoOrphan`, because transient mid-purge orphans are by
+    design (EXC-2). *(evidence: `ozone-11898-tla/FsoM3.cfg` — `INVARIANT Accounted`, "Strict
+    NoOrphan is intentionally NOT checked")*
+- **What it establishes**: across the three increments the namespace model **refines** the
+  abstract per-node oracle and holds `LockInv`, `NoLeak`, and the orphan-freedom property
+  (`NoOrphan` for M2a/M2b, `Accounted` for M3) — the formal backstop for the hardest FSO claims
+  (`I-5`, `I-6`, `I-7`, `I-11`) that the adversarial `T-1 … T-8` scenarios exercise in the Java
+  harness.
+- **Remaining (planned)**: completion of the broader M3 `MAX_OPS=2` pass; larger `MAXOID`,
+  `MAX_OPS≥3`, and `Procs={1,2,3}` runs to widen the small-scope hypothesis; an explicit
+  failover/crash action in the FSO model to mirror `T-8` at the formal tier. These are the open
+  items behind master `P-2` DoD.
 
 ### 3.4 The quota over-commit counterexample (formal pin for D-OPEN-quota-enforcement)
 
@@ -508,9 +525,9 @@ statement: >
   ORPHAN; NO DOUBLE-APPLY (the retry-cache entry is written by the TERMINAL step only, so the
   already-committed intermediate dirs are not re-counted). The new leader discards the in-
   memory lock table (I-10) and applies the committed Ratis log as plain deterministic writes.
-covers: [I-10, I-8]
+covers: [I-10]
 provenance: verified
-evidence: ["leader-execution-locking.md §7 T-8, §4.3 (recovery: retry-cache on terminal step), §9 (I-10 via T-8; I-8 via 'T-8 no double-apply')", "retry-cache seam at OzoneManagerRatisServer.java:559-567 (checkRetryCache / getRetryCache().getIfPresent)"]
+evidence: ["leader-execution-locking.md §7 T-8, §4.3 (recovery: retry-cache on terminal step), §9 (I-10 via T-8)", "retry-cache seam at OzoneManagerRatisServer.java:559-567 (checkRetryCache / getRetryCache().getIfPresent)"]
 ```
 
 ### 4.2 Quota scenarios
@@ -851,7 +868,7 @@ statement: >
   Merge or SCM allocation) or behind it (which would silently lose a committed transition). Exercises
   the dual-path applied-index durability extension (lastSkippedIndex) across both the legacy and the
   planned writer.
-covers: [I-txninfo-atomic-with-patch, I-txninfo-atomic]
+covers: [I-txninfo-atomic-with-patch]
 provenance: verified
 evidence: ["leader-planned-execution.md I-txninfo-atomic-with-patch tests:[T-txninfo-crash-atomicity,T-apply-failure-resync], §15.4, §19 (dual-path durability)", "OzoneManagerDoubleBuffer.java:354,364-365,373-376,379-381 (single BatchOperation: data + #TRANSACTIONINFO + one commit)", "OzoneManagerStateMachine.java:108-111,242-269,582 (lastSkippedIndex)"]
 ```
@@ -893,6 +910,42 @@ provenance: inferred
 evidence: ["D-17", "I-mixed-mode-cache-coherent", "FullTableCache.java:200-213"]
 ```
 
+### 4.9 Leader-only security/observability scenarios (consequences of pure-follower apply)
+
+These two scenarios assert the security- and observability-relevant consequence of D-10:
+because followers run **no** business logic (`I-determinism-followers-pure`), everything that
+lives in the request body — ACL evaluation, identity minting, write-audit emission, and
+write-path metric increments — runs **leader-only**. They are the canonical home of the
+oracles worked through in master §17 and §18; the master references these ids and invents
+none of its own.
+
+```yaml
+# T-security-leader-only-authz-audit
+id: T-security-leader-only-authz-audit
+statement: >
+  ACL evaluation, write-audit emission, and token/secret minting occur only on the leader;
+  the replicated patch crossing Ratis is already authorized and contains the minted bytes;
+  followers apply with no re-authorization, no re-audit, and no re-minting; an authorization
+  failure on the leader fails closed (no patch, access denied). Leader-only authz/audit/minting
+  is a consequence of followers running no business logic.
+covers: [I-determinism-followers-pure]
+provenance: inferred
+evidence: ["leader-planned-execution.md §17 (security: authorize-once-on-leader, followers apply trusted bytes), D-10", "OMKeyCreateRequest.java:198-201", "OzoneManagerRequestHandler.java:427,430", "OMGetDelegationTokenRequest.java:175,179", "S3GetSecretRequest.java:157,159,192"]
+```
+```yaml
+# T-observability-leader-only-metrics
+id: T-observability-leader-only-metrics
+statement: >
+  Write-path OM metrics (NumKeyAllocates, NumKeyCommits, NumKeys, DataCommittedBytes, and
+  their *Fails) increment only on the leader for a migrated command, because their increments
+  live inside the request body which is now leader-only; followers expose a distinct
+  apply-health metric set instead; write-audit is emitted only on the leader. Leader-only
+  metric increments are a consequence of followers running no business logic.
+covers: [I-determinism-followers-pure]
+provenance: inferred
+evidence: ["leader-planned-execution.md §18 (observability: write metrics move to leader-only), D-10", "OMKeyCreateRequest.java:213,225", "OMKeyCommitRequest.java:176-178,491,496", "OzoneManagerRequestHandler.java:427,430"]
+```
+
 ---
 
 ## 5. Per-phase acceptance map (P-0 … P-7 → T-n)
@@ -907,7 +960,7 @@ freshness).
 |---|---|---|---|
 | **P-0** | Framework substrate (12 components) unwired + legacy→ManagedIndex objectID retrofit + dual-path index durability | `T-cross-thread-release`, `T-objectid-disjoint`, `T-proto-roundtrip`, `T-mixed-mode-no-collision`, `T-flag-routing-both-paths` | (substrate; no model gate — models exercise P-1/P-2 behavior) |
 | **P-1** | Hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey | `T-quota-concurrent`, `T-ryw-from-db`, `T-determinism-follower-byte-identical`, `T-7` (hot parent), `T-holder-lease-negative` | **OBS model green** (`ObsImpl.cfg`: Refinement + LockInv + NoLeak + UsedConsistent) — `obs3-verdict.out` |
-| **P-2** | Hardest multi-step FSO: CreateFile/CreateDirectory (implicit parents), FSO delete, recursive rm-rf + DirectoryDeletingService redesign | `T-1`, `T-2`, `T-3`, `T-4`, `T-5`, `T-6`, `T-7`, `T-8`, `T-deletedir-vs-openfile` | **FSO model green** (`FsoImpl.cfg`/`FsoImplSmall.cfg`: Refinement + LockInv + NoLeak + NoOrphan) — `fso-m2a-full.out`; broader configs planned |
+| **P-2** | Hardest multi-step FSO: CreateFile/CreateDirectory (implicit parents), FSO delete, recursive rm-rf + DirectoryDeletingService redesign | `T-1`, `T-2`, `T-3`, `T-4`, `T-5`, `T-6`, `T-7`, `T-8`, `T-deletedir-vs-openfile` | **FSO model green** (Refinement + LockInv + NoLeak + NoOrphan/Accounted) — M2a `fso-m2a-full.out` (26.8M distinct), M2b directory rename `fso-m2b-full.out` (32.4M distinct), M3 recursive delete green at tight bound `FsoM3.cfg`; broader M3 `MAX_OPS=2` pass confirming |
 | **P-3** | Snapshot: CreateSnapshot/Checkpoint op, SnapshotPurge standalone, moves | `T-snapshot-consistency` | (FSO model extension for Checkpoint-vs-op ordering: planned) |
 | **P-4** | MPU (4 ops + AbortExpired) + large-value ([HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)) revisit | `T-mpu-lifecycle` | n/a |
 | **P-5** | Batch/background: DeleteKeys, RenameKey/Keys, DeleteOpenKeys, PurgeKeys/Directories | (multi-slot ordering exercised by the §5-companion bulk-sort path; covered transitively by `T-3`/`T-7` ordering + `NoLeak`) | n/a |
@@ -943,7 +996,7 @@ authority `leader-execution-locking.md` §9) and **master invariants** (slugs) a
 | `I-5` FSO-RESOLVE-FAIL (tombstone ⇒ resolution fails) | `T-1`, `T-4`, `T-5`, `T-deletedir-vs-openfile` | companion §9 (I-5 via T-1,T-5) |
 | `I-6` FSO-REVAL (re-read by (parentObjectID,name); ABA-safe) | `T-2`, `T-5`, `T-deletedir-vs-openfile` | companion §9 (I-6 via T-2,T-5) |
 | `I-7` FSO-PURGE no orphan | `T-1` | companion §9 (I-7 via T-1); FSO `NoOrphan` (green) |
-| `I-8` no holder lease (correctness-critical) | `T-8` (no double-apply), `T-holder-lease-negative` | companion §9 (I-8 via design + T-8) |
+| `I-8` no holder lease (correctness-critical) | `T-holder-lease-negative` | companion §9 (I-8 via design + T-holder-lease-negative) |
 | `I-9` non-thread-affine (release on different thread) | `T-cross-thread-release` | companion §9 (I-9 unit: acquire A release B) |
 | `I-10` leader-local (lock table discarded on failover) | `T-8` | companion §9 (I-10 via T-8) |
 | `I-11` deadlock-free by total order | `T-3`, `T-5`, `T-hot-stripe` | companion §9 (I-11 via T-3,T-5) |
@@ -960,14 +1013,14 @@ authority `leader-execution-locking.md` §9) and **master invariants** (slugs) a
 | `I-determinism-followers-pure` | `T-determinism-follower-byte-identical`, `T-apply-failure-resync` | D-10 |
 | `I-managed-index-monotonic` | `T-objectid-disjoint`, `T-mixed-mode-no-collision`, `T-flag-routing-both-paths`, `T-rolling-upgrade-mixed-binary` | D-8/D-12; P-0 must_satisfy |
 | `I-objectid-disjoint` | `T-objectid-disjoint`, `T-mixed-mode-no-collision` | D-8/D-12 |
-| `I-txninfo-atomic` (#TRANSACTIONINFO atomic with patch) | `T-apply-failure-resync` (the #TRANSACTION_INFO-in-same-batch atomicity is what makes resync-to-a-consistent-index sound) | P-0 must_satisfy; `OzoneManagerDoubleBuffer.java:354-382` |
+| `I-txninfo-atomic-with-patch` (#TRANSACTIONINFO atomic with patch) | `T-apply-failure-resync` (the #TRANSACTION_INFO-in-same-batch atomicity is what makes resync-to-a-consistent-index sound) | P-0 must_satisfy; `OzoneManagerDoubleBuffer.java:354-382` |
 | `I-checkpoint-exact-index` | `T-snapshot-consistency` | P-3 must_satisfy |
 
 ### 6.3 Audit result
 
 - **No zero-test invariant** among `I-1 … I-12` or the master slugs enumerated in §24/§29:
   every invariant above has ≥1 covering `T-n`. The two invariants most at risk of being
-  orphaned — `I-txninfo-atomic` and `I-checkpoint-exact-index` — are explicitly covered by
+  orphaned — `I-txninfo-atomic-with-patch` and `I-checkpoint-exact-index` — are explicitly covered by
   `T-apply-failure-resync` and `T-snapshot-consistency` respectively.
 - **Two master invariants are formally backstopped, not only harness-tested**:
   `I-quota-commutative`/`I-quota-crash-safe` (via `ObsImpl` `UsedConsistent`, green) and the

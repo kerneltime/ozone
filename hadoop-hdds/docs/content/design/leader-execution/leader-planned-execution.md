@@ -28,6 +28,11 @@ This spec uses numbered, cross-referenced, evidence-bearing tokens. Every load-b
 claim cites evidence and is tagged `verified` (with `file:line` / PR# / reviewer) or
 `inferred`. Any **`I-n` with zero `T-n` mapped is a spec defect** (enforced by the linter, §C).
 
+- **One invariant, one slug** — aliases are forbidden in YAML reference fields (prose may use
+  the informal name). Exactly one `id:` block defines a given invariant; every `covers:` /
+  `tests:` / `must_satisfy:` reference uses that one canonical slug, never a shortened or
+  alternate form.
+
 | Token | Meaning |
 |---|---|
 | `F-n`  | Verified fact about existing code (carries `file:line`) |
@@ -578,7 +583,7 @@ Critically, the same flush writes the consensus bookmark *inside the same batch*
 (`OzoneManagerDoubleBuffer.java:373-378`, `F-txninfo-atomic`, verified). This is what
 makes "the applied data" and "the index up to which we have applied" a single atomic
 RocksDB commit — a property the new design must preserve verbatim (it becomes
-invariant `I-txninfo-atomic` in Part V, and the `Checkpoint`/whole-batch atomicity
+invariant `I-txninfo-atomic-with-patch` in Part V, and the `Checkpoint`/whole-batch atomicity
 discussion in §15).
 
 The bottleneck is that the *producer* feeding this buffer is serialized. Committed Ratis
@@ -822,7 +827,11 @@ Three things changed between [#7583](https://github.com/apache/ozone/pull/7583)'
    alone. An OBS TLA+ model is checked with TLC (it is *green* against the accepted
    soft-quota oracle, and it **mechanically reproduced** the quota over-commit
    counterexample that keeps `D-OPEN-quota-enforcement` honest — see
-   `leader-execution-locking.md §8 EXC-3` and §30). An FSO model is planned. A formal tier
+   `leader-execution-locking.md §8 EXC-3` and §30). The FSO model is now also green: TLC
+   checked the FSO namespace tier exhaustively in three bounded-exhaustive increments — M2a
+   (tree + file rename) and M2b (directory rename) both fully green at `MAX_OPS=2`, and M3
+   (recursive delete) green at its tight bound with the broader `MAX_OPS=2` pass confirming.
+   A formal tier
    that can *fail the build* on a divergence claim is a different level of assurance than
    [#7583](https://github.com/apache/ozone/pull/7583) had.
 3. **The rationale spine (Part IV).** [#7583](https://github.com/apache/ozone/pull/7583)'s most expensive asset — the reasoning behind
@@ -1054,7 +1063,8 @@ does **not** target serializable isolation of multi-operation transactions, beca
 no multi-operation transaction concept to isolate. This criterion is validated two ways:
 the concurrent linearizability harness against the sequential reference model
 (`leader-execution-locking.md §7`), and the formal **TLA+/TLC** models (OBS green; FSO
-planned), which check the implementation model refines the abstract sequential model. In
+green at bounded scope — M2a/M2b at `MAX_OPS=2`, M3 at its tight bound), which check the
+implementation model refines the abstract sequential model. In
 one line: **borrow per-key serialization, the single serial writer, and idempotent retry;
 do not borrow MVCC, 2PC, or interactive transactions; prove correctness as linearizability
 versus a sequential model, not as serializability of transactions.**
@@ -1210,7 +1220,7 @@ rationale: >
 if_breaks: >
   If Ratis could apply a committed entry twice, every non-idempotent patch op (the quota
   Merge, soft-delete moves) would double-count, and the #TRANSACTIONINFO-atomic-with-patch
-  invariant (I-txninfo-atomic) would no longer bound recovery. The whole "apply bytes
+  invariant (I-txninfo-atomic-with-patch) would no longer bound recovery. The whole "apply bytes
   blindly" contract rests on this; if it breaks, apply would need its own dedup, which the
   design deliberately does not build.
 provenance: verified
@@ -1402,7 +1412,7 @@ The trace, in order, with the verified handoff points:
    - **F-9 (atomic #TRANSACTIONINFO).** The data rows and the `#TRANSACTIONINFO` marker land
      in **one** RocksDB batch — so the persisted "applied index" can never be ahead of or
      behind the data it accounts for. This atomicity is an invariant the new design must
-     preserve (it becomes I-txninfo-atomic in §24); it is *not* a coincidence to be broken.
+     preserve (it becomes I-txninfo-atomic-with-patch in §24); it is *not* a coincidence to be broken.
    - **F-9a (single writer).** There is exactly one writer to the OM RocksDB on the write
      path — the double-buffer daemon. No other thread writes the active DB. This is why the
      design can later (P-7) remove the double buffer only after the replicated-apply path is
@@ -1561,7 +1571,7 @@ evidence: ["hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/
 # F-9
 id: F-9
 statement: "OzoneManagerDoubleBuffer.flushBatch opens ONE BatchOperation, applies every staged response's checkAndUpdateDB into it, writes the #TRANSACTIONINFO row into the SAME batch (getTransactionInfoTable().putWithBatch(batchOperation, TRANSACTION_INFO_KEY, TransactionInfo.valueOf(lastTransaction))), then commitBatchOperation — so data rows and the applied-index marker land atomically."
-rationale: "The #TRANSACTIONINFO-atomic-with-data property the new design must preserve (becomes I-txninfo-atomic)."
+rationale: "The #TRANSACTIONINFO-atomic-with-data property the new design must preserve (becomes I-txninfo-atomic-with-patch)."
 provenance: verified
 evidence: ["hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/ratis/OzoneManagerDoubleBuffer.java:354-384"]
 ```
@@ -1623,7 +1633,7 @@ evidence: ["hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/
 ```
 
 > Roll-up for §28 traceability: F-1..F-12 are the baseline facts the design transforms.
-> F-5/F-5a/F-7 → D-1, D-10. F-8/F-8a → D-3. F-9/F-9a → I-txninfo-atomic, P-7 ordering.
+> F-5/F-5a/F-7 → D-1, D-10. F-8/F-8a → D-3. F-9/F-9a → I-txninfo-atomic-with-patch, P-7 ordering.
 > F-10/F-10a → D-1 (Checkpoint op), P-3. F-11/F-11a/F-11b → D-8, D-12. F-12 → D-4/D-5/D-7
 > and `leader-execution-locking.md`.
 
@@ -1669,7 +1679,7 @@ buffer is removed last (P-7).
    operator **in Ratis order on every node** (D-7; A-5 requires the operator be registered on
    every node before any node can receive a `Merge`), `Checkpoint` taken at the exact index.
    The `#TRANSACTIONINFO` marker is written **in the same RocksDB batch** as the patch (F-9 →
-   I-txninfo-atomic), preserving today's atomicity. Followers run **no** `validateAndUpdateCache`,
+   I-txninfo-atomic-with-patch), preserving today's atomicity. Followers run **no** `validateAndUpdateCache`,
    no quota check, no ACL check, no objectID math — they cannot diverge because they do not
    compute; they copy (D-10).
 
@@ -1839,7 +1849,7 @@ evidence: ["D-1", "D-2", "PR#7583 review (errose28: 'Put/Delete/Merge/Checkpoint
 // every node in list order. The order is significant: operations within a
 // Batch are applied in sequence (e.g. a Delete of the old key before a Put of
 // the new key in a rename), and the whole Batch is one atomic RocksDB write
-// together with the #TRANSACTIONINFO marker (I-txninfo-atomic, preserving F-9).
+// together with the #TRANSACTIONINFO marker (I-txninfo-atomic-with-patch, preserving F-9).
 message Batch {
   repeated Operation operation = 1;
 }
@@ -1978,7 +1988,7 @@ field and the spec records the constraint.
 ```
 
 > Forward pointer: the **inner layer's** crash/partial-apply atomicity (the whole `Batch` +
-> `#TRANSACTIONINFO` as one RocksDB write — I-txninfo-atomic, preserving F-9) is detailed in
+> `#TRANSACTIONINFO` as one RocksDB write — I-txninfo-atomic-with-patch, preserving F-9) is detailed in
 > §15 (failure modes). The **outer layer's** managed-index handoff at finalization and the
 > legacy→ManagedIndex objectID retrofit are detailed in §16 (upgrade/mixed-mode). The
 > **components** that produce and consume these messages (the replicated-DB module, the change
@@ -2067,7 +2077,7 @@ sequenceDiagram
     L->>R: submit Batch{ Put(openKey) }  (inner is domain-agnostic — D-2)
     R-->>F: replicate committed Batch
     par apply on leader
-        R->>DB: apply Put(openKey)  + #TRANSACTIONINFO at same index (I-txninfo-atomic)
+        R->>DB: apply Put(openKey)  + #TRANSACTIONINFO at same index (I-txninfo-atomic-with-patch)
     and apply on followers
         R->>F: apply same bytes, NO business logic (D-10)
     end
@@ -2083,27 +2093,17 @@ Oracle / asserts:
 - The follower's apply step deserializes **no** `OmKeyInfo` — it writes the bytes the leader
   computed (`T-determinism-follower-byte-identical`).
 - The `#TRANSACTIONINFO` update is in the **same** atomic batch as the data Put
-  (`I-txninfo-atomic`; see §15.4 for why this is non-negotiable). In current code the
+  (`I-txninfo-atomic-with-patch`; see §15.4 for why this is non-negotiable). In current code the
   double buffer is the sole writer and performs exactly this co-write —
   `OzoneManagerDoubleBuffer.flushBatch` puts `TRANSACTION_INFO_KEY` with the same
   `BatchOperation` at `OzoneManagerDoubleBuffer.java:375-376`.
 
-```yaml
-# T-createkey-obs-oracle  (test scenario — worked example (a) as oracle)
-id: T-createkey-obs-oracle
-statement: >
-  OBS createKey: leader runs preExecute (SCM alloc + ACL) then emits a single Put(openKey);
-  the open-key row is keyed with clientID so concurrent same-name creates by distinct
-  clients both succeed; followers apply the Put as bytes with no business logic; the
-  #TRANSACTIONINFO entry lands in the same atomic batch as the data Put.
-rationale: >
-  Pins the degenerate N=1 multi-step case (D-6), the no-slot-lock create rule (I-4), the
-  follower byte-identical apply (D-10), and the txninfo-atomic invariant in one end-to-end
-  walk-through that the linearizability checker accepts as a legal single-transition history.
-covers: [I-cache-free-ryw, I-inner-domain-agnostic, I-txninfo-atomic]
-provenance: verified
-evidence: ["OMKeyCreateRequest.java:89", "OMKeyCreateRequest.java:165", "OMKeyCreateRequest.java:198-201", "OMKeyCreateRequest.java:213", "OMKeyCreateRequest.java:225", "OzoneManagerDoubleBuffer.java:375-376", "leader-execution-locking.md I-4"]
-```
+This OBS-createKey walk-through is the oracle form of two catalog tests: the cache-free
+read-your-writes leg is exercised by `T-ryw-from-db` (a same-key successor reads the
+committed bytes from RocksDB with no cache), and the no-slot-lock concurrent-create leg by
+`T-quota-concurrent` at OBS granularity (two same-name creates by distinct clients both
+reach `OK`). It invents no new test id; the assertions above pin `I-cache-free-ryw`,
+`I-inner-domain-agnostic`, and `I-txninfo-atomic-with-patch`, all covered by the catalog.
 
 ---
 
@@ -2178,7 +2178,7 @@ sequenceDiagram
     R-->>F: replicate committed Batch
     par apply on leader
         R->>DB: apply ops; Merge operator folds delta -> whole-row bucket Put
-        R->>DB: #TRANSACTIONINFO same batch (I-txninfo-atomic)
+        R->>DB: #TRANSACTIONINFO same batch (I-txninfo-atomic-with-patch)
     and apply on followers
         R->>F: apply same ops; SAME Merge operator -> identical usedBytes (UsedConsistent)
     end
@@ -2200,23 +2200,11 @@ Oracle / asserts:
 - The overwrite path produces deleted-table rows in the **same** patch; no real credential,
   backend bucket, or prior-version data leaks to the client (the client sees only `OK`).
 
-```yaml
-# T-commitkey-quota-overwrite-oracle
-id: T-commitkey-quota-overwrite-oracle
-statement: >
-  OBS commitKey under S(bucket)+X(bucket,key): emits Put(keyTable)+Delete(openKey)+
-  Merge(bucketTable, delta) and, on overwrite, Put(deletedTable, prior version flagged
-  committed-deleted); the Merge operator folds the usage delta in Ratis order on every node
-  so usedBytes stays exact (UsedConsistent) even though the limit gate is soft (EXC-3);
-  the #TRANSACTIONINFO entry is atomic with the data ops.
-rationale: >
-  Exercises the commutative-quota path (D-7), the overwrite soft-delete machinery, the
-  per-key slot serialization (I-2), and the leader-local-vs-soft quota OPEN question, in a
-  single oracle the checker treats as namespace-linearizable + quota-eventually-consistent.
-covers: [I-quota-commutative, I-quota-crash-safe, I-txninfo-atomic, I-cache-free-ryw]
-provenance: verified
-evidence: ["OMKeyCommitRequest.java:140", "OMKeyCommitRequest.java:191-193", "OMKeyCommitRequest.java:358-360", "OMKeyCommitRequest.java:366", "OMKeyCommitRequest.java:369-372", "OMKeyCommitRequest.java:383-384", "OMKeyCommitRequest.java:410", "leader-execution-locking.md EXC-3", "QuotaOvercommit.cfg (ozone-11898-tla)"]
-```
+This commitKey-with-overwrite walk-through is the oracle form of the catalog test
+`T-quota-concurrent` (N parallel commits whose `Merge` ops fold in Ratis order so `usedBytes`
+stays exact, `UsedConsistent`, even under the soft limit gate, EXC-3). It invents no new test
+id; the assertions above pin `I-quota-commutative`, `I-quota-crash-safe`,
+`I-txninfo-atomic-with-patch`, and `I-cache-free-ryw`, all covered by the catalog.
 
 ---
 
@@ -2299,23 +2287,12 @@ Oracle / asserts:
   path concurrently both reach the open table with distinct `clientID` rows; same-name
   resolution defers to commit.
 
-```yaml
-# T-createfile-missing-parents-oracle  (== T-5/T-8 family at the chain level)
-id: T-createfile-missing-parents-oracle
-statement: >
-  FSO createFile with a missing parent chain decomposes OM-internally into create-b ->
-  await -> create-c -> await -> create-open-file, each a separately-locked transition
-  (I-3), each created node getting one managed index -> one objectID (D-8), the chain
-  revalidating each parent under I-6; a mid-chain failure leaves idempotent empty dirs
-  (D-16/B-2); only the terminal step writes the retry-cache entry.
-rationale: >
-  Pins the multi-step contract (D-6), the iterative mkdir-p reference model (D-16), the
-  per-step lock/release with intentional gap (I-3), and the objectID-window retirement
-  (D-8). The checker linearizes the chain, not the composite request.
-covers: [I-3, I-6, I-managed-index-monotonic, I-cache-free-ryw]
-provenance: verified
-evidence: ["leader-execution-locking.md §4.1", "leader-execution-locking.md I-3", "leader-execution-locking.md I-6", "OmUtils.java:766-783", "D-16", "D-6"]
-```
+This createFile-missing-parents chain is the oracle form of the catalog test `T-5` (deep
+`mkdir -p` vs ancestor rename: the chain revalidates each parent under `I-6` across the
+per-step gap `I-3`), with the mid-chain leader-crash leg exercised by `T-8` (retry re-runs
+the whole request idempotently, terminal step only writes the retry-cache entry). It invents
+no new test id; the assertions above pin `I-3`, `I-6`, `I-managed-index-monotonic`, and
+`I-cache-free-ryw`, all covered by the catalog.
 
 ---
 
@@ -2390,24 +2367,11 @@ Oracle / asserts (this is `T-1` directly, with `T-2` as the after-tombstone leg)
   `EXC-2`); the checker treats subtree reclamation as "converges after background work,"
   not "exact at the linearization point."
 
-```yaml
-# T-rmrf-vs-create-no-orphan  (== T-1, with T-2 leg)
-id: T-rmrf-vs-create-no-orphan
-statement: >
-  rm -rf /a/b (synchronous root tombstone + decomposed per-node-locked background purge)
-  concurrent with create /a/b/c/file yields no orphan under any interleaving: the purge
-  enumerates children under X(node) and removes a node only when childless (I-7); a create
-  resolved before the tombstone meets the purge at the node rendezvous; a create begun
-  after the tombstone fails DIRECTORY_NOT_FOUND (I-5). Subtree quota release is lazy
-  (EXC-1/EXC-2).
-rationale: >
-  This is the single cross-cutting conflict class the whole fine-grained model is built to
-  handle without ancestor locking (F-2 makes ancestors irrelevant for rename; only delete
-  orphans). The no-orphan property is the load-bearing safety claim.
-covers: [I-5, I-6, I-7, I-11]
-provenance: verified
-evidence: ["leader-execution-locking.md §1", "leader-execution-locking.md §4.2", "leader-execution-locking.md I-5", "leader-execution-locking.md I-7", "leader-execution-locking.md F-2", "DirectoryDeletingService.java:324", "DirectoryDeletingService.java:514-534"]
-```
+This `rm -rf` vs concurrent-create walk-through is the oracle form of the catalog test `T-1`
+(ancestor-delete vs descendant-create, no-orphan under any interleaving via the
+enumerate-under-lock purge `I-7`), with `T-2` as the after-tombstone resolve-fail leg. It
+invents no new test id; the assertions above pin `I-5`, `I-6`, `I-7`, and `I-11`, all covered
+by the catalog.
 
 ---
 
@@ -2462,23 +2426,12 @@ Oracle / asserts:
   §15.6 (multi-step partial-state). The `D-OPEN-retry` decision is what *would* harden this
   for the **non-idempotent** ops (SCM alloc + quota `Merge`) — see §15.7.
 
-```yaml
-# T-failover-midorchestration  (== T-8)
-id: T-failover-midorchestration
-statement: >
-  A leader crash after committing some sub-dirs of a createFile leaves the committed
-  sub-steps durable on the quorum; the new leader replays the committed log as plain DB
-  writes with no OM locks (I-10); the client retry re-runs the whole request idempotently
-  (intermediate dir creates are no-ops via I-6 reval), completes the terminal step, and the
-  terminal step's retry-cache entry prevents double-apply. No orphan, no saga state.
-rationale: >
-  Validates the no-persisted-orchestration-state recovery decision (locking §4.3, A) and the
-  leader-local lock discard on failover (I-10) end to end. Failure-injection counterpart of
-  §15.5/§15.6.
-covers: [I-10, I-3, I-6]
-provenance: verified
-evidence: ["leader-execution-locking.md §4.3", "leader-execution-locking.md I-10", "A-2"]
-```
+This leader-failover-mid-orchestration walk-through is the oracle form of the catalog test
+`T-8` (crash after committing some sub-dirs; the new leader discards the in-memory lock table
+`I-10` and replays the committed log; the client retry re-runs idempotently, terminal step
+only writes the retry-cache entry, no double-apply), and is also the failover leg of `T-1`.
+It invents no new test id; the assertions above pin `I-10`, `I-3`, and `I-6`, all covered by
+the catalog.
 
 ---
 
@@ -2562,7 +2515,7 @@ A write becomes durable only when the Ratis entry is **committed to a quorum and
   / `METADATA_ERROR` (`OzoneManagerStateMachine.java:483-505`), exiting the process rather
   than applying further transactions. That is the crash half of crash-and-resync (§15.5).
 
-### 15.4 The `#TRANSACTIONINFO`-with-patch atomicity requirement (S7) — I-txninfo-atomic
+### 15.4 The `#TRANSACTIONINFO`-with-patch atomicity requirement (S7) — I-txninfo-atomic-with-patch
 
 **Invariant (load-bearing).** The data patch and the `#TRANSACTIONINFO` marker (the last
 applied term:index) MUST be written in the **same** atomic RocksDB batch. If they could be
@@ -2578,22 +2531,13 @@ durable write. This is why D-1's op set includes a `Checkpoint` op but the trans
 update is **not** a separate replicated op — it is folded into the same physical batch on
 every node.
 
-```yaml
-# I-txninfo-atomic
-id: I-txninfo-atomic
-statement: >
-  The replicated DB patch (Put/Delete/Merge) and the #TRANSACTIONINFO marker recording the
-  applied term:index MUST be committed in one atomic RocksDB BatchOperation on every node.
-  There must be no window in which the data is durable but the applied-index is not, or
-  vice versa.
-rationale: >
-  A crash between writing data and writing the applied-index causes either re-apply of an
-  already-applied entry (double-counting the commutative quota Merge and re-running
-  soft-deletes — corruption) or a skipped entry (silent data loss). Atomic co-write makes
-  restart recovery exact: the recorded index always matches the durable data.
-provenance: verified
-evidence: ["OzoneManagerDoubleBuffer.java:354", "OzoneManagerDoubleBuffer.java:375-376"]
-```
+This atomicity property is the invariant **I-txninfo-atomic-with-patch** (canonically defined
+in §24). Section 15.4 states the requirement and its evidence in prose; §24 carries the single
+machine-readable block. A crash between writing data and writing the applied-index would cause
+either re-apply of an already-applied entry (double-counting the commutative quota `Merge` and
+re-running soft-deletes — corruption) or a skipped entry (silent data loss); atomic co-write
+makes restart recovery exact, the recorded index always matching the durable data
+(`OzoneManagerDoubleBuffer.java:354`, `:375-376`).
 
 ### 15.5 The crash-and-resync follower contract (D-10)
 
@@ -2625,7 +2569,7 @@ statement: >
 rationale: >
   Validates the crash-and-resync half of D-10: a follower that cannot apply trusted bytes
   must crash and rebuild deterministically, never continue with a divergent DB.
-covers: [I-inner-domain-agnostic, I-txninfo-atomic]
+covers: [I-inner-domain-agnostic, I-txninfo-atomic-with-patch]
 provenance: verified
 evidence: ["OzoneManagerStateMachine.java:483-505", "D-10"]
 ```
@@ -2867,22 +2811,10 @@ cleanly:
   allocation, for exactly the determinism reason (D-10). Secrets are never logged (no secret
   appears in the leader-only audit; only the access-id and action).
 
-```yaml
-# T-security-leader-only-authz-audit
-id: T-security-leader-only-authz-audit
-statement: >
-  ACL evaluation, write-audit emission, and token/secret minting occur only on the leader;
-  the replicated patch crossing Ratis is already authorized and contains the minted bytes;
-  followers apply with no re-authorization, no re-audit, and no re-minting; an authorization
-  failure on the leader fails closed (no patch, access denied).
-rationale: >
-  Encodes the security consequence of D-10: exactly one place makes the security decision and
-  mints identity material, eliminating divergent-authz/divergent-secret across nodes and
-  making the trust boundary the Ratis commit. Fail-closed on unevaluable authz.
-covers: [I-inner-domain-agnostic]
-provenance: verified
-evidence: ["OMKeyCreateRequest.java:198-201", "OMClientRequest.java:243", "OzoneManagerRequestHandler.java:427", "OzoneManagerRequestHandler.java:430", "OMKeyCommitRequest.java:437", "OMGetDelegationTokenRequest.java:175", "OMGetDelegationTokenRequest.java:179", "S3GetSecretRequest.java:157", "S3GetSecretRequest.java:159", "S3GetSecretRequest.java:192"]
-```
+The leader-only authorization/audit/minting property above is exercised by the catalog test
+`T-security-leader-only-authz-audit` (test-plan §4) — leader-only authz/audit/minting is a
+direct consequence of followers running no business logic (`I-determinism-followers-pure`).
+This master section invents no new test id.
 
 ---
 
@@ -2959,22 +2891,10 @@ unchanged.
   with the per-step spans nested under the request span for multi-step ops. This makes the
   inter-step gap (I-3) and the Ratis await (the dominant latency) visible in a single trace.
 
-```yaml
-# T-observability-leader-only-metrics
-id: T-observability-leader-only-metrics
-statement: >
-  Write-path OM metrics (NumKeyAllocates, NumKeyCommits, NumKeys, DataCommittedBytes, and
-  their *Fails) increment only on the leader for a migrated command, because their
-  increments live inside validateAndUpdateCache which is now leader-only; followers expose a
-  distinct apply-health metric set instead; write-audit is emitted only on the leader.
-rationale: >
-  Verifies the observability consequence of D-10 and prevents the false-alarm of "follower
-  write counter flat". Ensures follower health is observable via apply metrics, not absent
-  business metrics.
-covers: [I-inner-domain-agnostic]
-provenance: verified
-evidence: ["OMKeyCreateRequest.java:213", "OMKeyCreateRequest.java:225", "OMKeyCommitRequest.java:176-178", "OMKeyCommitRequest.java:491", "OMKeyCommitRequest.java:496", "OzoneManagerRequestHandler.java:427", "OzoneManagerRequestHandler.java:430", "OzoneManagerDoubleBuffer.java:266"]
-```
+The leader-only write-metrics property above is exercised by the catalog test
+`T-observability-leader-only-metrics` (test-plan §4) — leader-only metric increments are a
+direct consequence of followers running no business logic (`I-determinism-followers-pure`).
+This master section invents no new test id.
 
 ---
 
@@ -3030,7 +2950,7 @@ evidence: ["OMKeyCreateRequest.java:213", "OMKeyCreateRequest.java:225", "OMKeyC
 
 6. **`#TRANSACTIONINFO` atomicity.** The transaction-info marker must be co-written atomically
    with the data patch on the new writer, exactly as the double buffer does today
-   (`OzoneManagerDoubleBuffer.java:375-376`). This is `I-txninfo-atomic` (§15.4) — it is a
+   (`OzoneManagerDoubleBuffer.java:375-376`). This is `I-txninfo-atomic-with-patch` (§15.4) — it is a
    property the new writer must **inherit**, so it is "affected" in the sense that the
    responsibility moves from the double buffer to the patch writer. Affected.
 
@@ -4123,7 +4043,7 @@ status: deferred
 depends_on: [D-7]
 raised_by: [ivandika3, kerneltime]
 addresses: [RC-ivandika-retry-cache-semantics]
-consequences: ["DB batch already idempotent (whole-object puts); only RE-EXECUTION is non-idempotent (SCM alloc + quota Merge) → audit scope ~10 ops, not 47", "atomic-with-data-batch is the likely invariant for non-idempotent ops"]
+consequences: ["DB batch already idempotent (whole-object puts); only RE-EXECUTION is non-idempotent (SCM alloc + quota Merge) → audit scope ~10 ops, not 47", "atomic-with-data-batch is the likely invariant for non-idempotent ops", "P-1 production enablement is GATED: the OBS key path MUST NOT enable the production runtime flag for {CreateKey, CommitKey, AllocateBlock, DeleteKey} until either a durable retry path exists OR those ops are proven safe under client-retry semantics by harness. Dev/staging flag may precede. The non-idempotent-on-re-plan set (SCM block alloc + quota Merge) is what needs the atomic-with-batch retry entry."]
 tests: []
 provenance: verified
 evidence: ["per-command inventory 2026-06-15", "leader-execution-locking.md §10"]
@@ -5268,8 +5188,18 @@ reason the open quota question is **provably** open, not hand-waved):
   (two commits plan at `used=0`, both apply, `used=2 > limit=1`) — `T-quota-exact-tlc`. This
   is what keeps D-OPEN-quota-enforcement **honestly open**: the over-commit is mechanically
   reproducible, so the open question cannot be silently closed.
-- **FSO model — planned.** The FSO linearizability/locking model is **planned**, not yet
-  green (spec §34; this part flags it as a known gap, not a claimed result).
+- **FSO model — green (bounded-exhaustive).** The `FsoAbstract` (atomic per-node oracle) /
+  `FsoImpl` (container/slot objectID-keyed lock manager) models check the FSO
+  namespace+locking tier; `FsoImpl` **refines** the atomic oracle and holds deadlock-freedom
+  and lock-safety. TLC checked it in three increments, all green: **M2a** (tree:
+  createDir/createFile/commitFile/deleteFile/deleteDir-empty + file rename — 26,828,240
+  distinct states, `fso-m2a-full.out`), **M2b** (directory rename with objectID/rename
+  stability + cycle prevention — 32,400,283 distinct states, `fso-m2b-full.out`), and **M3**
+  (recursive delete: tombstone + decomposed per-node-locked purge) green at its tight bound
+  (`FsoM3.cfg`, `MAX_OPS=1`) with the broader `MAX_OPS=2` pass (`FsoM3Full.cfg`) confirming.
+  M3 checks `Accounted` (no *permanent* unaccounted orphan) rather than strict `NoOrphan`
+  because transient mid-purge orphans are by design (EXC-2). This is bounded-exhaustive TLC,
+  not an unbounded proof: green at the stated scope (spec §34).
 
 **Per-phase acceptance** maps into the companion and the phase blocks (§29): P-0
 (`T-cross-thread-release`, `T-objectid-disjoint`, `T-proto-roundtrip`), P-1
@@ -5352,29 +5282,30 @@ it directly.
 | Invariant | Covered by (T-n) |
 |---|---|
 | I-1 | T-2 |
-| I-10 | T-8, T-failover-midorchestration |
-| I-11 | T-3, T-hot-stripe, T-rmrf-vs-create-no-orphan |
+| I-10 | T-8 |
+| I-11 | T-3, T-hot-stripe |
 | I-12 | T-7, T-ryw-from-db |
 | I-2 | T-4, T-6, T-holder-lease-negative |
-| I-3 | T-5, T-createfile-missing-parents-oracle, T-failover-midorchestration |
+| I-3 | T-5 |
 | I-4 | T-7, T-hot-stripe |
-| I-5 | T-1, T-4, T-5, T-deletedir-vs-openfile, T-rmrf-vs-create-no-orphan |
-| I-6 | T-1, T-2, T-4, T-5, T-createfile-missing-parents-oracle, T-deletedir-vs-openfile, T-failover-midorchestration, T-rmrf-vs-create-no-orphan |
-| I-7 | T-1, T-rmrf-vs-create-no-orphan |
+| I-5 | T-1, T-4, T-5, T-deletedir-vs-openfile |
+| I-6 | T-1, T-2, T-4, T-5, T-deletedir-vs-openfile |
+| I-7 | T-1 |
 | I-8 | T-8, T-holder-lease-negative |
 | I-9 | T-cross-thread-release |
 | I-apply-failure-resync | T-apply-failure-resync |
-| I-cache-free-ryw | T-commitkey-quota-overwrite-oracle, T-createfile-missing-parents-oracle, T-createkey-obs-oracle, T-full-suite-green-after-removal, T-no-cache-correctness, T-ryw-from-db |
+| I-cache-free-ryw | T-full-suite-green-after-removal, T-no-cache-correctness, T-ryw-from-db |
 | I-checkpoint-exact-index | T-snapshot-consistency |
-| I-determinism-followers-pure | T-apply-failure-resync, T-determinism-follower-byte-identical |
-| I-inner-domain-agnostic | T-apply-failure-resync, T-createkey-obs-oracle, T-determinism-follower-byte-identical, T-mpu-lifecycle, T-observability-leader-only-metrics, T-proto-roundtrip, T-rolling-upgrade-mixed-binary, T-security-leader-only-authz-audit |
-| I-managed-index-monotonic | T-createfile-missing-parents-oracle, T-flag-routing-both-paths, T-managed-index-monotonic, T-managed-index-restart-continuity, T-mixed-mode-no-collision, T-objectid-disjoint, T-rolling-upgrade-mixed-binary |
+| I-determinism-followers-pure | T-apply-failure-resync, T-determinism-follower-byte-identical, T-observability-leader-only-metrics, T-security-leader-only-authz-audit |
+| I-inner-domain-agnostic | T-apply-failure-resync, T-determinism-follower-byte-identical, T-mpu-lifecycle, T-proto-roundtrip, T-rolling-upgrade-mixed-binary |
+| I-managed-index-monotonic | T-flag-routing-both-paths, T-managed-index-monotonic, T-managed-index-restart-continuity, T-mixed-mode-no-collision, T-objectid-disjoint, T-rolling-upgrade-mixed-binary |
+| I-mixed-mode-cache-coherent | T-mixed-mode-stale-read |
+| I-mixed-mode-lock-gate | T-mixed-mode-cross-model-race |
 | I-mixed-mode-safe | T-mixed-mode-no-collision, T-rolling-upgrade-mixed-binary |
 | I-objectid-disjoint | T-mixed-mode-no-collision, T-objectid-disjoint |
 | I-ondisk-invariance-shield | T-rolling-upgrade-mixed-binary |
-| I-quota-commutative | T-commitkey-quota-overwrite-oracle, T-quota-concurrent, T-quota-exact-tlc, T-quota-failover |
-| I-quota-crash-safe | T-commitkey-quota-overwrite-oracle, T-quota-concurrent, T-quota-exact-tlc, T-quota-failover |
-| I-txninfo-atomic | T-apply-failure-resync, T-commitkey-quota-overwrite-oracle, T-createkey-obs-oracle, T-txninfo-crash-atomicity |
+| I-quota-commutative | T-quota-concurrent, T-quota-exact-tlc, T-quota-failover |
+| I-quota-crash-safe | T-quota-concurrent, T-quota-exact-tlc, T-quota-failover |
 | I-txninfo-atomic-with-patch | T-apply-failure-resync, T-txninfo-crash-atomicity |
 
 *Generated from `T-n covers:` and `I-n tests:` fields; every invariant has at least one test (lint-enforced).*
@@ -5487,7 +5418,7 @@ through it yet; every command still executes on the legacy double-buffer path. P
 proves three invariants in isolation, before any command depends on them: the inner `Batch`
 never deserializes a domain object (`I-inner-domain-agnostic`, from D-1/D-2); the
 `#TRANSACTIONINFO` update is written in the *same* RocksDB `BatchOperation` as the data patch
-so the applied index can never diverge from the data (`I-txninfo-atomic`); and the managed
+so the applied index can never diverge from the data (`I-txninfo-atomic-with-patch`); and the managed
 index is strictly monotonic (`I-managed-index-monotonic`).
 
 **The showstopper it retires.** Two latent mixed-mode hazards that, if not retired *before*
@@ -5528,7 +5459,7 @@ any command migrates, make every later phase unsafe:
    simultaneously, the applied index must remain durable and monotone no matter which engine
    wrote last. P0 extends the `lastSkippedIndex` mechanism so the new path's commits and the
    legacy path's flushes advance one coherent applied index — otherwise a crash in mixed mode
-   could replay or skip entries. This is why `I-txninfo-atomic` is a P0 `must_satisfy`: the
+   could replay or skip entries. This is why `I-txninfo-atomic-with-patch` is a P0 `must_satisfy`: the
    atomicity that the legacy path gets for free from the single-batch flush must be preserved,
    not weakened, when a second writer appears.
 
@@ -5548,7 +5479,7 @@ requires and `ReentrantReadWriteLock` cannot provide, see locking I-9), `T-objec
 ever materializing a domain object) all pass.
 
 ```yaml
-- {id: P-0, scope: "framework substrate (12 components) unwired + legacy→ManagedIndex objectID retrofit + dual-path index durability + cross-model shared bucket-lock gate + migrated-apply cache invalidate/update (D-17)", depends_on_phases: [], must_satisfy: [I-inner-domain-agnostic, I-txninfo-atomic, I-managed-index-monotonic, I-mixed-mode-lock-gate, I-mixed-mode-cache-coherent], must_pass: [T-cross-thread-release, T-objectid-disjoint, T-proto-roundtrip], config_flag: "n/a (inert)", acceptance: "zero behavior change; all unit tests green; lint-spec passes"}
+- {id: P-0, scope: "framework substrate (12 components) unwired + legacy→ManagedIndex objectID retrofit + dual-path index durability + cross-model shared bucket-lock gate + migrated-apply cache invalidate/update (D-17)", depends_on_phases: [], must_satisfy: [I-inner-domain-agnostic, I-txninfo-atomic-with-patch, I-managed-index-monotonic, I-mixed-mode-lock-gate, I-mixed-mode-cache-coherent], must_pass: [T-cross-thread-release, T-objectid-disjoint, T-proto-roundtrip], config_flag: "n/a (inert)", acceptance: "zero behavior change; all unit tests green; lint-spec passes"}
 ```
 
 ---
@@ -5602,7 +5533,7 @@ EXC-3's `UsedConsistent`). Specifically `T-quota-concurrent` and `T-ryw-from-db`
 writes served from RocksDB with no cache, proving D-3) pass.
 
 ```yaml
-- {id: P-1, scope: "hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey", depends_on_phases: [P-0], must_satisfy: [I-quota-commutative, I-cache-free-ryw], must_pass: [T-quota-concurrent, T-ryw-from-db], config_flag: "ozone.om.leader.execution.obs.key.enabled", acceptance: "OBS key path on new model; perf ≥ baseline; quota correct"}
+- {id: P-1, scope: "hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey", depends_on_phases: [P-0], must_satisfy: [I-quota-commutative, I-cache-free-ryw], must_pass: [T-quota-concurrent, T-ryw-from-db], config_flag: "ozone.om.leader.execution.obs.key.enabled", acceptance: "OBS key path on new model; perf ≥ baseline; quota correct; production flag gated on D-OPEN-retry closure (durable retry) for the four non-idempotent ops — dev/staging may precede"}
 ```
 
 ---
@@ -5905,7 +5836,7 @@ not as a settled trade-off. The state of the record:
 ### R-retry — idempotency / retry-cache mechanism (DEFERRED; pending per-op audit)
 
 ```yaml
-- {id: R-retry, statement: "The retry/idempotency mechanism is unfixed: choice between (a) a durable replicated (clientId,callId)→response table written ATOMICALLY WITH THE DATA BATCH plus a leader-local in-flight registry, vs (b) in-memory-only retry state. A re-EXECUTED non-idempotent op (SCM block alloc, quota Merge, table move, soft-delete) double-applies; the DB *batch* is already idempotent (whole-object Puts), so only re-execution is the hazard.", rationale: "Batched Ratis txn answers many clients, so retry/reply-cache semantics under batching are non-trivial (ivandika3). The non-idempotent set dictates which ops need the atomic durable entry; the audit scopes it to ~10 ops, not all 47.", provenance: verified, evidence: ["D-OPEN-retry (status deferred)", "RC-ivandika-retry-cache-semantics", "leader-execution-locking.md §10 retry note", "per-command inventory 2026-06-15"]}
+- {id: R-retry, statement: "The retry/idempotency mechanism is unfixed: choice between (a) a durable replicated (clientId,callId)→response table written ATOMICALLY WITH THE DATA BATCH plus a leader-local in-flight registry, vs (b) in-memory-only retry state. A re-EXECUTED non-idempotent op (SCM block alloc, quota Merge, table move, soft-delete) double-applies; the DB *batch* is already idempotent (whole-object Puts), so only re-execution is the hazard. This risk is the gate on P-1 production enablement (D-OPEN-retry consequence): the OBS key production flag for {CreateKey, CommitKey, AllocateBlock, DeleteKey} is held until durable retry exists or those ops are proven safe under client retry; the quota double-apply leg is the failover path exercised by T-quota-failover (a client retry across a leader crash must not re-apply the quota Merge).", rationale: "Batched Ratis txn answers many clients, so retry/reply-cache semantics under batching are non-trivial (ivandika3). The non-idempotent set dictates which ops need the atomic durable entry; the audit scopes it to ~10 ops, not all 47.", provenance: verified, evidence: ["D-OPEN-retry (status deferred)", "RC-ivandika-retry-cache-semantics", "leader-execution-locking.md §10 retry note", "per-command inventory 2026-06-15"]}
 ```
 
 Deferred, not decided (D-OPEN-retry, `status: deferred`). The shape of the deferral:
@@ -6012,7 +5943,8 @@ A phase is done when **all** of the following hold for that phase:
    flag does not default to legacy is not done — it is a forced migration, which D-14 forbids.
 3. **The formal tier for the phase's behavior refines its oracle.** For phases that touch
    namespace/quota semantics (P1 quota, P2 FSO), the corresponding TLA+ model
-   (`ObsAbstract`/`ObsImpl` for OBS+quota; the planned FSO model) must check green against its
+   (`ObsAbstract`/`ObsImpl` for OBS+quota; `FsoAbstract`/`FsoImpl` for FSO, now green at
+   bounded scope) must check green against its
    accepted oracle. For P1 specifically, the *soft-quota* oracle (`ObsAbstract`) is green;
    the *exact* oracle (`ObsAbstractExact`) is a known counterexample tracked under
    R-quota-enforcement, and whether it must be green is gated on D-OPEN-quota-enforcement.
@@ -6302,12 +6234,19 @@ quota-enforcement risk R-quota-enforcement). The models live in the `ozone-11898
   open quota question, not a bug to be silently fixed. Resolved only when
   D-OPEN-quota-enforcement decides exact (then made green via the leader-local reservation +
   `T-quota-exact-tlc`) or the soft-quota limitation is formally accepted (EXC-3).
-- **FSO model (planned)** — the FSO linearizability model that P2 must check green against the
-  linearizability oracle (the formal counterpart of the T-1..T-8 concurrent harness). Status:
-  planned (the OBS tier is green; the FSO tier is the next formal artifact).
+- **`FsoAbstract` / `FsoImpl`** — the FSO linearizability/locking model that P2 checks green
+  against the atomic per-node oracle (the formal counterpart of the T-1..T-8 concurrent
+  harness). `FsoImpl` (container/slot objectID-keyed lock manager) refines `FsoAbstract`
+  (atomic per-node oracle). Status: **green (bounded-exhaustive)** — M2a (26,828,240 distinct),
+  M2b directory rename (32,400,283 distinct), and M3 recursive delete green at its tight bound
+  (`FsoM3.cfg`) with the broader `MAX_OPS=2` pass confirming. M3 checks `Accounted` (no
+  permanent unaccounted orphan) rather than strict `NoOrphan`, since transient orphans are by
+  design (EXC-2).
 
 Provenance: the OBS tier (`ObsAbstract`/`ObsImpl`/`ObsAbstractExact`) and the
 `QuotaOvercommit.cfg` counterexample are **verified** against the locking companion (EXC-3,
 §9 traceability, D-OPEN-quota-enforcement evidence "TLC counterexample 2026-06-15
-(ozone-11898-tla)"); the FSO model is **inferred/planned** (named as the next tier, not yet
-existing in-tree).
+(ozone-11898-tla)"); the FSO tier (`FsoAbstract`/`FsoImpl`) is now also **verified** —
+bounded-exhaustive TLC green at the stated scope (M2a `fso-m2a-full.out`, M2b
+`fso-m2b-full.out`, M3 tight bound `FsoM3.cfg` with the broader `FsoM3Full.cfg` pass
+confirming; ozone-11898-tla, 2026-06-15).

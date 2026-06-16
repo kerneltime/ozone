@@ -393,7 +393,7 @@ These exceptions are stated so a reviewer reads them as deliberate, not as gaps.
 | I-5 resolve-fail | T-1, T-5 |
 | I-6 reval | T-2, T-5 |
 | I-7 no orphan | T-1 |
-| I-8 no holder lease | (design constraint; checked by absence of any lease path + T-8 no double-apply) |
+| I-8 no holder lease | (design constraint; checked by absence of any lease path + T-holder-lease-negative) |
 | I-9 non-thread-affine | (unit test: acquire on thread A, release on thread B) |
 | I-10 leader-local | T-8 |
 | I-11 deadlock-free | T-3, T-5 (bounded completion = no deadlock; no lock timeout means a hang *is* the signal) |

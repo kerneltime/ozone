@@ -105,7 +105,7 @@ interface: |
     void apply(Batch batch, DBStore store, BatchOperation rocksBatch, MergeOperatorRegistry registry);
   }
 depends_on: [D-1, D-2, F-9]
-implements: [I-inner-domain-agnostic, I-txninfo-atomic]
+implements: [I-inner-domain-agnostic, I-txninfo-atomic-with-patch]
 tests: [T-proto-roundtrip, T-determinism-follower-byte-identical]
 anti_patterns:
   - "MUST NOT import any org.apache.hadoop.ozone.om.* type into the inner proto or the applier — that re-creates the per-command divergence this design exists to kill (ALT-journal-not-dbchanges)."
@@ -147,7 +147,7 @@ mirrors exactly that shape — it iterates `Batch.ops`, translates each `Operati
 C-merge-operator; `CHECKPOINT` triggers the snapshot barrier that
 `splitReadyBufferAtCreateSnapshot` provides today,
 `OzoneManagerDoubleBuffer.java:340`), and writes the managed index into the same
-`BatchOperation` so that **the patch and the index advance atomically** (I-txninfo-atomic).
+`BatchOperation` so that **the patch and the index advance atomically** (I-txninfo-atomic-with-patch).
 The applier reuses the existing `BatchOperation` abstraction
 (`hadoop-hdds/framework/src/main/java/org/apache/hadoop/hdds/utils/db/BatchOperation.java`) so
 the durability and atomicity guarantees the double buffer relies on transfer unchanged.
@@ -502,14 +502,14 @@ interface: |
   // applyTransaction routes: isPlannedPath ? applyBatch(envelope.batch) : runCommand(request, termIndex) [legacy]
   // applyBatch: OperationApplier.apply(batch, store, rocksBatch, mergeRegistry) — NO business logic
 depends_on: [D-10, D-14, D-11, C-replicated-db-module, C-layout-feature, C-orchestrator]
-implements: [I-determinism-followers-pure, I-apply-failure-resync, I-txninfo-atomic, I-mixed-mode-cache-coherent]
+implements: [I-determinism-followers-pure, I-apply-failure-resync, I-txninfo-atomic-with-patch, I-mixed-mode-cache-coherent]
 tests: [T-flag-routing-both-paths, T-rolling-upgrade-mixed-binary, T-apply-failure-resync, T-determinism-follower-byte-identical]
 anti_patterns:
   - "MUST NOT apply a migrated patch without invalidating the written PartialTableCache keys and updating the FullTableCache volume/bucket entries on every node (D-17 I-mixed-mode-cache-coherent) — else legacy/read-op reads go stale."
   - "MUST NOT run validateAndUpdateCache on the new (planned) apply path on ANY node — apply is bytes only (I-determinism-followers-pure); business logic ran once on the leader."
   - "MUST NOT route to the planned path unless BOTH the layout feature is finalized AND the per-command runtime flag is on (D-11 binary-safety gate + D-14 operational revert) — finalization alone is not enough; the flag defaults to legacy."
   - "MUST NOT complete the apply future exceptionally for a critical apply failure — terminate the OM (fail-stop) so a follower that cannot apply a committed patch crashes and re-syncs (D-10, I-apply-failure-resync), matching today's INTERNAL_ERROR/METADATA_ERROR handling."
-  - "MUST NOT advance the applied index without the patch in the same atomic batch (I-txninfo-atomic)."
+  - "MUST NOT advance the applied index without the patch in the same atomic batch (I-txninfo-atomic-with-patch)."
 phase: P-0
 provenance: verified
 evidence:
@@ -564,7 +564,7 @@ path inherits this: a `Batch` that cannot be applied (a genuinely corrupt or une
 operation) terminates the node, which then installs a snapshot / re-syncs from the quorum (D-10
 trades split-brain for loud fail-stop — local failure → crash+resync; uniform failure → loud
 cluster-wide stop). The index advances **in the same atomic batch** as the patch
-(I-txninfo-atomic), mirroring `OzoneManagerDoubleBuffer.java:373-376`, so there is no
+(I-txninfo-atomic-with-patch), mirroring `OzoneManagerDoubleBuffer.java:373-376`, so there is no
 patch-applied-index-not-advanced partial state to recover from.
 
 ---
@@ -947,7 +947,7 @@ tests: [T-no-cache-correctness, T-full-suite-green-after-removal]
 anti_patterns:
   - "MUST NOT remove the double buffer or table cache before EVERY command has migrated AND finalized (P-7 only) — the legacy path needs them through the entire long mixed-mode window; early removal breaks every un-migrated command."
   - "MUST NOT bundle this removal into a feature/migration PR (D-13 / repo convention 'cleanup in separate PRs') — it is irreversible; it lands as its own PR after the migration completes."
-  - "MUST NOT leave the #TRANSACTIONINFO atomic-commit pattern behind when the double buffer goes — the OperationApplier must preserve patch+index atomicity (I-txninfo-atomic), inheriting OzoneManagerDoubleBuffer.java:373-376."
+  - "MUST NOT leave the #TRANSACTIONINFO atomic-commit pattern behind when the double buffer goes — the OperationApplier must preserve patch+index atomicity (I-txninfo-atomic-with-patch), inheriting OzoneManagerDoubleBuffer.java:373-376."
   - "MUST NOT remove the snapshot barrier semantics (splitReadyBufferAtCreateSnapshot) without the Checkpoint op subsuming them (D-1 consequence)."
 phase: P-7
 provenance: verified
@@ -974,7 +974,7 @@ until P-7 — after P-3 (snapshot), P-4 (MPU), P-5 (batch/background), and P-6 (
 migrated their commands (master §29 `depends_on_phases: [P-3, P-4, P-5, P-6]`).
 
 **What replaces them.** The `OperationApplier` (C-replicated-db-module) becomes the **sole RocksDB
-writer**, inheriting the patch+index atomicity (I-txninfo-atomic) — the
+writer**, inheriting the patch+index atomicity (I-txninfo-atomic-with-patch) — the
 `OzoneManagerDoubleBuffer.java:373-376` pattern must be preserved, not dropped. The snapshot
 barrier is subsumed by the `Checkpoint` operation (D-1 consequence — "Checkpoint op subsumes the
 snapshot barrier"). Reads go to RocksDB on NVMe + block cache (D-3); read-your-writes is the lock
