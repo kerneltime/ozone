@@ -5,7 +5,7 @@ date: 2026-06-15
 jira: HDDS-11898
 status: draft
 author: Ritesh Shukla
-evidence_commit: 25585523eeb
+evidence_commit: 3f2c5efd894
 evidence_branch: HDDS-11898-design-docs
 ---
 <!--
@@ -479,7 +479,7 @@ evidence: ["master §29 P-0", "OmUtils.java:766-783", "OzoneManagerStateMachine.
 ### P-1 — Hardest single-step OBS key path
 
 ```yaml
-- {id: P-1, scope: "hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey, CreateBucket, DeleteBucket", depends_on_phases: [P-0], must_satisfy: [I-quota-commutative, I-cache-free-ryw], must_pass: [T-quota-concurrent, T-quota-failover, T-ryw-from-db], config_flag: "ozone.om.leader.execution.obs.key.enabled", acceptance: "OBS key path on new model; perf ≥ baseline; quota correct; production flag gated on D-OPEN-retry closure (durable retry) for the four non-idempotent ops — dev/staging may precede"}
+- {id: P-1, scope: "hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey, CreateBucket, DeleteBucket", depends_on_phases: [P-0], must_satisfy: [I-quota-commutative, I-cache-free-ryw], must_pass: [T-quota-concurrent, T-ryw-from-db, T-quota-failover], config_flag: "ozone.om.leader.execution.obs.key.enabled", acceptance: "OBS key path on new model; perf ≥ baseline; quota correct; production flag gated on D-OPEN-retry closure (durable retry) for the four non-idempotent ops — dev/staging may precede"}
 ```
 
 **Command set.** The OBS halves of C1 CreateKey, C2 CommitKey, C3 AllocateBlock, C4 DeleteKey. (The
@@ -525,7 +525,7 @@ id: P-1
 scope: "OBS halves of CreateKey, CommitKey, AllocateBlock, DeleteKey; structural CreateBucket/DeleteBucket"
 depends_on_phases: [P-0]
 must_satisfy: [I-quota-commutative, I-cache-free-ryw]
-must_pass: [T-quota-concurrent, T-quota-failover, T-ryw-from-db]
+must_pass: [T-quota-concurrent, T-ryw-from-db, T-quota-failover]
 config_flag: "ozone.om.leader.execution.obs.key.enabled"
 acceptance: "OBS key lifecycle on new model; perf ≥ 40k baseline; UsedConsistent holds; flag-routing byte-identical; production flag gated on D-OPEN-retry closure (durable retry) for the four non-idempotent ops — dev/staging may precede"
 provenance: inferred

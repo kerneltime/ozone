@@ -5,7 +5,7 @@ date: 2026-06-15
 jira: HDDS-11898
 status: draft (working — expected to evolve)
 author: Ritesh Shukla
-evidence_commit: 25585523eeb
+evidence_commit: 3f2c5efd894
 evidence_branch: HDDS-11898-design-docs
 ---
 <!--
@@ -170,7 +170,7 @@ placement is specified:
 | AllocateBlock + MPU (5 ops) | §2.1 rows |
 | recursive delete / rm -rf / purge | §4.2 + I-7 |
 | batch (DeleteKeys/RenameKeys) | §5 multi-slot ordered acquisition |
-| SetAcl/SetTimes | expected S(bucket)+S(P)+X(P,name) [Q-setacl-settimes, resolve before P-6] |
+| SetAcl/SetTimes | expected S(bucket)+S(P)+X(P,name) [Q-setacl-settimes-placement, resolve before P-6] |
 | non-namespace ops (volume/tenant/token/secret single-table) | no container/slot lock needed (single-row Put/Delete; volume-lock escape hatch is the only future concern per §10) |
 
 ---
@@ -233,6 +233,16 @@ placement is specified:
 - **I-12 (cache-free correctness).** Read-your-writes is provided by I-2 (a same-key
   successor blocks until the predecessor's bytes are in RocksDB) — not by any in-memory
   cache (D-PARENT-3). No correctness property may depend on a cache.
+- **I-13 (acquire is failure-atomic — correctness-critical).** `acquire()` MUST release
+  any already-acquired permits, **in reverse order**, if it throws partway through the
+  multi-stripe loop; **no partial hold may escape**. If the K-th of M acquisitions throws
+  after K-1 permits are held, those K-1 permits are released before the throw propagates,
+  so the caller's `finally` sees either a complete handle or nothing — never K orphaned
+  permits. **Negative constraint:** an orphaned permit must NOT be allowed to leak and
+  block its stripe until failover. With no lock timeout (B-3/I-8) and no reaper (I-10) to
+  reclaim it, a leaked permit — especially an X-drain holding a stripe's full N permits —
+  would deadlock that stripe for the remaining leader term. Testable via
+  **T-acquire-failure-atomic** (§7); see the §6 sketch for the release-on-throw structure.
 
 ---
 
@@ -319,6 +329,18 @@ per-type maps, no tracker, no refcount, no timer.
   Releasable on any thread; fairness prevents writer starvation.
 - **Handle-owned release.** `acquire(sortedReqs)` returns a handle; the op releases it in
   its completion path (commit or failure), possibly on the continuation thread.
+- **`acquire()` is failure-atomic** (I-13). `acquire(sortedDedupedReqs)` takes permits
+  across the M stripes in sorted order one at a time. If the K-th of M acquisitions throws
+  (`InterruptedException`, semaphore error) after K-1 permits are already held, `acquire()`
+  MUST release those K-1 already-acquired permits **in reverse order** before propagating
+  the throw — equivalently, it builds the handle incrementally and releases-on-throw. No
+  partial hold may escape: the caller's `finally` sees **either a complete handle or
+  nothing**, never K orphaned permits. This is correctness-critical precisely because there
+  is no lock timeout (B-3/I-8) and no reaper (I-10): an orphaned permit — especially an
+  X-drain holding a whole stripe's N permits — would block that stripe until failover.
+  Required negative test: **T-acquire-failure-atomic** (inject a throw on the K-th stripe
+  acquire; assert the K-1 prior permits are fully released and the stripe is immediately
+  re-acquirable).
 - **No lock timeout** (I-8). The timeout that matters lives on the **Ratis request**
   (existing). When the Ratis op times out or errors, the holder fails and releases the
   lock in its `finally`. A waiter simply waits — Ratis guarantees the holder commits-or-
@@ -329,9 +351,16 @@ per-type maps, no tracker, no refcount, no timer.
 Sketch:
 ```
 acquire(sortedReqs) -> Handle:                 // reqs pre-sorted (§5), deduped by stripe to strongest mode
+  acquired = []                                // build the handle incrementally
   for (stripeIdx, mode) in sortedReqs:
      sem = stripes[stripeIdx]
-     sem.acquire(mode == SHARED ? 1 : N)       // blocks until available; no timeout
+     try:
+        sem.acquire(mode == SHARED ? 1 : N)    // blocks until available; no timeout
+     catch (InterruptedException | error):     // failure-atomic (I-13): the K-th throws after K-1 held
+        for (s, m) in reverse(acquired):       // release the K-1 already-held permits, reverse order
+           stripes[s].release(m == SHARED ? 1 : N)
+        throw                                  // propagate; caller's finally sees nothing, no orphan
+     acquired.append((stripeIdx, mode))        // only record after the permit is actually held
   return Handle(acquired)
 release(Handle):                               // any thread
   for (stripeIdx, mode) in reverse(acquired):
@@ -387,6 +416,11 @@ and subtree reclamation are **eventually consistent** and the checker treats the
 - **T-8 leader failover mid-orchestration** — crash after committing some sub-dirs of a
   `createFile`. Asserts client retry completes idempotently; no orphan; no double-apply
   (retry-cache on terminal step).
+- **T-acquire-failure-atomic (negative)** — drive `acquire()` over a multi-stripe sorted
+  set and inject a throw (`InterruptedException` / semaphore error) on the K-th stripe
+  acquire after K-1 permits are held. Asserts the K-1 already-acquired permits are released
+  in reverse order, every touched stripe is immediately re-acquirable (no orphaned
+  X-drain), and the throw propagates so the caller's `finally` sees no handle (I-13).
 
 ---
 
@@ -446,9 +480,10 @@ These exceptions are stated so a reviewer reads them as deliberate, not as gaps.
 | I-10 leader-local | T-8 |
 | I-11 deadlock-free | T-3, T-5 (bounded completion = no deadlock; no lock timeout means a hang *is* the signal) |
 | I-12 cache-free RYW | T-7 (successor reads predecessor's committed bytes) |
+| I-13 acquire failure-atomic | T-acquire-failure-atomic (mid-loop throw releases K-1 held permits in reverse; no orphaned permit; caller's finally sees no handle) |
 | B-1 stripe sizing | T-7 (throughput under hot parent) |
 | EXC-1/EXC-2 | linearizability checker treats quota/purge as eventually-consistent |
-| EXC-3 soft quota | `UsedConsistent` holds (counter exact); `QuotaOvercommit.cfg` is the configured red oracle expected to yield the over-commit counterexample vs the exact oracle (TLA+ model `ObsImpl`); captured TLC verdict pending (artifact capture owned by the TLA effort) |
+| EXC-3 soft quota | `UsedConsistent` holds (counter exact); `QuotaOvercommit.cfg` is the configured red oracle expected to yield the over-commit counterexample vs the exact oracle (exact oracle `ObsAbstractExact`); captured TLC verdict pending (artifact capture owned by the TLA effort) |
 
 ---
 

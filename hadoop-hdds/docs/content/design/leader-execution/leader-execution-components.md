@@ -5,7 +5,7 @@ date: 2026-06-15
 jira: HDDS-11898
 status: draft
 author: Ritesh Shukla
-evidence_commit: 25585523eeb
+evidence_commit: 3f2c5efd894
 evidence_branch: HDDS-11898-design-docs
 ---
 <!--

@@ -133,16 +133,26 @@ for ph in sorted(pn):
     if len(pn[ph]) > 1:
         fails.append(f'P-n DIVERGENCE: {ph} must_pass set differs across representations -> {[sorted(s) for s in pn[ph]]}')
 
-# 8. a T-/I- id defined more than once must carry the SAME covers: set (aliases with divergent covers forbidden)
-cov_by_id = defaultdict(set)
+# 8. an id in >1 id: block must carry the SAME covers AND provenance (divergent metadata across duplicate blocks forbidden, per §A "exactly one id: block")
+meta_by_id = defaultdict(set)
 for d in DOCS:
     for mm in re.finditer(r'\bid:\s*([IT]-[A-Za-z0-9\-]+)(.*?)(?=\n\s*id:|\n#+\s|\Z)', open(docpath(d)).read(), re.S):
         cv = re.findall(r'covers:\s*\[([^\]]*)\]', mm.group(2))
-        if cv:
-            cov_by_id[mm.group(1)].add(frozenset(re.findall(r'I-[A-Za-z0-9\-]+', cv[0])))
-for idn in sorted(cov_by_id):
-    if len(cov_by_id[idn]) > 1:
-        fails.append(f'DUPLICATE-ID divergent covers: {idn} -> {[sorted(s) for s in cov_by_id[idn]]}')
+        prov = re.findall(r'provenance:\s*([A-Za-z]+)', mm.group(2))
+        covset = frozenset(re.findall(r'I-[A-Za-z0-9\-]+', cv[0])) if cv else frozenset()
+        meta_by_id[mm.group(1)].add((covset, prov[0] if prov else ''))
+for idn in sorted(meta_by_id):
+    metas = meta_by_id[idn]
+    if len(metas) > 1:
+        covs = {m[0] for m in metas}
+        provs = {m[1] for m in metas if m[1]}
+        detail = []
+        if len(covs) > 1:
+            detail.append(f'covers {[sorted(c) for c in covs]}')
+        if len(provs) > 1:
+            detail.append(f'provenance {sorted(provs)}')
+        if detail:
+            fails.append(f'DUPLICATE-ID divergent metadata: {idn} -> ' + '; '.join(detail))
 
 # ---- report ----
 print(f"DEFINED by family: {dict(sorted(Counter(k.split('-')[0] for k in defined).items()))}")

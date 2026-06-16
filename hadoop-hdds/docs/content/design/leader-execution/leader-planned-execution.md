@@ -5,7 +5,7 @@ date: 2026-06-15
 jira: HDDS-11898
 status: draft
 author: Ritesh Shukla
-evidence_commit: 25585523eeb
+evidence_commit: 3f2c5efd894
 evidence_branch: HDDS-11898-design-docs
 ---
 <!--
@@ -1834,15 +1834,17 @@ potentially SCM **without dragging OM domain types into it** (D-2 consequences).
 
 ### 12.1 The invariant that defines the inner layer
 
-```yaml
-# I-inner-domain-agnostic
-id: I-inner-domain-agnostic
-statement: "The inner replicated-DB layer (Batch / Operation) carries ONLY opaque bytes — (columnFamily, key, value) and an operation tag. It MUST NEVER deserialize, reference, or depend on any OM domain type (OmKeyInfo, OmBucketInfo, OMRequest, OMResponse, …). Apply on any node is: route the bytes to a column family and Put/Delete/Merge/Checkpoint them. No business logic, no type knowledge."
-rationale: "This is the property that (a) makes followers incapable of divergence (D-10 — they copy bytes, they cannot compute a different result), and (b) lets the module be extracted and reused (Recon-as-listener, follower reads, SCM) without an OM dependency (D-2). If the inner layer ever deserialized a domain object, both properties collapse: apply becomes per-command business logic again (today's F-7 problem), and the module is no longer agnostic."
-covers: []
-provenance: inferred
-evidence: ["D-1", "D-2", "PR#7583 review (errose28: 'Put/Delete/Merge/Checkpoint' agnostic module)"]
-```
+The inner replicated-DB layer (`Batch` / `Operation`) carries ONLY opaque bytes —
+`(columnFamily, key, value)` and an operation tag. It MUST NEVER deserialize, reference, or
+depend on any OM domain type (`OmKeyInfo`, `OmBucketInfo`, `OMRequest`, `OMResponse`, …).
+Apply on any node is: route the bytes to a column family and Put/Delete/Merge/Checkpoint
+them — no business logic, no type knowledge. This is the property that (a) makes followers
+incapable of divergence (D-10 — they copy bytes, they cannot compute a different result),
+and (b) lets the module be extracted and reused (Recon-as-listener, follower reads, SCM)
+without an OM dependency (D-2). If the inner layer ever deserialized a domain object, both
+properties collapse: apply becomes per-command business logic again (today's F-7 problem),
+and the module is no longer agnostic. This is a restatement of `I-inner-domain-agnostic`
+(canonical definition: §24); the structured block with its provenance and tests lives there.
 
 **Negative constraints (anti-patterns the proto must make impossible):**
 - The inner `Operation` MUST NOT contain an `OMRequest`, an `OMResponse`, an `OmKeyInfo`, or
@@ -1976,15 +1978,13 @@ message ClientRequestInfo {
 }
 ```
 
-```yaml
-# I-managed-index-monotonic
-id: I-managed-index-monotonic
-statement: "managed_index is assigned by a single leader-side ManagedIndexService, is strictly monotonic, never reused, and on finalization is seeded to max(persisted Ratis applied index)+1. objectID = getObjectIdFromTxId(epoch, managed_index) keeps the exact F-11a encoding. Legacy (Ratis-index-derived) and new (managed-index-derived) objectIDs are disjoint by construction for the whole mixed-mode window."
-rationale: "Identity must not collide across the legacy/new boundary during a long rolling upgrade (D-12); monotonic-never-reused preserves F-3 (objectIDs never alias) so ABA-safety in the locking companion (F-3 there) still holds. Seeding at max(Ratis idx)+1 is what makes the two ranges disjoint."
-covers: []
-provenance: inferred
-evidence: ["D-8", "D-12", "hadoop-ozone/common/src/main/java/org/apache/hadoop/ozone/OmUtils.java:766-793", "leader-execution-locking.md §4.1"]
-```
+The `managed_index` field above is governed by `I-managed-index-monotonic` (canonical
+definition: §24): it is assigned by a single leader-side `ManagedIndexService`, is strictly
+monotonic, never reused, and on finalization is seeded to `max(persisted Ratis applied
+index)+1`. `objectID = getObjectIdFromTxId(epoch, managed_index)` keeps the exact F-11a
+encoding, so legacy (Ratis-index-derived) and new (managed-index-derived) objectIDs are
+disjoint by construction for the whole mixed-mode window (D-12). The structured block with
+its provenance, evidence, and tests lives in §24; the proto field is constrained by it here.
 
 ### 12.4 Retry / idempotency (OPEN — D-OPEN-retry, deferred)
 
@@ -2490,7 +2490,7 @@ For a migrated single-step write, the ordered seams and their throw-state are:
 | S1 | Client→leader RPC receive | RPC layer | No mutation; client retries or sees transport error. Clean. |
 | S2 | `preExecute`: SCM `allocateBlock` RPC | `OMKeyCreateRequest.java:165` (in `preExecute`, `:89`) | No DB mutation, no Ratis entry. Block IDs from SCM may be *pre-allocated but unused* (leaked block IDs) — reclaimed by SCM's own GC; the OM write simply fails and the client retries. Pre-Ratis, so no replication concern. |
 | S3 | `preExecute`: ACL/authorize | `resolveBucketAndCheckKeyAcls(...)` `OMKeyCreateRequest.java:198-201`; `checkAcls` `OMClientRequest.java:243,341,365` | Authorization denial → request rejected before any DB patch. Fail-closed (§17). No partial state. |
-| S4 | Lock acquire | LockMgr (locking companion §6) | Blocks (no timeout, I-8); on a genuine hang, failover + client RPC timeout recover (B-3). A throw here (e.g. interrupted) releases nothing because nothing else is held yet for this op. |
+| S4 | Lock acquire | LockMgr (locking companion §6) | Blocks (no timeout, I-8); on a genuine hang, failover + client RPC timeout recover (B-3). The acquire takes permits across stripes in sorted order: a throw after K of M acquisitions (e.g. interrupted) leaves K permits held, but `acquire()` is **failure-atomic** — it releases those K in reverse order on throw (build-the-handle-incrementally, release-on-throw; see the locking spec's lock-manager failure-atomicity contract) — so the caller's `finally` sees **either a complete LockHandle or nothing**, never K orphaned permits. This matters because there is no lock timeout (B-3/I-8) and no reaper (I-10): an orphaned permit (especially an X-drain) would block a whole stripe until failover. |
 | S5 | RocksDB **read** for reval | e.g. `OMKeyCommitRequest.java:225-226` | A read failure throws before the patch is built; the op fails, locks release in `finally`, no Ratis entry. Clean. |
 | S6 | Ratis **submit/await** | state machine `applyTransaction` boundary, `OzoneManagerStateMachine.java:447` | See §15.3 — the load-bearing seam. The patch is either fully committed-and-applied or not committed at all (quorum atomicity). |
 | S7 | RocksDB **batch apply** (incl. `#TRANSACTIONINFO`) | `OzoneManagerDoubleBuffer.flushBatch` `:354`, co-write `:375-376` | See §15.4 — the patch and the transaction-info marker land in **one** atomic `BatchOperation`; partial application is not possible by construction. |
@@ -2706,23 +2706,15 @@ its own managed index — the low 8 bits go dead-zero (D-8 consequences; locking
 §4.1). This retrofit is what makes mixed-mode collision-free; it is Phase P-0
 (`I-managed-index-monotonic`, `T-objectid-disjoint`, `T-mixed-mode-no-collision`).
 
-```yaml
-# I-managed-index-monotonic
-id: I-managed-index-monotonic
-statement: >
-  Object identity (objectID/updateID) is sourced from exactly one monotonic ManagedIndex
-  counter on BOTH the legacy and new execution paths during mixed mode; the counter is
-  seeded at finalization to max(observed Ratis index)+1 so new objectIDs are strictly
-  greater than any legacy objectID; the encoding getObjectIdFromTxId(epoch,index) is
-  unchanged.
-rationale: >
-  During the unbounded mixed-binary/mixed-flag window, two counters minting objectIDs could
-  collide and alias two distinct objects (silent corruption). One shared monotonic counter,
-  seeded above the legacy high-water mark, makes old and new objectID ranges disjoint by
-  construction.
-provenance: verified
-evidence: ["OmUtils.java:766-769", "OmUtils.java:778-783", "OmUtils.java:761-763", "OMLayoutFeature.java:47", "D-12", "D-8"]
-```
+This is `I-managed-index-monotonic` applied to the mixed-mode boundary (canonical definition:
+§24): object identity (objectID/updateID) is sourced from exactly one monotonic ManagedIndex
+counter on BOTH the legacy and new execution paths during mixed mode; the counter is seeded
+at finalization to `max(observed Ratis index)+1` so new objectIDs are strictly greater than
+any legacy objectID; the encoding `getObjectIdFromTxId(epoch,index)` is unchanged. Two
+counters minting objectIDs in the unbounded mixed-binary/mixed-flag window could collide and
+alias two distinct objects (silent corruption); one shared monotonic counter, seeded above
+the legacy high-water mark, makes old and new objectID ranges disjoint by construction. The
+structured block with its provenance, evidence, and tests lives in §24.
 
 ### 16.4 Downgrade stance
 
@@ -4281,7 +4273,7 @@ This is the invariant that **kills today's divergence class**. Today
 (`OzoneManagerStateMachine.java:668` → `OzoneManagerRequestHandler.handleWriteRequest`,
 called from `runCommand` at line 671, itself dispatched from `applyTransaction` at line
 447), so any non-determinism or version skew in that logic silently produces different DB
-states on different nemes. Reducing apply to byte-writes removes the per-command-unique
+states on different nodes. Reducing apply to byte-writes removes the per-command-unique
 re-execution step entirely (this is exactly the point xichen01 raised — RC-xichen-journal-vs-dbchanges
 — and the reason a **journal of commands** was rejected as ALT-journal-not-dbchanges:
 re-applying an abstract command is the divergence source; applying bytes is how consensus

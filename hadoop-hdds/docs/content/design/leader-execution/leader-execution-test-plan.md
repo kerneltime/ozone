@@ -5,7 +5,7 @@ date: 2026-06-15
 jira: HDDS-11898
 status: draft
 author: Ritesh Shukla
-evidence_commit: 25585523eeb
+evidence_commit: 3f2c5efd894
 evidence_branch: HDDS-11898-design-docs
 ---
 <!--
@@ -328,9 +328,11 @@ The models live in the sibling worktree `ozone-11898-tla` (referenced from
   `ObsAbstract.tla` via the refinement mapping `Refinement`, with safety invariants
   `LockInv`, `NoLeak`, `UsedConsistent`.
   *(evidence: `ozone-11898-tla/ObsImpl.cfg`, `ozone-11898-tla/ObsAbstract.tla`)*
-- **Bound**: `KEYS={0,1}`, `CLIENTS={0}`, `PROPS={0,1}`, `Procs={1,2}` (two concurrent
-  processes), `STRIPES=2`, `MAX_OPS=2`, `QUOTA_LIMIT=1`, `SORTED=TRUE` (deadlock-free total
-  order enabled). *(evidence: `ozone-11898-tla/ObsImpl.cfg`)*
+- **Bound**: `KEYS={0,1}`, `CLIENTS={0}`, `PROPS={0,1}`, `Procs={1,2,3}` (three concurrent
+  processes — matching the captured `obs3-verdict.out` run below), `STRIPES=2`, `MAX_OPS=2`,
+  `QUOTA_LIMIT=1`, `SORTED=TRUE` (deadlock-free total order enabled).
+  *(evidence: `ozone-11898-tla/ObsImpl3.cfg`; `ozone-11898-tla/ObsImpl.cfg` is the smaller 2-proc
+  companion config — the 3-proc result is strictly stronger and is the captured verdict cited below)*
 - **Verdict — GREEN.** `Model checking completed. No error has been found.` —
   **199,872,156 states generated, 60,976,791 distinct**, state-graph depth **55**, finished
   in **1h 02min** (2026-06-15). The fingerprint-collision probability TLC reports is
@@ -342,7 +344,11 @@ The models live in the sibling worktree `ozone-11898-tla` (referenced from
   lock model + soft-quota merge **refines** the abstract oracle (every concrete behavior is a
   legal abstract behavior) and never violates mutual exclusion (`LockInv`), never leaks a lock
   (`NoLeak`), and never loses/double-counts a quota update (`UsedConsistent`). This is the
-  formal backstop for `I-2`, `I-8`, `I-12`, and the soft-quota `UsedConsistent` claim.
+  formal backstop for `I-2`, `I-12`, and the soft-quota `UsedConsistent` claim. `I-8` (no holder
+  lease) is NOT a TLA-checked property — the OBS model is lease-free by construction (`ObsImpl.tla`
+  has no lease mechanism; its checked properties are `LockInv`, `NoLeak`, `UsedConsistent`); `I-8`
+  is asserted by the absence of any lease code path + `T-holder-lease-negative` (Java), per this
+  doc's §2.4 (line ~297) and `leader-execution-locking.md` §9.
 
 ### 3.3 The FSO model (now exists; M2a/M2b bounded-green, M3 verdict pending — M3Full aborted disk-full)
 
@@ -423,7 +429,8 @@ remaining work as wider-configuration runs (including a re-run of M3Full with ad
   *(evidence: `ozone-11898-tla/QuotaOvercommit.cfg`, `ozone-11898-tla/ObsAbstractExact.tla:1-4`
   header "EXACT-quota variant … ObsImpl does NOT refine this oracle", and the exact gate at
   `ObsAbstractExact.tla` `ACommitKey`: `(n \in acommitted) \/ (aused + 1 <= QUOTA_LIMIT)`)*
-- **Verdict — INTENTIONALLY RED.** TLC reports `RefinementExact` violated with the trace
+- **Expected verdict (configured red oracle; capture pending): RefinementExact VIOLATED.** TLC is
+  configured to report `RefinementExact` violated with the trace
   "two concurrent commits to different keys both pass the quota check at `used=0` and both
   apply, reaching `used=2 > QUOTA_LIMIT=1`." This is the **mechanically reproducible
   counterexample** that confirms the soft-quota over-commit is real (not a hand-wave) and
@@ -609,15 +616,33 @@ evidence: ["leader-planned-execution.md D-7 tests, ALT-quota-reserved-static (re
 id: T-quota-exact-tlc
 statement: >
   The formal pin for D-OPEN-quota-enforcement. Run QuotaOvercommit.cfg: check ObsImpl against
-  the EXACT-quota oracle ObsAbstractExact via RefinementExact. TODAY: TLC reports RefinementExact
-  VIOLATED with the two-commits-at-used=0-both-apply-to-used=2>limit=1 trace — this DOCUMENTS
+  the EXACT-quota oracle ObsAbstractExact via RefinementExact. EXPECTED (capture pending): TLC is
+  configured to report RefinementExact VIOLATED with the two-commits-at-used=0-both-apply-to-used=2>limit=1
+  trace — this DOCUMENTS
   the accepted soft-quota over-commit (EXC-3) as a mechanically reproducible counterexample.
   IF D-OPEN-quota-enforcement resolves to EXACT (leader-local atomic reservation): the same
   config must turn GREEN (ObsImpl+reservation refines ObsAbstractExact). The test is the same
   artifact in both worlds; only the expected verdict flips.
 covers: [I-quota-commutative]
-provenance: verified
+provenance: inferred
+provenance_note: configured red oracle; captured TLC verdict pending. QuotaOvercommit.cfg checks ObsImpl against ObsAbstractExact via RefinementExact and is CONFIGURED to fail (exact gate the soft impl deliberately does not refine), but no QuotaOvercommit.out has been captured — the expected "RefinementExact violated" trace is documented in the config header, not yet observed from a run. Flips to verified once the verdict is captured.
 evidence: ["ozone-11898-tla/QuotaOvercommit.cfg (PROPERTY RefinementExact; documented expected 'RefinementExact violated' trace)", "ozone-11898-tla/ObsAbstractExact.tla (exact gate aused+1<=QUOTA_LIMIT)", "leader-planned-execution.md D-OPEN-quota-enforcement (TLC counterexample 2026-06-15)"]
+```
+```yaml
+# T-acquire-failure-atomic
+id: T-acquire-failure-atomic
+statement: >
+  Lean lock-manager acquire() failure-atomicity (I-13). Drive acquire(sortedDedupedReqs) over a
+  multi-stripe acquisition and inject a throw (InterruptedException / semaphore error) on the K-th
+  of M permits, after K-1 are already held. Assert: the K-1 held permits are released in REVERSE
+  order before the throw propagates; the affected stripe (especially an X-drain holding all N
+  permits) is immediately re-acquirable; the caller's finally sees NO LockHandle (never a partial
+  hold). No orphaned permit survives to block its stripe until failover — there is no timeout
+  (B-3/I-8) and no reaper (I-10) to reclaim it.
+covers: [I-13]
+provenance: inferred
+provenance_note: negative test for the failure-atomic acquire() contract; the lean lock manager is not yet built, so this is specified-but-not-implemented (inferred). Flips to verified once the manager exists and the test runs.
+evidence: ["leader-execution-locking.md §3 I-13 (acquire is failure-atomic)", "leader-execution-locking.md §6 sketch (release-on-throw in reverse)", "leader-execution-locking.md §7 T-acquire-failure-atomic + §9 traceability (I-13)"]
 ```
 ```yaml
 # T-batch-quota-no-double-decrement
@@ -1020,7 +1045,7 @@ this column and listed once below the table, exactly as the master §29 prose tr
 | Phase | Scope (abbrev.) | Gating T-n (must pass) | Formal-tier gate |
 |---|---|---|---|
 | **P-0** | Framework substrate (12 components) unwired + legacy→ManagedIndex objectID retrofit + dual-path index durability | `T-cross-thread-release`, `T-objectid-disjoint`, `T-proto-roundtrip`, `T-mixed-mode-cross-model-race`, `T-mixed-mode-stale-read` | (substrate; no model gate — models exercise P-1/P-2 behavior) |
-| **P-1** | Hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey | `T-quota-concurrent`, `T-quota-failover`, `T-ryw-from-db` | **OBS model green** (`ObsImpl.cfg`: Refinement + LockInv + NoLeak + UsedConsistent) — `obs3-verdict.out` |
+| **P-1** | Hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey | `T-quota-concurrent`, `T-ryw-from-db`, `T-quota-failover` | **OBS model green** (`ObsImpl.cfg`: Refinement + LockInv + NoLeak + UsedConsistent) — `obs3-verdict.out` |
 | **P-2** | Hardest multi-step FSO: CreateFile/CreateDirectory (implicit parents), FSO delete, recursive rm-rf + DirectoryDeletingService redesign | `T-1`, `T-2`, `T-3`, `T-4`, `T-5`, `T-6`, `T-7`, `T-8` | **FSO model M2a/M2b green** (Refinement + LockInv + NoLeak — orphan-freedom established via the refinement, not via a `NoOrphan` invariant, which the model does not define) — M2a `fso-m2a-full.out` (26.8M distinct), M2b directory rename `fso-m2b-full.out` (32.4M distinct); M3 recursive delete (`Accounted`) tight bound `FsoM3.cfg` configured, verdict capture pending; M3Full `MAX_OPS=2` (`fso-m3-full.out`) aborted disk-full — no verdict, M3 not green |
 | **P-3** | Snapshot: CreateSnapshot/Checkpoint op, SnapshotPurge standalone, moves | `T-snapshot-consistency` | (FSO model extension for Checkpoint-vs-op ordering: planned) |
 | **P-4** | MPU (4 ops + AbortExpired) + large-value ([HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)) revisit | `T-mpu-lifecycle` | n/a |
