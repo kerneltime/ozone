@@ -413,10 +413,11 @@ and subtree reclamation are **eventually consistent** and the checker treats the
     equals the true committed size (no double-count, no lost decrement). Only the *limit
     gate* is soft. (Formally: invariant `UsedConsistent` holds; only refinement against an
     *exact*-quota oracle fails.)
-  - **Evidence:** mechanically reproducible — `QuotaOvercommit.cfg` checks the model against
-    `ObsAbstractExact` and TLC returns the counterexample (two commits plan at `used=0`, both
-    apply, `used=2 > limit=1`). The accepted oracle `ObsAbstract` models quota as soft and
-    the model refines it (green).
+  - **Evidence:** `QuotaOvercommit.cfg` is the configured red oracle expected to yield the
+    over-commit counterexample (two commits plan at `used=0`, both apply, `used=2 > limit=1`),
+    checking the model against `ObsAbstractExact`; captured TLC verdict pending (artifact
+    capture owned by the TLA effort). The accepted oracle `ObsAbstract` models quota as soft and
+    the model is expected to refine it.
   - **Mitigation (separate effort, out of scope for this design):** exact enforcement is
     delegated to (a) the existing background `QuotaRepair` reconcile, and/or (b) a future
     leader-local atomic reservation (atomic check-and-reserve in memory, DB merge remains the
@@ -442,17 +443,17 @@ These exceptions are stated so a reviewer reads them as deliberate, not as gaps.
 | I-12 cache-free RYW | T-7 (successor reads predecessor's committed bytes) |
 | B-1 stripe sizing | T-7 (throughput under hot parent) |
 | EXC-1/EXC-2 | linearizability checker treats quota/purge as eventually-consistent |
-| EXC-3 soft quota | `UsedConsistent` holds (counter exact); `QuotaOvercommit.cfg` reproduces the over-commit vs the exact oracle (TLA+ model `ObsImpl`) |
+| EXC-3 soft quota | `UsedConsistent` holds (counter exact); `QuotaOvercommit.cfg` is the configured red oracle expected to yield the over-commit counterexample vs the exact oracle (TLA+ model `ObsImpl`); captured TLC verdict pending (artifact capture owned by the TLA effort) |
 
 ---
 
 ## 10. Open items (to refine as we proceed)
 
-- Multipart upload (FSO/OBS) lock placement and the large-value ([HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)) concern.
+- Multipart upload (FSO/OBS) **lock placement** is now specified in §2.1 (the 5 MPU rows: Initiate/CommitPart/Complete/Abort/AbortExpired); only the large-value ([HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)) concern remains open.
 - hsync / lease-recovery interaction with `X(parent, file)` on commit.
 - Exact merge-operator interaction for FSO directory mtime updates on cross-parent rename.
 - Snapshot (`Checkpoint` op) ordering vs. in-flight fine-grained ops.
-- `SetAcl`/`SetTimes`/`AllocateBlock` placement (expected: `S(bucket)+S(P)+X(P,name)`).
+- `SetAcl`/`SetTimes` placement (expected: `S(bucket)+S(P)+X(P,name)`). (`AllocateBlock` placement is now specified in §2.1.)
 - Volume-lock escape hatch: none today (no volume rename); builder-extensible if a future
   volume op can invalidate an in-flight key op.
 - **Retry / idempotency mechanism — DEFERRED (parent-level decision; gates the framework's

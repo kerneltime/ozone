@@ -437,7 +437,7 @@ mergeable):**
   (D-8). Tests: `T-objectid-disjoint`, `T-mixed-mode-no-collision`.
 - **PR-0b** — Dual-path applied-index durability (§3.2). Extend `lastSkippedIndex`
   (`OzoneManagerStateMachine.java:108-111,242-269,582`) to a dual-path crash-consistent stamp.
-  Tests: `T-txninfo-atomic` (crash mid-apply re-applies exactly once).
+  Tests: `T-txninfo-crash-atomicity` (crash mid-apply re-applies exactly once).
 - **PR-0c** — `OMLayoutFeature.LEADER_SIDE_EXECUTION(10)` + finalization gate (§3.3); `PersistDb`
   proto + `#MANAGED_INDEX` entry, additive and inert. Tests: `T-rolling-upgrade-mixed-binary`.
 - **PR-0d** — replicated-DB module (`Batch{Put/Delete/Merge/Checkpoint}`) in `hadoop-hdds/framework`
@@ -477,7 +477,7 @@ evidence: ["master §29 P-0", "OmUtils.java:766-783", "OzoneManagerStateMachine.
 ### P-1 — Hardest single-step OBS key path
 
 ```yaml
-- {id: P-1, scope: "hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey", depends_on_phases: [P-0], must_satisfy: [I-quota-commutative, I-cache-free-ryw], must_pass: [T-quota-concurrent, T-ryw-from-db], config_flag: "ozone.om.leader.execution.obs.key.enabled", acceptance: "OBS key path on new model; perf ≥ baseline; quota correct; production flag gated on D-OPEN-retry closure (durable retry) for the four non-idempotent ops — dev/staging may precede"}
+- {id: P-1, scope: "hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey, CreateBucket, DeleteBucket", depends_on_phases: [P-0], must_satisfy: [I-quota-commutative, I-cache-free-ryw], must_pass: [T-quota-concurrent, T-quota-failover, T-ryw-from-db], config_flag: "ozone.om.leader.execution.obs.key.enabled", acceptance: "OBS key path on new model; perf ≥ baseline; quota correct; production flag gated on D-OPEN-retry closure (durable retry) for the four non-idempotent ops — dev/staging may precede"}
 ```
 
 **Command set.** The OBS halves of C1 CreateKey, C2 CommitKey, C3 AllocateBlock, C4 DeleteKey. (The

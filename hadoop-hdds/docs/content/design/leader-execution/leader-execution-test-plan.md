@@ -284,8 +284,12 @@ invariant and to the traceability table (§6). These are cheap always-on asserti
 harness evaluates at every step and at quiescence, catching violations the linearizability
 search might reach only with a specific interleaving:
 
-- `NoOrphan` (`I-7`): no namespace entry whose parent objectID has been removed. Asserted at
-  every purge step and at quiescence.
+- `Accounted` (`I-7`, the EXC-2 form): no PERMANENT orphan — every namespace entry whose parent
+  objectID is removed is eventually reclaimed. Asserted as eventual reclamation **at quiescence**,
+  not absence-at-every-step: transient orphans during the async per-node recursive purge are by
+  design (`EXC-2`), consistent with §1.4. (Non-recursive single deletes are atomic and hold it at
+  every step.) The TLA model checks this as `Accounted`; `FsoImpl.tla` defines no `NoOrphan`
+  invariant — see §3.3.
 - `NoLeak` (TLA+ model invariant — lock-handle/permit accounting): every acquired lock handle
   is eventually released; no permit is leaked from a stripe (the lean semaphore's permit count
   returns to ceiling at quiescence). This is also the failure-atomicity check — a throw between
@@ -340,18 +344,20 @@ The models live in the sibling worktree `ozone-11898-tla` (referenced from
   (`NoLeak`), and never loses/double-counts a quota update (`UsedConsistent`). This is the
   formal backstop for `I-2`, `I-8`, `I-12`, and the soft-quota `UsedConsistent` claim.
 
-### 3.3 The FSO model (now exists; M2a/M2b bounded-green, M3 in progress)
+### 3.3 The FSO model (now exists; M2a/M2b bounded-green, M3 verdict pending — M3Full aborted disk-full)
 
 The master scaffold (§26) described FSO as "planned." **As of 2026-06-15 the FSO model exists:
 M2a (tree + file rename) and M2b (directory rename) are bounded-green with captured verdicts; M3
 (recursive delete) has its tight bound configured but its verdict is not yet captured, and the
-broader M3Full (`MAX_OPS=2`) pass is in progress, not complete**; this plan records that updated
-state faithfully rather than the stale "planned" label, and scopes the remaining work as
-wider-configuration runs.
+broader M3Full (`MAX_OPS=2`) pass aborted on disk-full with no verdict (M3 not green)**; this plan
+records that updated state faithfully rather than the stale "planned" label, and scopes the
+remaining work as wider-configuration runs (including a re-run of M3Full with adequate disk).
 
 - **Spec/config**: `FsoImpl.tla` checked against `FsoAbstract.tla` via `Refinement`, with
-  invariants `LockInv`, `NoLeak`, **`NoOrphan`** (the FSO-specific orphan-freedom property,
-  `I-7`). Two configs exist: `FsoImpl.cfg` (`MAXOID=4`, `MAX_OPS=2`) and the tight
+  invariants `LockInv` and `NoLeak`. There is no `NoOrphan` invariant in `FsoImpl.tla` — orphan-freedom
+  for M2a/M2b is established by the **refinement** to the atomic per-node oracle (plus `LockInv` + `NoLeak`),
+  not by a standalone orphan invariant; the only orphan invariant the model defines is `Accounted`
+  (M3 scope, §below). Two configs exist: `FsoImpl.cfg` (`MAXOID=4`, `MAX_OPS=2`) and the tight
   `FsoImplSmall.cfg` (`MAXOID=3`, `Procs={1,2}`, `MAX_OPS=1`) sized as "a fast, definitive
   M2a verdict … pairwise races (create-under-dir vs delete-dir, delete-file vs delete-dir,
   rename vs delete) all surface at this scale (small-scope hypothesis)."
@@ -370,18 +376,30 @@ wider-configuration runs.
     states generated, 32400283 distinct states found")*
   - **M3** (recursive delete: tombstone + decomposed per-node-locked purge): its tight bound is
     **configured** (`FsoM3.cfg`, `MAX_OPS=1`) but the verdict is **not yet captured**, and the
-    broader M3Full `MAX_OPS=2` pass (`FsoM3Full.cfg`, `ozone-11898-tla/fso-m3-full.out`) is **in
-    progress, not complete**. M3 checks **`Accounted`** (no *permanent* unaccounted orphan) instead
-    of strict `NoOrphan`, because transient mid-purge orphans are by design (EXC-2). *(evidence:
-    `ozone-11898-tla/FsoM3.cfg` — `INVARIANT Accounted`, "Strict NoOrphan is intentionally NOT
-    checked")*
+    broader M3Full `MAX_OPS=2` pass (`FsoM3Full.cfg`, `ozone-11898-tla/fso-m3-full.out`) **aborted on
+    disk-full — no verdict** (terminal `Error: when writing the disk (StatePoolWriter.run): No space
+    left on device`). At abort it had reached **599,321,661 states generated, 220,163,827 distinct**,
+    search depth **36** (last `Progress(36)`), with **14,082,268 states still left on queue** —
+    so it neither found an error nor exhausted the state space. **M3 is not green; its verdict is
+    pending** a re-run with adequate disk. M3 checks **`Accounted`** (no *permanent* unaccounted
+    orphan) instead of strict `NoOrphan`, because transient mid-purge orphans are by design (EXC-2).
+    *(evidence: `ozone-11898-tla/FsoM3.cfg` — `INVARIANT Accounted`, "Strict NoOrphan is intentionally
+    NOT checked"; `ozone-11898-tla/fso-m3-full.out` terminal lines — last `Progress(36) … 599,321,661
+    states generated … 220,163,827 distinct … 14,082,268 states left on queue`; `Error … No space
+    left on device`)*
 - **What it establishes**: across the two captured increments (M2a/M2b) the namespace model
-  **refines** the abstract per-node oracle and holds `LockInv`, `NoLeak`, and the orphan-freedom
-  property (`NoOrphan`) — the formal backstop for the hardest FSO claims (`I-5`, `I-6`, `I-7`,
-  `I-11`) that the adversarial `T-1 … T-8` scenarios exercise in the Java harness. M3's `Accounted`
-  invariant is configured but its verdict is pending capture, so the recursive-delete orphan-freedom
-  backstop is not yet established at the formal tier.
-- **Remaining (planned)**: completion of the broader M3 `MAX_OPS=2` pass; larger `MAXOID`,
+  **refines** the abstract per-node oracle and holds `LockInv` and `NoLeak`. Orphan-freedom at
+  M2a/M2b scope is established **via that refinement** (the implementation cannot reach a state the
+  atomic per-node oracle forbids) plus `LockInv` + `NoLeak` — *not* via a `NoOrphan` invariant, which
+  the model does not define. This is the formal backstop for the FSO claims (`I-5`, `I-6`, `I-11`,
+  and the M2a/M2b-scope reading of `I-7`) that the adversarial `T-1 … T-8` scenarios exercise in the
+  Java harness. The **recursive-delete** orphan property — `Accounted` (no *permanent* unaccounted
+  orphan, the EXC-2-weakened form of `I-7`; strict `NoOrphan` is intentionally NOT checked because
+  transient mid-purge orphans are by design) — is **M3 scope**: its tight bound (`FsoM3.cfg`) is
+  configured but its verdict is not yet captured, so the recursive-delete orphan-freedom backstop is
+  not yet established at the formal tier.
+- **Remaining (planned)**: a re-run of the broader M3 `MAX_OPS=2` pass to a verdict (the prior run
+  aborted on disk-full); larger `MAXOID`,
   `MAX_OPS≥3`, and `Procs={1,2,3}` runs to widen the small-scope hypothesis; an explicit
   failover/crash action in the FSO model to mirror `T-8` at the formal tier. These are the open
   items behind master `P-2` DoD.
@@ -437,8 +455,16 @@ statement: >
   (either create-before-delete, or create fails via reval I-6 because its parent was
   tombstoned); no lock/permit leak. Decomposed at transition granularity per D-16.
 covers: [I-5, I-7, I-6]
-provenance: verified
-evidence: ["leader-execution-locking.md §7 T-1, §9 (I-7 no orphan)", "ozone-11898-tla/FsoImpl.cfg NoOrphan invariant", "ozone-11898-tla/fso-m2a-full.out (NoOrphan held, green)"]
+provenance: inferred (lock/linearizability semantics anchored; recursive-delete orphan-freedom verdict pending M3 capture)
+provenance_note: >
+  The lock/linearizability semantics of this race are anchored — in the locking companion (§7 T-1, §9)
+  and the per-node-locked purge semantics — and M2a/M2b establish orphan-freedom for the non-recursive
+  tree ops via REFINEMENT to the atomic per-node oracle + `LockInv` + `NoLeak` (captured green:
+  `fso-m2a-full.out` / `fso-m2b-full.out`). But T-1 is specifically the `rm -rf` (recursive-delete) race,
+  whose orphan property is `Accounted` (M3 scope, the EXC-2-weakened form of I-7) — and the M3 verdict is
+  NOT yet captured (M3Full aborted on disk-full). So the recursive-delete orphan-freedom this scenario
+  asserts is NOT yet verified at the formal tier; it is `inferred` pending the M3 capture, not `verified`.
+evidence: ["leader-execution-locking.md §7 T-1, §9 (I-7 no orphan; Accounted is the bounded-model form)", "ozone-11898-tla/FsoImpl.tla Accounted invariant (M3 orphan property — NoOrphan is only a comment, not checked)", "ozone-11898-tla/fso-m2a-full.out, fso-m2b-full.out (M2a/M2b green via refinement — non-recursive tree ops; neither file contains a NoOrphan invariant)", "ozone-11898-tla/fso-m3-full.out (M3Full aborted disk-full — recursive-delete Accounted verdict pending)"]
 ```
 ```yaml
 # T-2
@@ -749,18 +775,17 @@ provenance: inferred
 evidence: ["leader-planned-execution.md P-4 must_pass:[T-mpu-lifecycle], RC-xichen-large-value (status open), HDDS-8238", "S3InitiateMultipartUploadRequest.getObjectIdFromTxId at S3InitiateMultipartUploadRequest.java:139"]
 ```
 
-### 4.7 Notes on two referenced-but-folded scenarios
+### 4.7 Notes on referenced-by-decision scenarios (all first-class below)
 
 The prompt's scenario list named `T-snapshot-consistency` and `T-mpu-lifecycle` (emitted
-above, §4.6) and the eight FSO adversarials (§4.1). Two further names appear in the seeded
-decision blocks that this catalog deliberately does **not** re-define as new top-level T-n,
-to avoid duplicate ids the linter would reject (master §C rule 3 no-orphans / rule 1
-ref-resolution):
+above, §4.6) and the eight FSO adversarials (§4.1). Several further names appear in the seeded
+decision blocks; each is given a **first-class T-n** id below so every locked-decision `tests:`
+reference resolves to a real block (master §C rule 1 ref-resolution; no orphan ids, rule 3):
 
 - `T-no-cache-correctness` (referenced by `D-3.tests`) is the negative twin of `T-ryw-from-db`
   (§4.3) — same harness, cache forced off, asserting no correctness property depends on a
-  cache. It is folded into `T-ryw-from-db`'s `covers:[I-cache-free-ryw]`. If the linter
-  requires the literal id to resolve, it is defined as an alias of `T-ryw-from-db`.
+  cache. It is **specified below as a first-class T-n** (§4.8), not folded into `T-ryw-from-db`;
+  both ids resolve independently and both appear in `I-cache-free-ryw`'s coverage row (§6.2).
 - `T-holder-lease-negative` (referenced by `D-5.tests`) and `T-deletedir-vs-openfile`
   (referenced by `D-9.tests`) and `T-rolling-upgrade-mixed-binary` (referenced by `D-11.tests`)
   and `T-hot-stripe` (referenced by `D-15.tests`) are **specified below as first-class T-n**
@@ -981,7 +1006,7 @@ the master §29 prose treats them.
 |---|---|---|---|
 | **P-0** | Framework substrate (12 components) unwired + legacy→ManagedIndex objectID retrofit + dual-path index durability | `T-cross-thread-release`, `T-objectid-disjoint`, `T-proto-roundtrip`, `T-mixed-mode-cross-model-race`, `T-mixed-mode-stale-read` | (substrate; no model gate — models exercise P-1/P-2 behavior) |
 | **P-1** | Hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey | `T-quota-concurrent`, `T-quota-failover`, `T-ryw-from-db` | **OBS model green** (`ObsImpl.cfg`: Refinement + LockInv + NoLeak + UsedConsistent) — `obs3-verdict.out` |
-| **P-2** | Hardest multi-step FSO: CreateFile/CreateDirectory (implicit parents), FSO delete, recursive rm-rf + DirectoryDeletingService redesign | `T-1`, `T-2`, `T-3`, `T-4`, `T-5`, `T-6`, `T-7`, `T-8` | **FSO model M2a/M2b green** (Refinement + LockInv + NoLeak + NoOrphan) — M2a `fso-m2a-full.out` (26.8M distinct), M2b directory rename `fso-m2b-full.out` (32.4M distinct); M3 recursive delete (`Accounted`) tight bound `FsoM3.cfg` configured, verdict capture pending; M3Full `MAX_OPS=2` (`fso-m3-full.out`) in progress, not complete |
+| **P-2** | Hardest multi-step FSO: CreateFile/CreateDirectory (implicit parents), FSO delete, recursive rm-rf + DirectoryDeletingService redesign | `T-1`, `T-2`, `T-3`, `T-4`, `T-5`, `T-6`, `T-7`, `T-8` | **FSO model M2a/M2b green** (Refinement + LockInv + NoLeak — orphan-freedom established via the refinement, not via a `NoOrphan` invariant, which the model does not define) — M2a `fso-m2a-full.out` (26.8M distinct), M2b directory rename `fso-m2b-full.out` (32.4M distinct); M3 recursive delete (`Accounted`) tight bound `FsoM3.cfg` configured, verdict capture pending; M3Full `MAX_OPS=2` (`fso-m3-full.out`) aborted disk-full — no verdict, M3 not green |
 | **P-3** | Snapshot: CreateSnapshot/Checkpoint op, SnapshotPurge standalone, moves | `T-snapshot-consistency` | (FSO model extension for Checkpoint-vs-op ordering: planned) |
 | **P-4** | MPU (4 ops + AbortExpired) + large-value ([HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)) revisit | `T-mpu-lifecycle` | n/a |
 | **P-5** | Batch/background: DeleteKeys, RenameKey/Keys, DeleteOpenKeys, PurgeKeys/Directories | `T-batch-quota-no-double-decrement` (per-key quota decrement exactly-once under retry + partial-batch failure); multi-slot ordering covered transitively by `T-3` ordering + `NoLeak`, and by the cross-cutting set below | n/a |
@@ -1024,7 +1049,7 @@ authority `leader-execution-locking.md` §9) and **master invariants** (slugs) a
 | `I-4` creates don't serialize | `T-7`, `T-hot-stripe` | companion §9 (I-4 via T-7) |
 | `I-5` FSO-RESOLVE-FAIL (tombstone ⇒ resolution fails) | `T-1`, `T-4`, `T-5`, `T-deletedir-vs-openfile` | companion §9 (I-5 via T-1,T-5) |
 | `I-6` FSO-REVAL (re-read by (parentObjectID,name); ABA-safe) | `T-1`, `T-2`, `T-4`, `T-5`, `T-deletedir-vs-openfile` | companion §9 (I-6 via T-2,T-5) |
-| `I-7` FSO-PURGE no orphan | `T-1` | companion §9 (I-7 via T-1); FSO `NoOrphan` (green) |
+| `I-7` FSO-PURGE no orphan | `T-1` | companion §9 (I-7 via T-1). M2a/M2b establish non-recursive orphan-freedom via refinement (no `NoOrphan` invariant exists). The recursive-delete form is `Accounted` (M3 scope) — verdict pending (M3Full aborted disk-full); not yet green. |
 | `I-8` no holder lease (correctness-critical) | `T-holder-lease-negative` | companion §9 (I-8 via design + T-holder-lease-negative) |
 | `I-9` non-thread-affine (release on different thread) | `T-cross-thread-release` | companion §9 (I-9 unit: acquire A release B) |
 | `I-10` leader-local (lock table discarded on failover) | `T-8` | companion §9 (I-10 via T-8) |
@@ -1056,14 +1081,22 @@ authority `leader-execution-locking.md` §9) and **master invariants** (slugs) a
   every invariant above has ≥1 covering `T-n`. The two invariants most at risk of being
   orphaned — `I-txninfo-atomic-with-patch` and `I-checkpoint-exact-index` — are explicitly covered by
   `T-apply-failure-resync` and `T-snapshot-consistency` respectively.
-- **Two master invariants are formally backstopped, not only harness-tested**:
-  `I-quota-commutative`/`I-quota-crash-safe` (via `ObsImpl` `UsedConsistent`, green) and the
-  FSO orphan-freedom `I-7` (via `FsoImpl` `NoOrphan`, green). This is the belt-and-suspenders
-  the design wants: a sampled Java test AND an exhaustive bounded model agree.
+- **Quota invariants are formally backstopped, not only harness-tested**:
+  `I-quota-commutative`/`I-quota-crash-safe` (via `ObsImpl` `UsedConsistent`, green). This is the
+  belt-and-suspenders the design wants: a sampled Java test AND an exhaustive bounded model agree.
+- **FSO orphan-freedom `I-7` is only partially backstopped at the formal tier.** For the
+  non-recursive tree ops, M2a/M2b establish it via **refinement** to the atomic per-node oracle
+  (+ `LockInv` + `NoLeak`), captured green — *not* via a `NoOrphan` invariant, which `FsoImpl.tla`
+  does not define (`NoOrphan` appears there only as a comment). The recursive-delete form is the
+  `Accounted` invariant (M3 scope, EXC-2-weakened); its verdict is **not yet captured** (M3Full
+  aborted disk-full), so that half of `I-7` is harness-tested (`T-1`) but not yet formally green.
 - **Provenance honesty**: `T-snapshot-consistency` and `T-mpu-lifecycle` are `inferred`
   (specified, behavior anchored to real code, but the new-model implementation does not yet
-  exist — they are P-3/P-4 deliverables). Everything in §4.1–§4.5 is `verified` against either
-  a TLA+ artifact, a verdict file, or an exact code anchor that fixes the semantics under test.
+  exist — they are P-3/P-4 deliverables). `T-1` is `inferred` for a different reason: its lock
+  semantics are anchored, but its headline assertion is recursive-delete orphan-freedom, whose
+  `Accounted` (M3) verdict is not yet captured (M3Full aborted disk-full) — so it does not yet
+  clear the `verified` bar. Everything else in §4.1–§4.5 is `verified` against either a TLA+
+  artifact, a verdict file, or an exact code anchor that fixes the semantics under test.
 
 ---
 

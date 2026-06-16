@@ -45,7 +45,7 @@ Three reading rules carried from §A of the master:
    `tests`, `depends_on`, `phase`, and `anti_patterns` are consumed by the CI `lint-spec`
    projection (master §C). If an `I-n` is listed in no `C-n.implements`, that is a spec defect.
 3. **Locked decisions are honoured, never re-litigated.** This file consumes
-   D-1..D-16, D-SPEC-1..3 and the two OPEN decisions (D-OPEN-quota-enforcement,
+   D-1..D-17, D-SPEC-1..3 and the two OPEN decisions (D-OPEN-quota-enforcement,
    D-OPEN-retry) exactly as recorded in the master. Where a component touches an open
    decision, it states the open shape and marks it open — it does not silently settle it.
 
@@ -1002,7 +1002,7 @@ paths and remove it.
 
 This file is the implementation-facing companion referenced from the master spec
 `leader-planned-execution.md`, **§11. Component designs (C-n) → companion**. The master holds the
-rationale spine (Part IV, D-1..D-16 / D-SPEC-1..3 / D-OPEN-quota-enforcement / D-OPEN-retry), the
+rationale spine (Part IV, D-1..D-17 / D-SPEC-1..3 / D-OPEN-quota-enforcement / D-OPEN-retry), the
 correctness contract (Part V, I-n / B-n / T-n), and the delivery plan (Part VI, P-0..P-7); the
 locking companion `leader-execution-locking.md` holds the concurrency model (I-1..I-12, the
 container/slot locks, the linearizability bar, EXC-1..EXC-3) that **C-lock-manager**,

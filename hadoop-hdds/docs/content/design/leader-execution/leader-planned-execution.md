@@ -122,6 +122,7 @@ id:
 statement:           # I-n: the must/never ; B-n: the number+unit ; T-n: the scenario
 rationale:           # I-n: failure prevented ; B-n: why this value
 covers:              # T-n: [I-...] invariants this exercises
+tests:               # I-n: [T-...] tests exercising this invariant (the I-n -> T-n direction; complementary to T-n.covers)
 provenance: ...
 evidence: ...
 ```
@@ -146,19 +147,18 @@ evidence: ...
 ## §C. Consistency lint (mechanical linter + on-demand agent pass)
 
 There is no CI gate yet. The committed linter is `lint_spec.py` (in this folder); run it
-manually over master + companions. It AUTOMATES:
+manually over master + companions. It AUTOMATES all five checks below — this is the
+machine-checkable FLOOR. Each check appends to a `fails` list and the script exits non-zero
+if any fires (a single hard gate, not a tiered one):
 1. **ref-resolution** — every `depends_on/enables/rejects/addresses/tests/implements/covers/resolved_by` id resolves to a definition.
 2. **coverage** — every `I-n` is exercised by ≥1 `T-n` (via `T-n.covers` or `I-n.tests`), the zero-test-invariant rule. Note: the companion's `I-1`..`I-12` are PROSE-defined (§A) and the linter recognizes that form.
 3. **code-fence balance** — every file has an even number of ``` fences (no unclosed block).
-
-Anchor-existence (`evidence` `File.java:NNN` resolves — file exists, line in range) and the
-**§28 traceability-matrix** projection-freshness (every `I-row` derivable from the sources)
-are SEMI-automated: `lint_spec.py` checks them, but the broader projection set (§22 decision
-graph, §29 task list) and the semantic anchor-meaning check are the on-demand agent pass.
+4. **anchor-existence** — every `evidence` `File.java:NNN` anchor resolves: the file exists in the worktree and the line number is within range.
+5. **§28 projection-freshness** — every `I-row` in the §28 traceability matrix is derivable from the sources (`T-n.covers` / `I-n.tests`); a row listing a `T-n` not backed by a source is stale.
 
 Semantic coherence (prose↔block, design soundness, "anchor still means what's claimed"), the
-§22/§29 projection regenerate-and-diff, and the symbol-anchor meaning check are a separate
-**on-demand agent pass** — they are not automated.
+broader **§22 decision-graph / §29 task-list** projection regenerate-and-diff, and the
+symbol-anchor meaning check are a separate **on-demand agent pass** — they are not automated.
 
 ---
 
@@ -846,8 +846,10 @@ Three things changed between [#7583](https://github.com/apache/ozone/pull/7583)'
    bounded-exhaustive increments — M2a (tree + file rename) and M2b (directory rename) both
    fully green at `MAX_OPS=2`. M3 (`FsoM3.cfg`, recursive delete, `MAX_OPS=1`) is configured and
    run locally but its verdict artifact is not yet captured; the broader `FsoM3Full.cfg`
-   (`MAX_OPS=2`) pass is IN PROGRESS, not complete (last checkpoint ~22M states queued, no
-   completion verdict). A formal tier
+   (`MAX_OPS=2`) pass ABORTED on disk-full (`No space left on device`) at depth 36 —
+   220,163,827 distinct states, 14,082,268 states still on queue — and produced NO completion
+   verdict (re-run on adequate disk, or run the tight bound `FsoM3.cfg` `MAX_OPS=1` for a
+   definitive verdict). A formal tier
    that can *fail the build* on a divergence claim is a different level of assurance than
    [#7583](https://github.com/apache/ozone/pull/7583) had.
 3. **The rationale spine (Part IV).** [#7583](https://github.com/apache/ozone/pull/7583)'s most expensive asset — the reasoning behind
@@ -5232,8 +5234,10 @@ reason the open quota question is **provably** open, not hand-waved):
   stability + cycle prevention — 32,400,283 distinct states, `fso-m2b-full.out`). **M3**
   (recursive delete: tombstone + decomposed per-node-locked purge; `FsoM3.cfg`, `MAX_OPS=1`)
   is configured and run locally but its verdict artifact is not yet captured; the broader
-  `FsoM3Full.cfg` (`MAX_OPS=2`) pass is IN PROGRESS, not complete (last checkpoint ~22M states
-  queued, no completion verdict). M3 checks `Accounted` (no *permanent* unaccounted orphan,
+  `FsoM3Full.cfg` (`MAX_OPS=2`) pass ABORTED on disk-full (`No space left on device`) at depth
+  36 — 220,163,827 distinct states, 14,082,268 states still on queue — and produced NO
+  completion verdict (re-run on adequate disk, or run the tight bound `FsoM3.cfg` `MAX_OPS=1`
+  for a definitive verdict). M3 checks `Accounted` (no *permanent* unaccounted orphan,
   EXC-2 form) rather than strict `NoOrphan` because transient mid-purge orphans are by design.
   This is bounded-exhaustive TLC, not a general proof: M2a/M2b green at the stated scope, M3
   partial (spec §34).
@@ -5700,7 +5704,7 @@ value becomes a large network payload on every replicated patch — Xichen's sta
 [HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)) → big network overhead sending whole objects"). [HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238) is the MPU large-value /
 WAL-growth concern (the same family of problem the existing `mpu-gc-optimization.md` design
 notes as "RocksDB WAL logs each full write → WAL growth", verified at
-`mpu-gc-optimization.md:2`). P4 is where that concern is *revisited*, not necessarily fully
+`mpu-gc-optimization.md:52`). P4 is where that concern is *revisited*, not necessarily fully
 solved — a full large-value redesign is explicitly a **non-goal** of this design (§6), so P4
 must either show the payload is acceptable for realistic part counts or scope a follow-on. The
 `must_satisfy` list is intentionally empty in the seeded block because P4's correctness bar is
@@ -5905,7 +5909,7 @@ Deferred, not decided (D-OPEN-retry, `status: deferred`). The shape of the defer
 ### R-mpu-large-value — large MPU DB values inflate the replicated patch (OPEN review concern)
 
 ```yaml
-- {id: R-mpu-large-value, statement: "An MPU Complete assembles a key value enumerating every part; the whole-object Put model (D-7/D-1) replicates that whole value in the DB patch, so a large multipart object becomes a large network payload on every replicated patch.", rationale: "Replicating DB changes (not a journal) means whole objects cross the wire; for MPU and other large values this is real network/WAL overhead. A full large-value redesign ([HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)) is an explicit non-goal of this design.", provenance: verified, evidence: ["RC-xichen-large-value (status open, endorsed ivandika3)", "leader-planned-execution.md §6 non-goals", "mpu-gc-optimization.md:2 (WAL growth)", "[HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)"]}
+- {id: R-mpu-large-value, statement: "An MPU Complete assembles a key value enumerating every part; the whole-object Put model (D-7/D-1) replicates that whole value in the DB patch, so a large multipart object becomes a large network payload on every replicated patch.", rationale: "Replicating DB changes (not a journal) means whole objects cross the wire; for MPU and other large values this is real network/WAL overhead. A full large-value redesign ([HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)) is an explicit non-goal of this design.", provenance: verified, evidence: ["RC-xichen-large-value (status open, endorsed ivandika3)", "leader-planned-execution.md §6 non-goals", "mpu-gc-optimization.md:52 (WAL growth)", "[HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)"]}
 ```
 
 Carried as a risk because the design *accepts* the whole-object replication model (D-1) and
@@ -5949,11 +5953,11 @@ delivery ledger is complete. They are *design-refinement* questions, not gates o
 each must be resolved before the phase that touches its area ships.
 
 ```yaml
-- {id: Q-mpu-lock-placement, statement: "Multipart upload (FSO/OBS) lock placement under the container/slot model is unspecified; resolve before P4.", provenance: verified, evidence: ["leader-execution-locking.md §10"]}
+- {id: Q-mpu-lock-placement, status: resolved, statement: "RESOLVED — Multipart upload (FSO/OBS) lock placement under the container/slot model is now specified in locking §2.1 (Batch 3, the 5 MPU rows: initiate/commit-part/complete/abort/expired-abort). No longer a P4 blocker.", provenance: verified, evidence: ["leader-execution-locking.md §2.1 (MPU lock placement, Batch 3)"]}
 - {id: Q-hsync-lease, statement: "hsync / lease-recovery interaction with X(parent, file) on commit is unspecified; resolve before the hsync/lease commands migrate.", provenance: verified, evidence: ["leader-execution-locking.md §10"]}
 - {id: Q-rename-mtime-merge, statement: "Exact merge-operator interaction for FSO directory mtime updates on cross-parent rename is unspecified; resolve within P2.", provenance: verified, evidence: ["leader-execution-locking.md §10"]}
 - {id: Q-snapshot-ordering, statement: "Snapshot (Checkpoint op) ordering vs in-flight fine-grained ops — the design question behind R-snapshot-checkpoint-ordering; resolve within P3.", provenance: verified, evidence: ["leader-execution-locking.md §10"]}
-- {id: Q-setacl-settimes-placement, statement: "SetAcl/SetTimes/AllocateBlock lock placement (expected S(bucket)+S(P)+X(P,name)) needs confirmation; resolve before those ops migrate (P1 for AllocateBlock, P6 for SetAcl/SetTimes).", provenance: verified, evidence: ["leader-execution-locking.md §10"]}
+- {id: Q-setacl-settimes-placement, status: open, statement: "AllocateBlock clause RESOLVED — its lock placement is now specified in locking §2.1 (Batch 3), so P1 is unblocked on that op. STILL OPEN for SetAcl/SetTimes: lock placement (expected S(bucket)+S(P)+X(P,name)) needs confirmation; resolve before those ops migrate (P6).", provenance: verified, evidence: ["leader-execution-locking.md §2.1 (AllocateBlock lock placement, Batch 3)", "leader-execution-locking.md §10 (SetAcl/SetTimes, still open)"]}
 - {id: Q-volume-lock-escape, statement: "No volume lock exists today (no volume rename, A-4); the lock manager must stay builder-extensible if a future volume op can invalidate an in-flight key op.", provenance: verified, evidence: ["leader-execution-locking.md §10", "leader-planned-execution.md A-4 (no volume-rename op)"]}
 ```
 
@@ -6185,13 +6189,13 @@ the relevant section; collected here for the reader who wants the provenance in 
 - **[HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)** — the **MPU large-value** concern. The whole-object-replication cost for large
   multipart values (R-mpu-large-value, RC-xichen-large-value); explicitly a non-goal of this
   design (§6) and the P4 "revisit" target. Related design context in
-  `mpu-gc-optimization.md` (WAL-growth from full writes, `mpu-gc-optimization.md:2`).
+  `mpu-gc-optimization.md` (WAL-growth from full writes, `mpu-gc-optimization.md:52`).
   Provenance: verified.
 
 **Companion documents (this design's own corpus — `hadoop-hdds/docs/content/design/`).**
 
 - **`leader-planned-execution.md`** — the master spec (this document): orientation, why, design
-  overview, the rationale spine (Part IV: D-1..D-16, D-SPEC-1..3, D-OPEN-*, ALT-n wall, RC-n
+  overview, the rationale spine (Part IV: D-1..D-17, D-SPEC-1..3, D-OPEN-*, ALT-n wall, RC-n
   ledger), correctness-contract index, and this delivery plan. The canonical entry point.
 - **`leader-execution-locking.md`** — the concurrency & locking companion. The contract the
   executor must honor: container/slot lock model, invariants I-1..I-12, the multi-step
@@ -6280,7 +6284,9 @@ quota-enforcement risk R-quota-enforcement). The models live in the `ozone-11898
   (26,828,240 distinct) and M2b directory rename (32,400,283 distinct) green with captured
   verdicts; M3 recursive delete (`FsoM3.cfg`, `MAX_OPS=1`) is configured and run locally but
   its verdict artifact is not yet captured, and the broader `FsoM3Full.cfg` (`MAX_OPS=2`) pass
-  is IN PROGRESS (last checkpoint ~22M states queued, no completion verdict). M3 checks
+  ABORTED on disk-full (`No space left on device`) at depth 36 — 220,163,827 distinct states,
+  14,082,268 states still on queue — and produced NO completion verdict (re-run on adequate
+  disk, or run the tight bound `FsoM3.cfg` `MAX_OPS=1` for a definitive verdict). M3 checks
   `Accounted` (no permanent unaccounted orphan, EXC-2 form) rather than strict `NoOrphan`,
   since transient orphans are by design.
 
