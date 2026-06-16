@@ -269,9 +269,10 @@ interface: |
     void release();   // releasable on ANY thread (I-9); reverse order; idempotent
   }
 depends_on: [D-4, D-5, D-15, F-12]
-implements: [I-9, I-11, I-8, I-2]
+implements: [I-9, I-11, I-8, I-2, I-mixed-mode-lock-gate]
 tests: [T-cross-thread-release, T-3, T-7, T-hot-stripe, T-holder-lease-negative]
 anti_patterns:
+  - "MUST NOT let a migrated command skip the existing OzoneManagerLock bucket lock during mixed mode (D-17 I-mixed-mode-lock-gate) — without the shared gate it races legacy commands on the same key."
   - "MUST NOT use ReentrantReadWriteLock (thread-affine; cannot release on the continuation thread — I-9). OzoneManagerLock is built on it and is therefore disqualified for reuse (ALT-reuse-ozonemanagerlock)."
   - "MUST NOT reuse OzoneManagerLock's 8 leveled resources / per-type striped EnumMaps / trackers / reentrancy — heavier than this design needs (D-4)."
   - "MUST NOT add a per-lock acquisition timeout / holder lease (ALT-lock-timeout killed by D-5; I-8). The Ratis request timeout + release-on-completion + failover are the only bounds (B-3)."
@@ -501,9 +502,10 @@ interface: |
   // applyTransaction routes: isPlannedPath ? applyBatch(envelope.batch) : runCommand(request, termIndex) [legacy]
   // applyBatch: OperationApplier.apply(batch, store, rocksBatch, mergeRegistry) — NO business logic
 depends_on: [D-10, D-14, D-11, C-replicated-db-module, C-layout-feature, C-orchestrator]
-implements: [I-determinism-followers-pure, I-apply-failure-resync, I-txninfo-atomic]
+implements: [I-determinism-followers-pure, I-apply-failure-resync, I-txninfo-atomic, I-mixed-mode-cache-coherent]
 tests: [T-flag-routing-both-paths, T-rolling-upgrade-mixed-binary, T-apply-failure-resync, T-determinism-follower-byte-identical]
 anti_patterns:
+  - "MUST NOT apply a migrated patch without invalidating the written PartialTableCache keys and updating the FullTableCache volume/bucket entries on every node (D-17 I-mixed-mode-cache-coherent) — else legacy/read-op reads go stale."
   - "MUST NOT run validateAndUpdateCache on the new (planned) apply path on ANY node — apply is bytes only (I-determinism-followers-pure); business logic ran once on the leader."
   - "MUST NOT route to the planned path unless BOTH the layout feature is finalized AND the per-command runtime flag is on (D-11 binary-safety gate + D-14 operational revert) — finalization alone is not enough; the flag defaults to legacy."
   - "MUST NOT complete the apply future exceptionally for a critical apply failure — terminate the OM (fail-stop) so a follower that cannot apply a committed patch crashes and re-syncs (D-10, I-apply-failure-resync), matching today's INTERNAL_ERROR/METADATA_ERROR handling."
@@ -980,6 +982,11 @@ hold span (I-12), not a cache. The legacy `validateAndUpdateCache` dispatch in
 `handleWriteRequestImpl`
 (`hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/protocolPB/OzoneManagerRequestHandler.java:418`)
 is deleted along with the dual-path fork (C-state-machine-dualpath collapses to single-path).
+The two D-17 mixed-mode coherence layers retire here as well: with the legacy path gone there is
+no cross-model race left to gate, so the migrated path no longer needs the shared `OzoneManagerLock`
+bucket lock (`I-mixed-mode-lock-gate`), and with the table cache removed there is nothing to keep
+coherent, so the migrated apply's PartialTableCache invalidate + FullTableCache update
+(`I-mixed-mode-cache-coherent`) goes away with the cache (D-17, both layers scoped P-0→P-7).
 
 **Repo discipline (D-13, AWC/Ozone cleanup-in-separate-PRs convention).** This removal is **its
 own PR**, never bundled into a feature or migration branch. It is the definition-of-done capstone

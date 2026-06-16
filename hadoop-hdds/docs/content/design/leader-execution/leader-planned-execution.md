@@ -3990,6 +3990,33 @@ phase: P-2
 evidence: ["grill locking-5 2026-06-15"]
 ```
 
+### D-17 — Mixed-mode coherence (shared bucket-lock gate + cache invalidate/update on apply)
+
+Mixed mode (D-14) is long-lived, and it carries two coherence hazards the rest of the design did not cover. **Lock incoherence:** the migrated path takes the new objectID/slot locks (`C-lock-manager`) while the legacy path takes `OzoneManagerLock`'s bucket lock — different lock objects, so a migrated and a legacy command on the same key race on RocksDB (lost update / dangling blocks), not merely stale reads. **Cache staleness:** migrated writes bypass the OM table cache, but legacy commands and read ops consult it; the authoritative `FullTableCache` for volume/bucket never falls through to DB (`FullTableCache.java:200-213`), so a migrated quota `Merge` leaves the cached bucket *permanently* stale, while `PartialTableCache` self-heals on a miss (`PartialTableCache.java:158-169`). The fix is two layers, both landing in P-0: (1) the migrated path acquires the existing `OzoneManagerLock` bucket lock as its bucket-level gate (in addition to its fine-grained key/slot locks), so cross-model same-bucket ops serialize — this is the original "granular locking gatekeeping across old and new model"; (2) the migrated apply, on every node, invalidates each written key in `PartialTableCache` (the DB-fallthrough then serves the fresh value) and puts the new value into the `FullTableCache` for volume/bucket. Quota stays in the bucket row (D-11 preserved); the apply updates the cached copy with the Option-B merged value. Both layers retire at P-7 with the legacy path — and until then the parallelism win is partially gated behind legacy bucket-write-lock ops, an accepted temporary cost. The cleaner alternative — moving volatile quota into a separate domain-agnostic column family (`ALT-quota-cf`), which would also resolve the Lens-3 operator-decodes-`OmBucketInfo` concern — is deferred because it breaks on-disk invariance (D-11) and needs a quota migration.
+
+```yaml
+id: D-17
+title: Mixed-mode coherence — shared bucket-lock gate + cache invalidate/update on the migrated apply
+status: locked
+depends_on: [D-3, D-4, D-7, D-11, D-12, D-14]
+enables: [I-mixed-mode-lock-gate, I-mixed-mode-cache-coherent]
+deferred_alternatives: [ALT-quota-cf]
+raised_by: [external-review-lens4]
+deciders: [kerneltime]
+consequences:
+  - "Migrated commands acquire the existing OzoneManagerLock bucket lock as their bucket-level gate (plus fine-grained key/slot locks), so cross-model same-bucket ops serialize and never race on RocksDB."
+  - "The migrated apply keeps the OM table cache coherent on every node: invalidate the written key in PartialTableCache (DB-fallthrough self-heals); put the new value into the authoritative FullTableCache for volume/bucket."
+  - "Both are P-0 deliverables and retire at P-7 with the legacy path; the parallelism win is partially gated behind legacy bucket-write-lock ops until then."
+  - "Quota stays in the bucket row (D-11 preserved); the apply updates the cached bucket copy with the Option-B merged value."
+tests: [T-mixed-mode-cross-model-race, T-mixed-mode-stale-read]
+phase: P-0
+provenance: verified
+evidence:
+  - "FullTableCache authoritative, no DB fallthrough — FullTableCache.java:200-213; volume/bucket full-cache — OmMetadataManagerImpl.java:460,494-495,1338"
+  - "PartialTableCache miss -> MAY_EXIST -> DB — PartialTableCache.java:158-169"
+  - "legacy bucket lock OzoneManagerLock BUCKET_LOCK; OMKeyCommitRequest.java:191-194; original 'gatekeeping across old and new model' (kerneltime notes)"
+```
+
 ### D-OPEN-quota-enforcement — exact vs approximate (OPEN, leaning leader-local reservation)
 
 **THIS DECISION IS OPEN — do not read it as settled.** It is recorded here as an active design
@@ -4154,6 +4181,7 @@ evidence: ["per-command inventory 2026-06-15", "leader-execution-locking.md §10
 - {id: ALT-raw-putdelete-only,     title: "Raw Put/Delete bytes only (no Merge/Checkpoint)", killed_by: D-1, reason: "cannot express commutative quota or the snapshot barrier; [#10503](https://github.com/apache/ozone/pull/10503) regressed to this", proposed_by: [], evidence: ["PR#10503"]}
 - {id: ALT-journal-not-dbchanges,  title: "Replicate a journal of commands, not DB changes", killed_by: D-1, reason: "abstract-command apply is the per-command-unique step that causes today's divergence; DB-changes is how consensus normally works", proposed_by: [xichen01], evidence: ["PR#7583 review (errose28 reply)"]}
 - {id: ALT-forward-only-record,    title: "Forward-only decision record", killed_by: D-SPEC-3, reason: "discards the most expensive asset (the rationale); a transcript is not addressable or CI-checkable", proposed_by: [], evidence: []}
+- {id: ALT-quota-cf, title: "Decouple volatile quota into a separate domain-agnostic column family", deferred_by: D-17, reason: "would make the merge operator a pure int64 add (also resolves the Lens-3 operator-decodes-OmBucketInfo concern) and remove the bucket-cache staleness entirely — but it is a NEW column family = an on-disk schema change against D-11, plus a finalization-gated migration of every existing bucket's quota. Deferred: V1 keeps quota in the bucket row and updates the cached copy (D-17).", proposed_by: [external-review-lens3], evidence: ["D-11 on-disk invariance", "C-merge-operator"]}
 ```
 
 ## 22. Decision-dependency graph
@@ -4943,6 +4971,50 @@ tests: [T-snapshot-consistency]
 
 ---
 
+### I-mixed-mode-lock-gate — a migrated and a legacy command on the same key/bucket serialize through one shared lock
+
+During mixed mode the migrated path and the legacy path use different lock managers; this invariant is the shared bucket lock that keeps a migrated CommitKey and a legacy RenameKey on the same key from racing on RocksDB (D-17).
+
+```yaml
+id: I-mixed-mode-lock-gate
+statement: >
+  During mixed mode a migrated command and a legacy command that touch the same key/bucket never
+  execute concurrently without a shared lock: the migrated path acquires the existing OzoneManagerLock
+  bucket lock (in addition to its fine-grained key/slot locks) so all cross-model same-bucket operations
+  serialize through it. No cross-model operation writes RocksDB outside this shared gate.
+rationale: >
+  Migrated and legacy paths use different lock managers; without a shared lock object a migrated CommitKey
+  and a legacy RenameKey on the same key race on RocksDB and corrupt state. The shared bucket lock is the
+  rendezvous; it retires at P-7.
+tests: [T-mixed-mode-cross-model-race]
+provenance: verified
+evidence: ["OzoneManagerLock BUCKET_LOCK; OMKeyCommitRequest.java:191-194", "D-17"]
+```
+
+---
+
+### I-mixed-mode-cache-coherent — no legacy command or read op observes a stale cached value for data a migrated command wrote
+
+During mixed mode migrated writes bypass the OM table cache while legacy commands and read ops consult it; this invariant is the apply-time invalidate/update that closes the staleness window the authoritative FullTableCache would otherwise leave open forever (D-17).
+
+```yaml
+id: I-mixed-mode-cache-coherent
+statement: >
+  During mixed mode no legacy command or read operation observes a stale cached value for data a migrated
+  command wrote. On every node the migrated apply invalidates each written key in PartialTableCache
+  (DB-fallthrough then serves the fresh value) and puts the new value into the authoritative FullTableCache
+  for volume/bucket (which never falls through to DB).
+rationale: >
+  Migrated writes bypass the cache; reads consult it. PartialTableCache self-heals on a miss but the
+  authoritative FullTableCache (volume/bucket) does not, so a stale bucket would mis-report quota/ACLs
+  indefinitely. Apply-time invalidate/update closes the gap until P-7 removes the cache.
+tests: [T-mixed-mode-stale-read]
+provenance: verified
+evidence: ["FullTableCache.java:200-213", "PartialTableCache.java:158-169", "OmMetadataManagerImpl.java:494-495", "D-17"]
+```
+
+---
+
 ### 24.x A note on the OPEN quota-enforcement question (do not read any invariant as settling it)
 
 None of I-quota-commutative / I-quota-crash-safe settles **whether quota admission is exact
@@ -5476,7 +5548,7 @@ requires and `ReentrantReadWriteLock` cannot provide, see locking I-9), `T-objec
 ever materializing a domain object) all pass.
 
 ```yaml
-- {id: P-0, scope: "framework substrate (12 components) unwired + legacy→ManagedIndex objectID retrofit + dual-path index durability", depends_on_phases: [], must_satisfy: [I-inner-domain-agnostic, I-txninfo-atomic, I-managed-index-monotonic], must_pass: [T-cross-thread-release, T-objectid-disjoint, T-proto-roundtrip], config_flag: "n/a (inert)", acceptance: "zero behavior change; all unit tests green; lint-spec passes"}
+- {id: P-0, scope: "framework substrate (12 components) unwired + legacy→ManagedIndex objectID retrofit + dual-path index durability + cross-model shared bucket-lock gate + migrated-apply cache invalidate/update (D-17)", depends_on_phases: [], must_satisfy: [I-inner-domain-agnostic, I-txninfo-atomic, I-managed-index-monotonic, I-mixed-mode-lock-gate, I-mixed-mode-cache-coherent], must_pass: [T-cross-thread-release, T-objectid-disjoint, T-proto-roundtrip], config_flag: "n/a (inert)", acceptance: "zero behavior change; all unit tests green; lint-spec passes"}
 ```
 
 ---

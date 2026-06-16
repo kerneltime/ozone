@@ -870,6 +870,28 @@ covers: [I-cache-free-ryw]
 provenance: inferred
 evidence: ["leader-execution-components.md C-legacy-removal tests:[T-no-cache-correctness,T-full-suite-green-after-removal], depends_on:[P-3,P-4,P-5,P-6]", "leader-planned-execution.md D-3 (cache removal), P-7", "OzoneManagerDoubleBuffer.java:354 (flushBatch — removed at P-7)"]
 ```
+```yaml
+# T-mixed-mode-cross-model-race
+id: T-mixed-mode-cross-model-race
+statement: >
+  With one command migrated and a sibling command on the same table still legacy, drive concurrent same-key
+  operations across both paths; assert they serialize via the shared bucket lock and the final DB state is
+  linearizable (no lost update, no dangling blocks).
+covers: [I-mixed-mode-lock-gate]
+provenance: inferred
+evidence: ["D-17", "I-mixed-mode-lock-gate"]
+```
+```yaml
+# T-mixed-mode-stale-read
+id: T-mixed-mode-stale-read
+statement: >
+  Migrate a quota-bearing command; after it commits a write (key + bucket usedBytes), issue a legacy read op
+  (LookupKey, InfoBucket) and a legacy command reading the same key/bucket; assert both observe the fresh
+  value (no stale FullTableCache bucket, no stale PartialTableCache key).
+covers: [I-mixed-mode-cache-coherent]
+provenance: inferred
+evidence: ["D-17", "I-mixed-mode-cache-coherent", "FullTableCache.java:200-213"]
+```
 
 ---
 
