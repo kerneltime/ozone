@@ -492,7 +492,7 @@ These exceptions are stated so a reviewer reads them as deliberate, not as gaps.
 - Multipart upload (FSO/OBS) **lock placement** is now specified in §2.1 (the 5 MPU rows: Initiate/CommitPart/Complete/Abort/AbortExpired); only the large-value ([HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)) concern remains open.
 - hsync / lease-recovery interaction with `X(parent, file)` on commit.
 - Exact merge-operator interaction for FSO directory mtime updates on cross-parent rename.
-- Snapshot (`Checkpoint` op) ordering vs. in-flight fine-grained ops.
+- Snapshot (`Checkpoint` op) ordering vs. in-flight fine-grained ops — **RESOLVED** (Q-snapshot-ordering resolved): now specified normatively in §2.2 (Checkpoint snapshot ordering). The Ratis-log-order consistent cut (I-checkpoint-exact-index, no quiesce/barrier), the COMMITTED-PREFIX semantics of in-flight multi-step ops (D-16 non-atomicity, not a torn read), and SnapshotPurge applied as its own standalone RocksDB batch are all defined there.
 - `SetAcl`/`SetTimes` placement (expected: `S(bucket)+S(P)+X(P,name)`). (`AllocateBlock` placement is now specified in §2.1.)
 - Volume-lock escape hatch: none today (no volume rename); builder-extensible if a future
   volume op can invalidate an in-flight key op.

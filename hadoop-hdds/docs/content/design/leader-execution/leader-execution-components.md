@@ -30,7 +30,7 @@ This file is the **implementation-facing** companion to the master spec
 `leader-planned-execution.md` (referenced from master **§11. Component designs**). The
 master holds the *why* (the D-n rationale spine, the I-n correctness contract, the P-n
 delivery plan); the locking companion `leader-execution-locking.md` holds the *concurrency
-model* (container/slot locks, the linearizability bar, I-1..I-12). This file holds the
+model* (container/slot locks, the linearizability bar, I-1..I-13). This file holds the
 *twelve buildable units*: for each one, a `C-n` structured block, dense prose, and — the
 load-bearing part — the **exact file and method to add or modify** in the worktree, cited to
 `file:line`.
@@ -271,7 +271,7 @@ interface: |
     void release();   // releasable on ANY thread (I-9); reverse order; idempotent
   }
 depends_on: [D-4, D-5, D-15, F-12]
-implements: [I-9, I-11, I-8, I-2, I-mixed-mode-lock-gate]
+implements: [I-9, I-11, I-8, I-13, I-2, I-mixed-mode-lock-gate]
 tests: [T-cross-thread-release, T-3, T-7, T-hot-stripe, T-holder-lease-negative]
 anti_patterns:
   - "MUST NOT let a migrated command skip the existing OzoneManagerLock bucket lock during mixed mode (D-17 I-mixed-mode-lock-gate) — without the shared gate it races legacy commands on the same key."
@@ -283,7 +283,7 @@ anti_patterns:
 phase: P-0
 provenance: inferred
 evidence:
-  - "FULL MODEL: leader-execution-locking.md §6 (lean implementation), §2 (container/slot), §3 (I-1..I-12), §5 (acquisition order), §8 (B-1 stripe size, B-3 no timeout)"
+  - "FULL MODEL: leader-execution-locking.md §6 (lean implementation), §2 (container/slot), §3 (I-1..I-13), §5 (acquisition order), §8 (B-1 stripe size, B-3 no timeout)"
   - "OzoneManagerLock IS thread-affine (built on ReentrantReadWriteLock) — hadoop-ozone/ozone-manager/.../om/lock/OzoneManagerLock.java:39 (import), :158-162 (getLock returns ReentrantReadWriteLock); 8-resource leveled model EnumMap<LeveledResource>/EnumMap<DAGLeveledResource> at :117,:126"
   - "today key ops serialize on BUCKET_LOCK write lock — OMKeyCommitRequest.java:191-194 (acquireWriteLock BUCKET_LOCK)"
 ```
@@ -291,7 +291,7 @@ evidence:
 **This component is the *implementation*; the *model* is the locking companion's contract — do
 not re-derive it here.** `leader-execution-locking.md` defines what is locked (container locks
 keyed by directory objectID, slot locks keyed by `(parentObjectID, name)`, §2), the per-op lock
-matrix (§2.1), the twelve invariants I-1..I-12 (§3), the deadlock-free total order (§5), and the
+matrix (§2.1), the thirteen invariants I-1..I-13 (§3), the deadlock-free total order (§5), and the
 bounds (§8). This section specifies only the **primitive and its API**.
 
 **Why not reuse `OzoneManagerLock` (D-4, verified).** Two disqualifiers, both confirmed in
@@ -1004,7 +1004,7 @@ This file is the implementation-facing companion referenced from the master spec
 `leader-planned-execution.md`, **§11. Component designs (C-n) → companion**. The master holds the
 rationale spine (Part IV, D-1..D-17 / D-SPEC-1..3 / D-OPEN-quota-enforcement / D-OPEN-retry), the
 correctness contract (Part V, I-n / B-n / T-n), and the delivery plan (Part VI, P-0..P-7); the
-locking companion `leader-execution-locking.md` holds the concurrency model (I-1..I-12, the
+locking companion `leader-execution-locking.md` holds the concurrency model (I-1..I-13, the
 container/slot locks, the linearizability bar, EXC-1..EXC-3) that **C-lock-manager**,
 **C-orchestrator**, and **C-test-harness** implement. The `C-n` blocks above are consumed by the
 CI `lint-spec` projection (master §C) to regenerate the traceability matrix (§28), the

@@ -131,7 +131,7 @@ evidence: ...
 > per-phase task list (§29), and invariant-coverage report (§28)** — are GENERATED from
 > these blocks. Never hand-maintain them.
 
-> Note: the locking companion's invariants `I-1`..`I-12` are PROSE-defined (`- **I-n (title).**`)
+> Note: the locking companion's invariants `I-1`..`I-13` are PROSE-defined (`- **I-n (title).**`)
 > and the lint recognizes that form — they are intentionally not duplicated as YAML blocks.
 
 ## §B. Document map
@@ -139,7 +139,7 @@ evidence: ...
 | Doc | Role | Status |
 |---|---|---|
 | `leader-planned-execution.md` (this) | Master: orientation, why, design overview, **rationale spine**, correctness-contract index, delivery plan | draft |
-| `leader-execution-locking.md` | Companion: concurrency & locking model (container/slot, linearizability) | draft |
+| `leader-execution-locking.md` | Companion: concurrency & locking model (container/slot, linearizability) | draft (working) |
 | `leader-execution-components.md` (or per-component set) | Companion: the 12 component deep-dives | draft |
 | `leader-execution-test-plan.md` | Companion: full test strategy + T-n catalog | draft |
 | `leader-execution-phasing.md` | Companion: per-command migration playbook | draft |
@@ -147,18 +147,24 @@ evidence: ...
 ## §C. Consistency lint (mechanical linter + on-demand agent pass)
 
 There is no CI gate yet. The committed linter is `lint_spec.py` (in this folder); run it
-manually over master + companions. It AUTOMATES all five checks below — this is the
+manually over master + companions. It AUTOMATES all nine hard-gate checks below — this is the
 machine-checkable FLOOR. Each check appends to a `fails` list and the script exits non-zero
 if any fires (a single hard gate, not a tiered one):
 1. **ref-resolution** — every `depends_on/enables/rejects/addresses/tests/implements/covers/resolved_by` id resolves to a definition.
-2. **coverage** — every `I-n` is exercised by ≥1 `T-n` (via `T-n.covers` or `I-n.tests`), the zero-test-invariant rule. Note: the companion's `I-1`..`I-12` are PROSE-defined (§A) and the linter recognizes that form.
+2. **coverage** — every `I-n` is exercised by ≥1 `T-n` (via `T-n.covers` or `I-n.tests`), the zero-test-invariant rule. Note: the companion's `I-1`..`I-13` are PROSE-defined (§A) and the linter recognizes that form.
 3. **code-fence balance** — every file has an even number of ``` fences (no unclosed block).
 4. **anchor-existence** — every `evidence` `File.java:NNN` anchor resolves: the file exists in the worktree and the line number is within range.
-5. **§28 projection-freshness** — every `I-row` in the §28 traceability matrix is derivable from the sources (`T-n.covers` / `I-n.tests`); a row listing a `T-n` not backed by a source is stale.
+5. **§28 stale-projection** — every `I-row` in the §28 traceability matrix is derivable from the sources (`T-n.covers` / `I-n.tests`); a row listing a `T-n` not backed by a source is stale.
+6. **bidirectional §28/§6.2 under-listing** — every derived `(I-n → T-n)` edge (from a `T-n.covers` / `I-n.tests` source) must be LISTED in BOTH the §28 matrix AND the test-plan §6.2 matrix; an edge present in the sources but missing from either matrix is an under-listing.
+7. **P-n must_pass set-identity** — for each phase `P-n`, the `must_pass:[...]` set must be identical across every single-line `{id: P-n ... must_pass:[...]}` representation across master + companions; divergent sets fail.
+8. **duplicate-id divergent covers+provenance** — an id appearing in more than one `id:` block must carry the SAME `covers` set AND the SAME `provenance` across all of them (per §A "exactly one id: block"); divergent metadata fails.
+9. **§28 traceability completeness** — every defined invariant (master slug OR companion bare-ordinal) has a row/mention in the §28 matrix.
 
 Semantic coherence (prose↔block, design soundness, "anchor still means what's claimed"), the
-broader **§22 decision-graph / §29 task-list** projection regenerate-and-diff, and the
+**§22 decision-graph** regenerate-and-diff, the **§29 phase scope/acceptance text**, and the
 symbol-anchor meaning check are a separate **on-demand agent pass** — they are not automated.
+(The §29 `P-n must_pass` set is now machine-checked by check 7; only the surrounding scope and
+acceptance prose stays manual.)
 
 ---
 
@@ -179,7 +185,7 @@ and consequences, the rejected-alternatives wall (§21, the `ALT-n` entries — 
 ledger), and the review-and-consensus ledger (§23, the `RC-n` entries that map every reviewer concern
 from PR [#7583](https://github.com/apache/ozone/pull/7583) / [#10502](https://github.com/apache/ozone/pull/10502) / [#10503](https://github.com/apache/ozone/pull/10503) to the decision that settles it). If your concern is concurrency or
 linearizability, the contract is **not** in this file — open the companion
-`leader-execution-locking.md`, which is authoritative for the lock model (`I-1`…`I-12` there). If your
+`leader-execution-locking.md`, which is authoritative for the lock model (`I-1`…`I-13` there). If your
 concern is "where could this corrupt data," read §15 (Failure modes) and §19 (blast radius) here, then
 the locking companion's §3 invariants.
 
@@ -2460,7 +2466,7 @@ the catalog.
 The concurrency contract the planner must honor — the container/slot lock model, lock identities
 (objectID for containers, `(parentObjectID, name)` for slots), the per-operation lock matrix, the
 hold span, the deadlock-free total order, the multi-step inter-step gaps, the no-holder-lease rule,
-and the linearizability correctness model with invariants `I-1`…`I-12` — is owned by the companion
+and the linearizability correctness model with invariants `I-1`…`I-13` — is owned by the companion
 `leader-execution-locking.md`. It is the authoritative source for anything that acquires a lock and
 is **not** re-derived here; the master summarizes it where needed (§10.1, §15, §16) and points at
 it everywhere else (§1 reviewer/implementer paths, the §10.2 diagrams' "fine-grained lock (§14)").
@@ -4197,15 +4203,15 @@ This part states what must **always** be true and what must **never** happen for
 leader-side execution, with each invariant carrying a machine-readable `I-n` block (per
 §A), its failure-prevented rationale, and at least one `T-n` mapping (CI-enforced: an
 `I-n` with zero `T-n` is a spec defect, §C rule 2). The **concurrency/locking**
-invariants I-1..I-12 are the contract of the companion `leader-execution-locking.md` and
+invariants I-1..I-13 are the contract of the companion `leader-execution-locking.md` and
 are **not duplicated here** — this part references them and adds the **parent-level**
 invariants that the locking model assumes but does not itself prove (determinism,
 domain-agnostic apply, commutative/crash-safe quota, the `#TRANSACTIONINFO`-with-patch
 atomicity, managed-index monotonicity, objectID disjointness on upgrade). Read the two
-invariant sets together: a property is either a locking invariant (I-1..I-12, companion)
+invariant sets together: a property is either a locking invariant (I-1..I-13, companion)
 or a parent invariant (the I-* below). None overlap; each is owned by exactly one doc.
 
-A note on numbering. The companion uses bare ordinals `I-1..I-12`. To avoid a clash
+A note on numbering. The companion uses bare ordinals `I-1..I-13`. To avoid a clash
 across the two documents (the lint resolves ids globally across master + companions, §C
 rule 1), the parent invariants in this section use **slug ids** (`I-inner-domain-agnostic`,
 `I-cache-free-ryw`, ...) exactly as the seeded D-n blocks in Part IV already reference
@@ -4233,7 +4239,7 @@ flag them until they land there, which is the intended back-pressure.
 
 | Invariant | Owner doc | One-line statement |
 |---|---|---|
-| I-1 .. I-12 | `leader-execution-locking.md` §3 | Lock identity, hold span, per-step release, creates-don't-serialize, FSO resolve-fail / reval / purge-no-orphan, no-holder-lease, non-thread-affine, leader-local, deadlock-free, cache-free RYW |
+| I-1 .. I-13 | `leader-execution-locking.md` §3 | Lock identity, hold span, per-step release, creates-don't-serialize, FSO resolve-fail / reval / purge-no-orphan, no-holder-lease, non-thread-affine, leader-local, deadlock-free, cache-free RYW, acquire-failure-atomic |
 | **I-inner-domain-agnostic** | this §24 | The replicated inner `Batch` is raw bytes; apply never deserializes a domain object |
 | **I-cache-free-ryw** | this §24 (with I-2/I-12) | Read-your-writes comes from RocksDB under the lock-to-commit hold, never from an OM table cache |
 | **I-quota-commutative** | this §24 | Quota usage is a commutative `Merge`; any apply order yields the same `usedBytes`/`usedNamespace` |
@@ -5325,6 +5331,7 @@ it directly.
 | I-10 | T-8 |
 | I-11 | T-3, T-hot-stripe |
 | I-12 | T-7, T-ryw-from-db |
+| I-13 | T-acquire-failure-atomic |
 | I-2 | T-4, T-6, T-holder-lease-negative |
 | I-3 | T-5 |
 | I-4 | T-7, T-hot-stripe |
@@ -5661,7 +5668,7 @@ are the locking-companion invariants of the same number (no-lock-across-gate, re
 reval, purge-no-orphan, deadlock-free-by-total-order).
 
 ```yaml
-- {id: P-2, scope: "hardest multi-step FSO: CreateFile/CreateDirectory (implicit parents), FSO delete, recursive rm-rf + DirectoryDeletingService redesign", depends_on_phases: [P-1], must_satisfy: [I-3, I-5, I-6, I-7, I-11], must_pass: [T-1, T-2, T-3, T-4, T-5, T-6, T-7, T-8], config_flag: "ozone.om.leader.execution.fso.enabled", acceptance: "FSO linearizable under T-1..T-8; no orphan; showstoppers retired"}
+- {id: P-2, scope: "hardest multi-step FSO: CreateFile/CreateDirectory (implicit parents), FSO delete, recursive rm-rf + DirectoryDeletingService redesign", depends_on_phases: [P-1], must_satisfy: [I-3, I-5, I-6, I-7, I-11], must_pass: [T-1, T-2, T-3, T-4, T-5, T-6, T-7, T-8], config_flag: "ozone.om.leader.execution.fso.enabled", acceptance: "FSO linearizable under T-1..T-8; no orphan; showstoppers retired; gated-open: [Q-rename-mtime-merge] (FSO cross-parent rename mtime merge-operator interaction, resolve within P-2 — §30)"}
 ```
 
 ---
@@ -5807,7 +5814,7 @@ is not yet *deleted*; deletion is P7. P6's "retired" means "no longer the active
 flag is on," not "removed from the tree.")
 
 ```yaml
-- {id: P-6, scope: "easy Set-A sweep (~22 single-table ops: ACLs, tagging, SetTimes, secrets, tokens, tenant, snapshot props, vol/bucket props, prepare)", depends_on_phases: [P-1], must_satisfy: [], must_pass: [], config_flag: "per-command", acceptance: "legacy path retired for simple ops"}
+- {id: P-6, scope: "easy Set-A sweep (~22 single-table ops: ACLs, tagging, SetTimes, secrets, tokens, tenant, snapshot props, vol/bucket props, prepare)", depends_on_phases: [P-1], must_satisfy: [], must_pass: [], config_flag: "per-command", acceptance: "legacy path retired for simple ops; gated-open: [Q-setacl-settimes-placement, Q-hsync-lease] (SetAcl/SetTimes lock placement + hsync/lease-recovery X(parent,file) interaction, resolve before these ops migrate in P-6 — §30)"}
 ```
 
 ---
@@ -5985,7 +5992,7 @@ each must be resolved before the phase that touches its area ships.
 - {id: Q-mpu-lock-placement, status: resolved, statement: "RESOLVED — Multipart upload (FSO/OBS) lock placement under the container/slot model is now specified in locking §2.1 (Batch 3, the 5 MPU rows: initiate/commit-part/complete/abort/expired-abort). No longer a P4 blocker.", provenance: verified, evidence: ["leader-execution-locking.md §2.1 (MPU lock placement, Batch 3)"]}
 - {id: Q-hsync-lease, statement: "hsync / lease-recovery interaction with X(parent, file) on commit is unspecified; resolve before the hsync/lease commands migrate.", provenance: verified, evidence: ["leader-execution-locking.md §10"]}
 - {id: Q-rename-mtime-merge, statement: "Exact merge-operator interaction for FSO directory mtime updates on cross-parent rename is unspecified; resolve within P2.", provenance: verified, evidence: ["leader-execution-locking.md §10"]}
-- {id: Q-snapshot-ordering, statement: "Snapshot (Checkpoint op) ordering vs in-flight fine-grained ops — the design question behind R-snapshot-checkpoint-ordering; resolve within P3.", provenance: verified, evidence: ["leader-execution-locking.md §10"]}
+- {id: Q-snapshot-ordering, status: resolved, statement: "RESOLVED — Snapshot (Checkpoint op) ordering vs in-flight fine-grained ops is now specified by the Checkpoint-ordering normative model in locking §2.2: a Checkpoint at Ratis index N captures exactly the committed prefix [0..N] in log order (I-checkpoint-exact-index), so no quiesce/barrier is needed and a half-applied multi-step op is the defined committed-prefix semantics (D-16), not a torn read. The implementation/verification risk R-snapshot-checkpoint-ordering remains, with closure at P3's T-snapshot-consistency.", provenance: verified, evidence: ["leader-execution-locking.md §2.2 (Checkpoint ordering normative model)", "I-checkpoint-exact-index", "R-snapshot-checkpoint-ordering (closure at P3 T-snapshot-consistency)"]}
 - {id: Q-setacl-settimes-placement, status: open, statement: "AllocateBlock clause RESOLVED — its lock placement is now specified in locking §2.1 (Batch 3), so P1 is unblocked on that op. STILL OPEN for SetAcl/SetTimes: lock placement (expected S(bucket)+S(P)+X(P,name)) needs confirmation; resolve before those ops migrate (P6).", provenance: verified, evidence: ["leader-execution-locking.md §2.1 (AllocateBlock lock placement, Batch 3)", "leader-execution-locking.md §10 (SetAcl/SetTimes, still open)"]}
 - {id: Q-volume-lock-escape, statement: "No volume lock exists today (no volume rename, A-4); the lock manager must stay builder-extensible if a future volume op can invalidate an in-flight key op.", provenance: verified, evidence: ["leader-execution-locking.md §10", "leader-planned-execution.md A-4 (no volume-rename op)"]}
 ```
@@ -6045,7 +6052,7 @@ The project is done — and P7 may finalize — when **all** of the following ho
 3. **Every `I-n` is tested.** The global zero-test-invariant rule (§A, §C rule 2) holds across
    the master *and* the companions: every parent invariant (§24: inner-domain-agnostic,
    cache-free-RYW, quota-commutative/crash-safe, determinism, `#TRANSACTIONINFO`-atomic,
-   managed-index-monotonic, objectID-disjoint) and every locking invariant (companion I-1..I-12)
+   managed-index-monotonic, objectID-disjoint) and every locking invariant (companion I-1..I-13)
    maps to ≥1 `T-n`. An untested invariant blocks done.
 4. **The legacy path is removed.** The double buffer (`OzoneManagerDoubleBuffer`) and the OM
    table cache are deleted; the per-node `validateAndUpdateCache` apply path is deleted; there
@@ -6229,7 +6236,7 @@ the relevant section; collected here for the reader who wants the provenance in 
   overview, the rationale spine (Part IV: D-1..D-17, D-SPEC-1..3, D-OPEN-*, ALT-n wall, RC-n
   ledger), correctness-contract index, and this delivery plan. The canonical entry point.
 - **`leader-execution-locking.md`** — the concurrency & locking companion. The contract the
-  executor must honor: container/slot lock model, invariants I-1..I-12, the multi-step
+  executor must honor: container/slot lock model, invariants I-1..I-13, the multi-step
   orchestration (§4), deadlock-avoidance order (§5), the lean lock manager (§6), the
   linearizability test architecture and T-1..T-8 (§7), bounds B-1..B-3 and EXC-1..EXC-3
   (including the soft-quota over-commit, §8), and the open items §10. Cross-referenced

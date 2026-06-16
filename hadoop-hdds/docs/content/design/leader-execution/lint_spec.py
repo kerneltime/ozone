@@ -2,16 +2,20 @@
 """
 lint_spec.py — mechanical consistency gate for the Leader-Side Execution spec suite.
 
-Automated checks (this is the FLOOR, not a full review):
-  1. ref-resolution    — every id referenced in a YAML ref field resolves to a definition
-  2. coverage          — every I-n is exercised by >=1 T-n (via T-n covers: or I-n tests:)
+Automated checks (this is the FLOOR, not a full review) — all 9 are hard gates (exit 1 on any):
+  1. ref-resolution     — every id referenced in a YAML ref field resolves to a definition
+  2. coverage           — every I-n is exercised by >=1 T-n (via T-n covers: or I-n tests:)
   3. fence-balance      — every file has an even number of ``` fences (no unclosed code block)
   4. anchor-existence   — every `File.java:NNN` evidence anchor resolves (file exists, line<=len)
-  5. projection (§28)   — every I-row in the §28 traceability table is derivable from the sources
+  5. projection (§28)   — every test listed in a §28 row is derivable from the covers:/tests: sources
+  6. projection bidir   — every covers:/tests:-derived (I,T) pair is LISTED in §28 AND test-plan §6.2
+  7. P-n set-identity   — a phase's must_pass SET is identical across all {id: P-n} representations
+  8. duplicate-id meta  — an id in >1 id: block carries the SAME covers AND provenance
+  9. §28 traceability   — every defined invariant (master slug or companion ordinal) has a §28 row
 
 NOT automated (run the on-demand agent review for these): semantic correctness, design
-completeness, phase-safety, prose-id integrity beyond the families below, and full
-regenerate-and-diff of §22/§28. See `leader-exec-spec-review-prompt.md`.
+completeness, phase-safety, prose-id integrity, the §22 decision-graph regen, and the §29
+scope/acceptance text (check 7 covers must_pass-set identity only). See `leader-exec-spec-review-prompt.md`.
 
 Exit 0 = GREEN. Non-zero = findings printed.
 """
@@ -153,6 +157,13 @@ for idn in sorted(meta_by_id):
             detail.append(f'provenance {sorted(provs)}')
         if detail:
             fails.append(f'DUPLICATE-ID divergent metadata: {idn} -> ' + '; '.join(detail))
+
+# 9. every defined invariant (master slug OR companion bare-ordinal) has a row/mention in the §28 traceability matrix
+if m:
+    s28 = m.group(1)
+    for inv in sorted(i_def):
+        if not re.search(r'(?<![\w-])' + re.escape(inv) + r'(?![\w-])', s28):
+            fails.append(f'TRACEABILITY(§28): {inv} is defined but has no row/mention in the §28 matrix')
 
 # ---- report ----
 print(f"DEFINED by family: {dict(sorted(Counter(k.split('-')[0] for k in defined).items()))}")

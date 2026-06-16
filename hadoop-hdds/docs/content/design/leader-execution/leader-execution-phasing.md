@@ -576,6 +576,13 @@ create-vs-`rm -rf`; deadlock-free (I-11) under crossing renames; showstoppers (m
 recursive delete) retired. This is the highest-risk gate in the plan (D-13's whole point); it must
 clear before P-3/P-4.
 
+**gated-open: [Q-rename-mtime-merge].** Master open question (status `open`,
+`leader-planned-execution.md` open-questions ledger; evidence locking §10): the exact
+merge-operator interaction for FSO directory mtime updates on a cross-parent rename is unspecified
+and is to be resolved **within P-2**. P-2 cannot declare its acceptance gate met until this is
+settled, because the FSO commit/rename planners landed here (PR-2.3) drive that mtime `Merge`. Not
+fabricating a resolution — surfacing the blocking open gate so the phase reader sees it.
+
 ```yaml
 id: P-2
 scope: "FSO CreateFile/CreateDirectory (multi-step mkdir-p), FSO commit/allocate/delete, rm-rf root tombstone, DirectoryDeletingService redesign + PurgeDirectories"
@@ -752,6 +759,17 @@ non-key tables with no FSO/snapshot/MPU interaction.
 
 **Acceptance gate.** Legacy path retired for all simple ops under their flags; flag-routing
 byte-identical for each. No new invariant.
+
+**gated-open: [Q-setacl-settimes-placement, Q-hsync-lease].** Two master open questions (both
+status `open`, `leader-planned-execution.md` open-questions ledger; evidence locking §10) land on
+P-6's command set and must be resolved before the ops they cover migrate here:
+(1) **Q-setacl-settimes-placement** — the `AllocateBlock` clause is RESOLVED (locking §2.1, Batch 3,
+which is why P-1 is unblocked on that op), but lock placement for **SetAcl/SetTimes** (expected
+`S(bucket)+S(P)+X(P,name)`, locking §10:173) is **still open** and must be confirmed before those
+ops — A5-A7 (ACL family) and A23 (SetTimes) in P-6's command set — migrate. (2) **Q-hsync-lease** —
+the hsync / lease-recovery interaction with `X(parent, file)` on commit is unspecified and must be
+resolved before the hsync/lease commands migrate; RecoverLease (A29) is in P-6's command set. Not
+fabricating resolutions — surfacing the blocking open gates consistently with the master.
 
 ```yaml
 id: P-6

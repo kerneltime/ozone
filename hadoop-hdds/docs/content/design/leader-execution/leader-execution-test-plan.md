@@ -29,7 +29,7 @@ evidence_branch: HDDS-11898-design-docs
 > **T-n catalog** that the master's traceability matrix (§28) and per-phase acceptance
 > (§29) project from. Conventions, schemas, and the consistency-lint rules are defined in
 > the master **§A / §C**; this file emits T-n blocks in that schema and nothing else
-> hand-maintained. Locking invariants referenced here as **I-1 … I-12** are the companion's
+> hand-maintained. Locking invariants referenced here as **I-1 … I-13** are the companion's
 > (`leader-execution-locking.md` §3); master-level invariants are referenced by their
 > master slugs (e.g. `I-inner-domain-agnostic`, `I-quota-commutative`). Where a T-n covers
 > both, both are listed in `covers:`.
@@ -449,7 +449,7 @@ remaining work as wider-configuration runs (including a re-run of M3Full with ad
 ## 4. T-n scenario catalog
 
 > Each block is emitted in the master §A `T-n` schema. `covers:` lists the invariants the
-> scenario exercises (companion `I-1 … I-12` and/or master invariant slugs). `provenance` is
+> scenario exercises (companion `I-1 … I-13` and/or master invariant slugs). `provenance` is
 > `verified` when the scenario already has a concrete artifact in the worktree (a TLA+ config,
 > a verdict file, or an exact code anchor that defines the semantics under test) and
 > `inferred` when the scenario is specified-but-not-yet-implemented. Per master §C rule 2,
@@ -1076,10 +1076,10 @@ P-n `must_pass` sets deliberately exclude them, and so does the table above:
 
 Per master §C rule 2, every `I-n` must appear in ≥1 `T-n.covers`. The matrix below is the
 test-side half of the master §28 projection (the master's generator joins this with the C-n
-`implements` and the P-n `must_pass`). **Locking companion invariants** (`I-1 … I-12`,
+`implements` and the P-n `must_pass`). **Locking companion invariants** (`I-1 … I-13`,
 authority `leader-execution-locking.md` §9) and **master invariants** (slugs) are both audited.
 
-### 6.1 Locking-companion invariants (I-1 … I-12)
+### 6.1 Locking-companion invariants (I-1 … I-13)
 
 | Invariant | Covered by | Source (companion §9 / this catalog) |
 |---|---|---|
@@ -1095,6 +1095,7 @@ authority `leader-execution-locking.md` §9) and **master invariants** (slugs) a
 | `I-10` leader-local (lock table discarded on failover) | `T-8` | companion §9 (I-10 via T-8) |
 | `I-11` deadlock-free by total order | `T-3`, `T-hot-stripe` | companion §9 (I-11 via T-3) |
 | `I-12` cache-free RYW | `T-7`, `T-ryw-from-db` | companion §9 (I-12 via T-7) |
+| `I-13` acquire failure-atomic (release K-1 held permits on throw) | `T-acquire-failure-atomic` | companion §9 (I-13 via T-acquire-failure-atomic) |
 
 ### 6.2 Master-level invariants (slugs from `leader-planned-execution.md` §24)
 
@@ -1117,7 +1118,7 @@ authority `leader-execution-locking.md` §9) and **master invariants** (slugs) a
 
 ### 6.3 Audit result
 
-- **No zero-test invariant** among `I-1 … I-12` or the master slugs enumerated in §24/§29:
+- **No zero-test invariant** among `I-1 … I-13` or the master slugs enumerated in §24/§29:
   every invariant above has ≥1 covering `T-n`. The two invariants most at risk of being
   orphaned — `I-txninfo-atomic-with-patch` and `I-checkpoint-exact-index` — are explicitly covered by
   `T-apply-failure-resync` and `T-snapshot-consistency` respectively.
@@ -1172,7 +1173,7 @@ Stated so a reviewer reads the omissions as intentional, not as gaps:
 - `leader-planned-execution.md` — master spec; §24 invariants, §26 (this plan's parent
   reference), §27 performance model + short-circuit-DB testability seam, §28 traceability,
   §29 phasing, §31 DoD ("TLA+ tiers green").
-- `leader-execution-locking.md` — concurrency companion; §3 invariants `I-1 … I-12`, §7
+- `leader-execution-locking.md` — concurrency companion; §3 invariants `I-1 … I-13`, §7
   correctness criterion + `T-1 … T-8`, §8 bounds/exceptions (`B-1`, `B-2`, `B-3`, `EXC-1/2/3`),
   §9 traceability, §10 open items (`D-OPEN-retry`).
 - TLA+/TLC models (`ozone-11898-tla`): `ObsImpl.tla`/`.cfg` + `ObsAbstract.tla` (OBS, green —
