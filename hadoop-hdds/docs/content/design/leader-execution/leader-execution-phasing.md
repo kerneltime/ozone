@@ -245,6 +245,25 @@ path's committed indices and the legacy path's flushed indices interleave withou
 the stamp or double-applying on restart. (Master §19 lists this under AFFECTED: "dual-path
 applied-index durability (extend lastSkippedIndex)".)
 
+**Algorithm.** Both writers — the legacy `OzoneManagerDoubleBuffer.flushBatch` and the new apply
+engine — maintain ONE monotonic durable index via `#TRANSACTIONINFO`: (1) each writer, in the SAME
+RocksDB `BatchOperation` as its data, writes `#TRANSACTIONINFO=TransactionInfo(termIndex)` for the
+highest index in that batch; (2) after `commitBatchOperation` returns, it advances the in-memory
+`lastAppliedTermIndex` via the existing `updateLastAppliedTermIndex` consumer (monotonic max —
+out-of-order completion between paths cannot regress it); (3) `notifyTermIndexUpdated` /
+`lastSkippedIndex` keep reconciling no-op/metadata entries; the migrated apply is a THIRD index
+source feeding the same `updateLastAppliedTermIndex`, so all three compose monotonically;
+(4) `takeSnapshot` waits until `lastAppliedTermIndex>=lastSkippedIndex` AND both writers' in-flight
+batches up to the snapshot index have committed (`awaitFlush` for the double buffer AND an
+in-flight-commit drain for the apply engine) before persisting `#TRANSACTIONINFO`+flushDB.
+Failure table: (a) new-apply batch commit throws -> nothing written (atomic batch) -> terminate+resync
+(D-10), index not advanced; (b) `#TRANSACTIONINFO` write fails -> impossible separately (same atomic
+batch as data); (c) `lastAppliedTermIndex` advance throws post-commit -> DB durable, in-memory stale
+-> terminate; (d) `takeSnapshot` persisting before a migrated batch commits -> prevented (it drains
+both paths first). Invariant: `#TRANSACTIONINFO` is monotonic = max(durable legacy index, durable
+migrated index); the applied index advances ONLY after the durable commit of whichever path produced
+it.
+
 **Why it gates everything.** If the durability stamp is not correct across both paths, a crash mid
 mixed-mode can replay a committed-but-unstamped patch (double-apply) or skip a stamped-but-unflushed
 legacy batch (lost write). Either breaks the determinism contract (D-10) the whole feature rests on.
@@ -504,7 +523,7 @@ id: P-1
 scope: "OBS halves of CreateKey, CommitKey, AllocateBlock, DeleteKey; structural CreateBucket/DeleteBucket"
 depends_on_phases: [P-0]
 must_satisfy: [I-quota-commutative, I-cache-free-ryw]
-must_pass: [T-quota-concurrent, T-ryw-from-db]
+must_pass: [T-quota-concurrent, T-quota-failover, T-ryw-from-db]
 config_flag: "ozone.om.leader.execution.obs.key.enabled"
 acceptance: "OBS key lifecycle on new model; perf ≥ 40k baseline; UsedConsistent holds; flag-routing byte-identical; production flag gated on D-OPEN-retry closure (durable retry) for the four non-idempotent ops — dev/staging may precede"
 provenance: inferred
@@ -698,7 +717,7 @@ id: P-5
 scope: "DeleteKeys, RenameKey, RenameKeys, DeleteOpenKeys, PurgeKeys (PurgeDirectories code-homes in P-2)"
 depends_on_phases: [P-2]
 must_satisfy: []
-must_pass: []
+must_pass: [T-batch-quota-no-double-decrement]
 config_flag: "per-command"
 acceptance: "batch ops linearizable; multi-slot deadlock-free; leg work complete"
 provenance: inferred

@@ -1,7 +1,7 @@
 ---
 title: Leader-Side Execution — Concurrency and Locking Design
 summary: Fine-grained, objectID-keyed locking for OBS and FSO buckets under leader-side execution, with a linearizability correctness model
-date: 2026-06-14
+date: 2026-06-15
 jira: HDDS-11898
 status: draft (working — expected to evolve)
 author: Ritesh Shukla
@@ -124,6 +124,12 @@ dest parent of a rename. All locks listed are acquired in the total order of §5
 | deleteFile | S | S(P) | X(P, file) | |
 | deleteDir (empty) | S | S(P) | X(P, d) + **X(D)** | X(D) blocks new children during the empty-check |
 | rename | S | S(P1) + S(P2) | X(P1,a) + X(P2,b) | **no X on the moved node** (children untouched, F-2) |
+| AllocateBlock | S | S(P) (FSO) / — (OBS) | X(open-key slot: (parentObjectID, name, clientID)) | block append to an existing OPEN key; serialize the same client's parallel allocates on that open key (else wrong block-list update) |
+| InitiateMultiPartUpload | S | S(P) (FSO) | — | the MPU open entry carries uploadId, so distinct uploads of the same name never collide (like createKey); no slot lock |
+| CommitMultiPartUpload (part) | S | S(P) (FSO) | X(part slot: (parentObjectID, name, uploadId, partNum)) | serialize re-commit of the same part (dangling blocks on overwrite) |
+| CompleteMultiPartUpload | S | S(P) (FSO) | X(P, key) | assemble parts into the committed key; serialize with other completes/aborts of the same key |
+| AbortMultiPartUpload | S | S(P) (FSO) | X(P, key) | release all parts; exclude concurrent commit-part / complete |
+| AbortExpiredMultiPartUploads | S | S(P) | X per upload, acquired in sorted order (batch) | background; per-upload key write, ordered to avoid deadlock |
 | SetBucketProperty / DeleteBucket | X | — | — | exclusive bucket |
 
 Rationale highlights:
@@ -137,6 +143,35 @@ Rationale highlights:
   conflict with the rename. The slot `X(P1, a)` is the rendezvous for rename-vs-delete
   of `D`; the container `X(D)` (held only by delete-empty) is the rendezvous for
   create-under-`D`-vs-delete-`D`.
+
+### 2.2 Checkpoint (snapshot) ordering
+
+The Checkpoint operation is itself a replicated transition at a Ratis log index N.
+Because every node applies transitions in Ratis log order, when the Checkpoint at index
+N is applied, all transitions with index <= N are already applied to RocksDB and none
+with index > N are. So the checkpoint image equals the DB after applying exactly [0..N]
+(**I-checkpoint-exact-index**); no quiesce or barrier is required — the log order
+provides the consistent cut. A Checkpoint at N captures the **COMMITTED PREFIX** of any
+in-flight multi-step operation: sub-steps with index <= N are included, those > N are
+not. A snapshot legally containing 'mkdir b, c' without the final 'create file' is the
+**DEFINED, correct semantics** (D-16 non-atomicity), not a torn read. SnapshotPurge is
+likewise applied in log order as its **OWN batch** (no other migrated write coalesced
+into the same RocksDB batch as the snapshot-directory deletion), preserving the
+purge-vs-replay isolation the double buffer's standalone-batch barrier provided.
+
+### Lock-placement coverage map
+
+So that lock-placement coverage is explicit, each command class maps to where its
+placement is specified:
+
+| Command class | Lock placement specified in |
+|---|---|
+| createKey/File, commit, deleteFile/Dir, rename, createDir | §2.1 rows |
+| AllocateBlock + MPU (5 ops) | §2.1 rows |
+| recursive delete / rm -rf / purge | §4.2 + I-7 |
+| batch (DeleteKeys/RenameKeys) | §5 multi-slot ordered acquisition |
+| SetAcl/SetTimes | expected S(bucket)+S(P)+X(P,name) [Q-setacl-settimes, resolve before P-6] |
+| non-namespace ops (volume/tenant/token/secret single-table) | no container/slot lock needed (single-row Put/Delete; volume-lock escape hatch is the only future concern per §10) |
 
 ---
 
@@ -166,6 +201,11 @@ Rationale highlights:
   enumerates current children **under that lock**, and removes the node only when
   childless; a late child (from an in-flight create that resolved before the root
   tombstone) is processed before the node is removed. Guarantees **no orphan**.
+  I-7's strict prose ("no orphan") is the design contract; the FSO TLA model's
+  orphan invariant is named **Accounted** (no PERMANENT orphan — the EXC-2-weakened
+  form of I-7, which the FSO TLA model actually checks; transient orphans during the
+  async per-node purge are allowed and eventually reclaimed), and `Accounted` is the
+  bounded-model realization of that strict contract.
 - **I-8 (no holder lease — correctness-critical).** A held lock is **never** revoked from
   an in-flight holder. Lock release happens only in the holder's own completion path
   (commit or failure). A lease that expired a held lock while its Ratis op was still in

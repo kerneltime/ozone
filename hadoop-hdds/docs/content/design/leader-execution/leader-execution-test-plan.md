@@ -1,6 +1,6 @@
 ---
 title: Leader-Side Execution — Test Strategy & Plan
-summary: The correctness contract (linearizability against a single-threaded sequential reference model at transition granularity), the test architecture (reference oracle + randomized concurrent harness + linearizability checker + invariant assertions), the TLA+/TLC formal tier (OBS green; FSO green at bounded scope across three increments — M2a tree, M2b directory rename, M3 recursive delete; broader configs in progress), and the T-n scenario catalog with per-phase acceptance mapping. Companion to leader-planned-execution.md §26.
+summary: The correctness contract (linearizability against a single-threaded sequential reference model at transition granularity), the test architecture (reference oracle + randomized concurrent harness + linearizability checker + invariant assertions), the TLA+/TLC formal tier (OBS green; FSO M2a tree + M2b directory rename bounded-green with captured verdicts; M3 recursive delete tight-bound configured but verdict capture pending, M3Full MAX_OPS=2 in progress), and the T-n scenario catalog with per-phase acceptance mapping. Companion to leader-planned-execution.md §26.
 date: 2026-06-15
 jira: HDDS-11898
 status: draft
@@ -143,8 +143,9 @@ The bar is **not uniform** across all observable state (`leader-execution-lockin
 - **Subtree reclamation after `rm -rf`** is **eventually consistent** (`EXC-1`, `EXC-2`):
   the namespace root disappears synchronously (`I-5`) but descendant purge and quota release
   drain in the background. The checker treats reclamation as "converges after background work
-  drains," asserting the *invariant* `NoOrphan` at every point but the *final aggregate* only
-  after quiescence.
+  drains," asserting `Accounted` (no PERMANENT orphan): a node may be transiently orphaned during
+  the async per-node purge (`EXC-2`), so the oracle asserts EVENTUAL reclamation, not absence-at-every-step.
+  This matches the FSO TLA model's `Accounted` invariant.
 
 ### 1.5 The reference model is the source of legality, and it is cache-free
 
@@ -339,12 +340,13 @@ The models live in the sibling worktree `ozone-11898-tla` (referenced from
   (`NoLeak`), and never loses/double-counts a quota update (`UsedConsistent`). This is the
   formal backstop for `I-2`, `I-8`, `I-12`, and the soft-quota `UsedConsistent` claim.
 
-### 3.3 The FSO model (now exists; three bounded-exhaustive increments green)
+### 3.3 The FSO model (now exists; M2a/M2b bounded-green, M3 in progress)
 
-The master scaffold (§26) described FSO as "planned." **As of 2026-06-15 the FSO model exists
-and was checked green in three bounded-exhaustive increments — M2a (tree + file rename), M2b
-(directory rename), and M3 (recursive delete)**; this plan records that updated state
-faithfully rather than the stale "planned" label, and scopes the remaining work as
+The master scaffold (§26) described FSO as "planned." **As of 2026-06-15 the FSO model exists:
+M2a (tree + file rename) and M2b (directory rename) are bounded-green with captured verdicts; M3
+(recursive delete) has its tight bound configured but its verdict is not yet captured, and the
+broader M3Full (`MAX_OPS=2`) pass is in progress, not complete**; this plan records that updated
+state faithfully rather than the stale "planned" label, and scopes the remaining work as
 wider-configuration runs.
 
 - **Spec/config**: `FsoImpl.tla` checked against `FsoAbstract.tla` via `Refinement`, with
@@ -355,8 +357,8 @@ wider-configuration runs.
   rename vs delete) all surface at this scale (small-scope hypothesis)."
   *(evidence: `ozone-11898-tla/FsoImpl.cfg`, `ozone-11898-tla/FsoImplSmall.cfg`,
   `ozone-11898-tla/FsoAbstract.tla`)*
-- **Verdict — GREEN (bounded-exhaustive, three increments).** All report `Model checking
-  completed. No error has been found.`
+- **Verdict — M2a/M2b GREEN (bounded-exhaustive, captured); M3 verdict capture pending.** The two
+  captured increments report `Model checking completed. No error has been found.`
   - **M2a** (tree: createDir/createFile/commitFile/deleteFile/deleteDir-empty + file rename),
     `MAX_OPS=2`: **69,290,922 states generated, 26,828,240 distinct**, state-graph depth **41**,
     finished in **42min 12s**. *(evidence: `ozone-11898-tla/fso-m2a-full.out` tail — "No error
@@ -366,17 +368,19 @@ wider-configuration runs.
     **80,746,288 states generated, 32,400,283 distinct**, depth **41**, finished in **1h 15min**.
     *(evidence: `ozone-11898-tla/fso-m2b-full.out` tail — "No error has been found"; "80746288
     states generated, 32400283 distinct states found")*
-  - **M3** (recursive delete: tombstone + decomposed per-node-locked purge), green at its tight
-    bound (`FsoM3.cfg`, `MAX_OPS=1`); the broader `MAX_OPS=2` pass (`FsoM3Full.cfg`,
-    `ozone-11898-tla/fso-m3-full.out`) is confirming. M3 checks **`Accounted`** (no *permanent*
-    unaccounted orphan) instead of strict `NoOrphan`, because transient mid-purge orphans are by
-    design (EXC-2). *(evidence: `ozone-11898-tla/FsoM3.cfg` — `INVARIANT Accounted`, "Strict
-    NoOrphan is intentionally NOT checked")*
-- **What it establishes**: across the three increments the namespace model **refines** the
-  abstract per-node oracle and holds `LockInv`, `NoLeak`, and the orphan-freedom property
-  (`NoOrphan` for M2a/M2b, `Accounted` for M3) — the formal backstop for the hardest FSO claims
-  (`I-5`, `I-6`, `I-7`, `I-11`) that the adversarial `T-1 … T-8` scenarios exercise in the Java
-  harness.
+  - **M3** (recursive delete: tombstone + decomposed per-node-locked purge): its tight bound is
+    **configured** (`FsoM3.cfg`, `MAX_OPS=1`) but the verdict is **not yet captured**, and the
+    broader M3Full `MAX_OPS=2` pass (`FsoM3Full.cfg`, `ozone-11898-tla/fso-m3-full.out`) is **in
+    progress, not complete**. M3 checks **`Accounted`** (no *permanent* unaccounted orphan) instead
+    of strict `NoOrphan`, because transient mid-purge orphans are by design (EXC-2). *(evidence:
+    `ozone-11898-tla/FsoM3.cfg` — `INVARIANT Accounted`, "Strict NoOrphan is intentionally NOT
+    checked")*
+- **What it establishes**: across the two captured increments (M2a/M2b) the namespace model
+  **refines** the abstract per-node oracle and holds `LockInv`, `NoLeak`, and the orphan-freedom
+  property (`NoOrphan`) — the formal backstop for the hardest FSO claims (`I-5`, `I-6`, `I-7`,
+  `I-11`) that the adversarial `T-1 … T-8` scenarios exercise in the Java harness. M3's `Accounted`
+  invariant is configured but its verdict is pending capture, so the recursive-delete orphan-freedom
+  backstop is not yet established at the formal tier.
 - **Remaining (planned)**: completion of the broader M3 `MAX_OPS=2` pass; larger `MAXOID`,
   `MAX_OPS≥3`, and `Procs={1,2,3}` runs to widen the small-scope hypothesis; an explicit
   failover/crash action in the FSO model to mirror `T-8` at the formal tier. These are the open
@@ -577,6 +581,16 @@ statement: >
 covers: [I-quota-commutative]
 provenance: verified
 evidence: ["ozone-11898-tla/QuotaOvercommit.cfg (PROPERTY RefinementExact; documented expected 'RefinementExact violated' trace)", "ozone-11898-tla/ObsAbstractExact.tla (exact gate aused+1<=QUOTA_LIMIT)", "leader-planned-execution.md D-OPEN-quota-enforcement (TLC counterexample 2026-06-15)"]
+```
+```yaml
+# T-batch-quota-no-double-decrement
+id: T-batch-quota-no-double-decrement
+statement: >
+  DeleteKeys/RenameKeys batch: assert each per-key quota decrement is applied EXACTLY ONCE under
+  client retry and partial-batch failure (PARTIAL_DELETE / PARTIAL_RENAME) — no double-decrement,
+  no lost key.
+covers: [I-quota-commutative]
+provenance: inferred
 ```
 
 ### 4.3 Determinism, apply-failure, and read-your-writes
@@ -966,11 +980,11 @@ the master §29 prose treats them.
 | Phase | Scope (abbrev.) | Gating T-n (must pass) | Formal-tier gate |
 |---|---|---|---|
 | **P-0** | Framework substrate (12 components) unwired + legacy→ManagedIndex objectID retrofit + dual-path index durability | `T-cross-thread-release`, `T-objectid-disjoint`, `T-proto-roundtrip`, `T-mixed-mode-cross-model-race`, `T-mixed-mode-stale-read` | (substrate; no model gate — models exercise P-1/P-2 behavior) |
-| **P-1** | Hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey | `T-quota-concurrent`, `T-ryw-from-db` | **OBS model green** (`ObsImpl.cfg`: Refinement + LockInv + NoLeak + UsedConsistent) — `obs3-verdict.out` |
-| **P-2** | Hardest multi-step FSO: CreateFile/CreateDirectory (implicit parents), FSO delete, recursive rm-rf + DirectoryDeletingService redesign | `T-1`, `T-2`, `T-3`, `T-4`, `T-5`, `T-6`, `T-7`, `T-8` | **FSO model green** (Refinement + LockInv + NoLeak + NoOrphan/Accounted) — M2a `fso-m2a-full.out` (26.8M distinct), M2b directory rename `fso-m2b-full.out` (32.4M distinct), M3 recursive delete green at tight bound `FsoM3.cfg`; broader M3 `MAX_OPS=2` pass confirming |
+| **P-1** | Hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey | `T-quota-concurrent`, `T-quota-failover`, `T-ryw-from-db` | **OBS model green** (`ObsImpl.cfg`: Refinement + LockInv + NoLeak + UsedConsistent) — `obs3-verdict.out` |
+| **P-2** | Hardest multi-step FSO: CreateFile/CreateDirectory (implicit parents), FSO delete, recursive rm-rf + DirectoryDeletingService redesign | `T-1`, `T-2`, `T-3`, `T-4`, `T-5`, `T-6`, `T-7`, `T-8` | **FSO model M2a/M2b green** (Refinement + LockInv + NoLeak + NoOrphan) — M2a `fso-m2a-full.out` (26.8M distinct), M2b directory rename `fso-m2b-full.out` (32.4M distinct); M3 recursive delete (`Accounted`) tight bound `FsoM3.cfg` configured, verdict capture pending; M3Full `MAX_OPS=2` (`fso-m3-full.out`) in progress, not complete |
 | **P-3** | Snapshot: CreateSnapshot/Checkpoint op, SnapshotPurge standalone, moves | `T-snapshot-consistency` | (FSO model extension for Checkpoint-vs-op ordering: planned) |
 | **P-4** | MPU (4 ops + AbortExpired) + large-value ([HDDS-8238](https://issues.apache.org/jira/browse/HDDS-8238)) revisit | `T-mpu-lifecycle` | n/a |
-| **P-5** | Batch/background: DeleteKeys, RenameKey/Keys, DeleteOpenKeys, PurgeKeys/Directories | (none — leg work; multi-slot ordering covered transitively by `T-3` ordering + `NoLeak`, and by the cross-cutting set below) | n/a |
+| **P-5** | Batch/background: DeleteKeys, RenameKey/Keys, DeleteOpenKeys, PurgeKeys/Directories | `T-batch-quota-no-double-decrement` (per-key quota decrement exactly-once under retry + partial-batch failure); multi-slot ordering covered transitively by `T-3` ordering + `NoLeak`, and by the cross-cutting set below | n/a |
 | **P-6** | Easy Set-A sweep (~22 single-table ops) | (none — leg work; per-command flag-routing parity is the cross-cutting `T-flag-routing-both-paths` applied per op, below) | n/a |
 | **P-7** | Cleanup: remove double buffer + table cache; delete legacy path; finalize | (none — full regression green with legacy path REMOVED; `T-ryw-from-db` now the only RYW path; `T-rolling-upgrade-mixed-binary` superseded by finalization) | OBS + FSO models green; `QuotaOvercommit.cfg` per `D-OPEN-quota-enforcement` resolution |
 

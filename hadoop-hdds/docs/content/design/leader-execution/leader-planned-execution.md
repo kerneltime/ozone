@@ -113,6 +113,8 @@ must_satisfy:        # [I-...]
 must_pass:           # [T-...]
 config_flag:
 acceptance:          # machine-checkable "done"
+provenance:          # (optional) verified | inferred
+evidence:            # (optional) [file:line / PR# / reviewer]
 ```
 ```yaml
 # I-n / B-n / T-n
@@ -128,6 +130,9 @@ evidence: ...
 > per-phase task list (§29), and invariant-coverage report (§28)** — are GENERATED from
 > these blocks. Never hand-maintain them.
 
+> Note: the locking companion's invariants `I-1`..`I-12` are PROSE-defined (`- **I-n (title).**`)
+> and the lint recognizes that form — they are intentionally not duplicated as YAML blocks.
+
 ## §B. Document map
 
 | Doc | Role | Status |
@@ -138,16 +143,22 @@ evidence: ...
 | `leader-execution-test-plan.md` | Companion: full test strategy + T-n catalog | draft |
 | `leader-execution-phasing.md` | Companion: per-command migration playbook | draft |
 
-## §C. Consistency lint (CI gate — mechanical, no agent)
+## §C. Consistency lint (mechanical linter + on-demand agent pass)
 
-The docs build runs `lint-spec` over all blocks in master + companions and FAILS on:
-1. **ref-resolution** — every `depends_on/enables/rejects/addresses/tests/implements/covers/resolved_by` id exists.
-2. **coverage** — every `I-n` appears in ≥1 `C-n.implements` AND ≥1 `T-n.covers` (the zero-test-invariant rule).
-3. **no-orphans** — every `ALT-n` has a `killed_by`/`deferred_by`; every `RC-n` a `status`; no unreferenced `D-n`.
-4. **status-sanity** — no `locked` `D-n` `depends_on` an `open` `D-n`.
-5. **projection-freshness** — regenerate matrix/graph/task-list and diff == 0.
-6. **anchor-existence** — every `evidence`/`target_files` `file:line` or symbol resolves in the source tree (`rg`/`sg`).
-Semantic coherence (prose↔block, design soundness, "anchor still means what's claimed") is a separate **on-demand agent pass**, not in CI.
+There is no CI gate yet. The committed linter is `lint_spec.py` (in this folder); run it
+manually over master + companions. It AUTOMATES:
+1. **ref-resolution** — every `depends_on/enables/rejects/addresses/tests/implements/covers/resolved_by` id resolves to a definition.
+2. **coverage** — every `I-n` is exercised by ≥1 `T-n` (via `T-n.covers` or `I-n.tests`), the zero-test-invariant rule. Note: the companion's `I-1`..`I-12` are PROSE-defined (§A) and the linter recognizes that form.
+3. **code-fence balance** — every file has an even number of ``` fences (no unclosed block).
+
+Anchor-existence (`evidence` `File.java:NNN` resolves — file exists, line in range) and the
+**§28 traceability-matrix** projection-freshness (every `I-row` derivable from the sources)
+are SEMI-automated: `lint_spec.py` checks them, but the broader projection set (§22 decision
+graph, §29 task list) and the semantic anchor-meaning check are the on-demand agent pass.
+
+Semantic coherence (prose↔block, design soundness, "anchor still means what's claimed"), the
+§22/§29 projection regenerate-and-diff, and the symbol-anchor meaning check are a separate
+**on-demand agent pass** — they are not automated.
 
 ---
 
@@ -826,14 +837,17 @@ Three things changed between [#7583](https://github.com/apache/ozone/pull/7583)'
    taken (the rejected `ALT-value-first-phasing`). Each phase lands incrementally in
    master behind a flag, so there is always a small, mergeable step.
 2. **Formal TLA+ validation.** The correctness-critical claims are not argued in prose
-   alone. An OBS TLA+ model is checked with TLC (it is *green* against the accepted
-   soft-quota oracle, and it **mechanically reproduced** the quota over-commit
-   counterexample that keeps `D-OPEN-quota-enforcement` honest — see
-   `leader-execution-locking.md §8 EXC-3` and §30). The FSO model is now also green: TLC
-   checked the FSO namespace tier exhaustively in three bounded-exhaustive increments — M2a
-   (tree + file rename) and M2b (directory rename) both fully green at `MAX_OPS=2`, and M3
-   (recursive delete) green at its tight bound with the broader `MAX_OPS=2` pass confirming.
-   A formal tier
+   alone. An OBS TLA+ model is checked with TLC against the accepted
+   soft-quota oracle (`ObsAbstract`, green), and `QuotaOvercommit.cfg` is the configured red
+   oracle (`ObsAbstractExact`) that mechanically states the quota over-commit
+   counterexample which keeps `D-OPEN-quota-enforcement` honest (captured TLC verdict pending
+   — see `leader-execution-locking.md §8 EXC-3` and §30). The FSO model is bounded-green at M2a and
+   M2b (captured verdicts): TLC checked the FSO namespace tier exhaustively in two
+   bounded-exhaustive increments — M2a (tree + file rename) and M2b (directory rename) both
+   fully green at `MAX_OPS=2`. M3 (`FsoM3.cfg`, recursive delete, `MAX_OPS=1`) is configured and
+   run locally but its verdict artifact is not yet captured; the broader `FsoM3Full.cfg`
+   (`MAX_OPS=2`) pass is IN PROGRESS, not complete (last checkpoint ~22M states queued, no
+   completion verdict). A formal tier
    that can *fail the build* on a divergence claim is a different level of assurance than
    [#7583](https://github.com/apache/ozone/pull/7583) had.
 3. **The rationale spine (Part IV).** [#7583](https://github.com/apache/ozone/pull/7583)'s most expensive asset — the reasoning behind
@@ -1065,7 +1079,8 @@ does **not** target serializable isolation of multi-operation transactions, beca
 no multi-operation transaction concept to isolate. This criterion is validated two ways:
 the concurrent linearizability harness against the sequential reference model
 (`leader-execution-locking.md §7`), and the formal **TLA+/TLC** models (OBS green; FSO
-green at bounded scope — M2a/M2b at `MAX_OPS=2`, M3 at its tight bound), which check the
+bounded-green at M2a/M2b (captured verdicts at `MAX_OPS=2`), M3 partial — `FsoM3Full.cfg`
+in progress, no completion verdict), which check the
 implementation model refines the abstract sequential model. In
 one line: **borrow per-key serialization, the single serial writer, and idempotent retry;
 do not borrow MVCC, 2PC, or interactive transactions; prove correctness as linearizability
@@ -4045,7 +4060,7 @@ status: deferred
 depends_on: [D-7]
 raised_by: [ivandika3, kerneltime]
 addresses: [RC-ivandika-retry-cache-semantics]
-consequences: ["DB batch already idempotent (whole-object puts); only RE-EXECUTION is non-idempotent (SCM alloc + quota Merge) → audit scope ~10 ops, not 47", "atomic-with-data-batch is the likely invariant for non-idempotent ops", "P-1 production enablement is GATED: the OBS key path MUST NOT enable the production runtime flag for {CreateKey, CommitKey, AllocateBlock, DeleteKey} until either a durable retry path exists OR those ops are proven safe under client-retry semantics by harness. Dev/staging flag may precede. The non-idempotent-on-re-plan set (SCM block alloc + quota Merge) is what needs the atomic-with-batch retry entry."]
+consequences: ["DB batch already idempotent (whole-object puts); only RE-EXECUTION is non-idempotent (SCM alloc + quota Merge) → audit scope ~10 ops, not 47", "atomic-with-data-batch is the likely invariant for non-idempotent ops", "P-1 production enablement is GATED: the OBS key path MUST NOT enable the production runtime flag for {CreateKey, CommitKey, AllocateBlock, DeleteKey} until either a durable retry path exists OR those ops are proven safe under client-retry semantics by harness. Dev/staging flag may precede. The non-idempotent-on-re-plan set (SCM block alloc + quota Merge) is what needs the atomic-with-batch retry entry.", "Mechanism under active design in a parallel effort (Ratis retry-cache based durable idempotency for the non-idempotent ops); the P-1 production gate (above) holds until it lands."]
 tests: []
 provenance: verified
 evidence: ["per-command inventory 2026-06-15", "leader-execution-locking.md §10"]
@@ -4940,6 +4955,18 @@ provenance: verified
 evidence: ["FullTableCache.java:200-213", "PartialTableCache.java:158-169", "OmMetadataManagerImpl.java:494-495", "D-17"]
 ```
 
+**Ordering and failure semantics.** On the migrated apply the RocksDB batch is committed
+FIRST; the cache invalidate/update happens AFTER the durable commit, so the cache never
+exposes a value that is not yet durable. For PartialTableCache, invalidation (remove)
+suffices — a subsequent read misses and falls through to RocksDB (the authoritative committed
+value). For the AUTHORITATIVE FullTableCache (volume/bucket, which never falls through to DB),
+the apply re-puts the merged value; if that put fails it EVICTS-and-reloads the entry from
+RocksDB; if the reload also fails (a RocksDB read error) the node terminates and re-syncs
+(D-10). The FullTableCache must never serve a value inconsistent with the committed DB. The
+cache step is an in-memory side effect AFTER the atomic DB batch, so it can never leave the DB
+partially written; a PartialTableCache-step failure is non-fatal (DB is the fallback), a
+FullTableCache-step failure escalates to reload-or-terminate.
+
 ---
 
 ### 24.x A note on the OPEN quota-enforcement question (do not read any invariant as settling it)
@@ -5191,22 +5218,25 @@ reason the open quota question is **provably** open, not hand-waved):
   appendix TLA+ index) check the OBS execution+quota model; the accepted oracle `ObsAbstract`
   models quota as **soft** and `ObsImpl` **refines** it (green).
 - **The over-commit counterexample is a standing test.** `QuotaOvercommit.cfg` checks `ObsImpl`
-  against the **exact**-quota oracle `ObsAbstractExact` and **TLC returns the counterexample**
-  (two commits plan at `used=0`, both apply, `used=2 > limit=1`) — `T-quota-exact-tlc`. This
+  against the **exact**-quota oracle `ObsAbstractExact` — the configured red oracle expected to
+  yield the counterexample (two commits plan at `used=0`, both apply, `used=2 > limit=1`),
+  `T-quota-exact-tlc`; its captured TLC verdict is pending. This
   is what keeps D-OPEN-quota-enforcement **honestly open**: the over-commit is mechanically
   reproducible, so the open question cannot be silently closed.
-- **FSO model — green (bounded-exhaustive).** The `FsoAbstract` (atomic per-node oracle) /
-  `FsoImpl` (container/slot objectID-keyed lock manager) models check the FSO
+- **FSO model — bounded-green at M2a/M2b (captured); M3 partial.** The `FsoAbstract` (atomic
+  per-node oracle) / `FsoImpl` (container/slot objectID-keyed lock manager) models check the FSO
   namespace+locking tier; `FsoImpl` **refines** the atomic oracle and holds deadlock-freedom
-  and lock-safety. TLC checked it in three increments, all green: **M2a** (tree:
+  and lock-safety. TLC checked two increments green with captured verdicts: **M2a** (tree:
   createDir/createFile/commitFile/deleteFile/deleteDir-empty + file rename — 26,828,240
   distinct states, `fso-m2a-full.out`), **M2b** (directory rename with objectID/rename
-  stability + cycle prevention — 32,400,283 distinct states, `fso-m2b-full.out`), and **M3**
-  (recursive delete: tombstone + decomposed per-node-locked purge) green at its tight bound
-  (`FsoM3.cfg`, `MAX_OPS=1`) with the broader `MAX_OPS=2` pass (`FsoM3Full.cfg`) confirming.
-  M3 checks `Accounted` (no *permanent* unaccounted orphan) rather than strict `NoOrphan`
-  because transient mid-purge orphans are by design (EXC-2). This is bounded-exhaustive TLC,
-  not an unbounded proof: green at the stated scope (spec §34).
+  stability + cycle prevention — 32,400,283 distinct states, `fso-m2b-full.out`). **M3**
+  (recursive delete: tombstone + decomposed per-node-locked purge; `FsoM3.cfg`, `MAX_OPS=1`)
+  is configured and run locally but its verdict artifact is not yet captured; the broader
+  `FsoM3Full.cfg` (`MAX_OPS=2`) pass is IN PROGRESS, not complete (last checkpoint ~22M states
+  queued, no completion verdict). M3 checks `Accounted` (no *permanent* unaccounted orphan,
+  EXC-2 form) rather than strict `NoOrphan` because transient mid-purge orphans are by design.
+  This is bounded-exhaustive TLC, not a general proof: M2a/M2b green at the stated scope, M3
+  partial (spec §34).
 
 **Per-phase acceptance** maps into the companion and the phase blocks (§29): P-0
 (`T-cross-thread-release`, `T-objectid-disjoint`, `T-proto-roundtrip`), P-1
@@ -5540,7 +5570,7 @@ EXC-3's `UsedConsistent`). Specifically `T-quota-concurrent` and `T-ryw-from-db`
 writes served from RocksDB with no cache, proving D-3) pass.
 
 ```yaml
-- {id: P-1, scope: "hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey", depends_on_phases: [P-0], must_satisfy: [I-quota-commutative, I-cache-free-ryw], must_pass: [T-quota-concurrent, T-ryw-from-db], config_flag: "ozone.om.leader.execution.obs.key.enabled", acceptance: "OBS key path on new model; perf ≥ baseline; quota correct; production flag gated on D-OPEN-retry closure (durable retry) for the four non-idempotent ops — dev/staging may precede"}
+- {id: P-1, scope: "hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey, CreateBucket, DeleteBucket", depends_on_phases: [P-0], must_satisfy: [I-quota-commutative, I-cache-free-ryw], must_pass: [T-quota-concurrent, T-ryw-from-db, T-quota-failover], config_flag: "ozone.om.leader.execution.obs.key.enabled", acceptance: "OBS key path on new model; perf ≥ baseline; quota correct; production flag gated on D-OPEN-retry closure (durable retry) for the four non-idempotent ops — dev/staging may precede"}
 ```
 
 ---
@@ -5827,10 +5857,11 @@ not as a settled trade-off. The state of the record:
   truth, decrement-on-abort, and rebuild-from-DB on failover). That is a genuine
   not-yet-resolved tension between two artifacts: the prose spec (lean toward soft) and the
   formal model (recommends exact). D-OPEN-quota-enforcement records both and is `status: open`.
-- **The TLC evidence is mechanical and reproducible.** `QuotaOvercommit.cfg` checks the model
-  against `ObsAbstractExact`; TLC returns the counterexample "two commits plan at `used=0`,
-  both apply, `used=2 > limit=1`" (locking EXC-3 "Evidence"; D-OPEN-quota-enforcement
-  consequences). The accepted oracle `ObsAbstract` models quota as *soft* and the
+- **The TLC evidence is mechanical and reproducible.** `QuotaOvercommit.cfg` is the configured
+  red oracle (`ObsAbstractExact`) expected to yield the counterexample "two commits plan at
+  `used=0`, both apply, `used=2 > limit=1`" (locking EXC-3 "Evidence";
+  D-OPEN-quota-enforcement consequences); its captured TLC verdict is pending. The accepted
+  oracle `ObsAbstract` models quota as *soft* and the
   implementation model `ObsImpl` refines it (green). So both are true at once: the design is
   internally consistent against a *soft* oracle, and provably violates an *exact* oracle.
 - **Closure gate.** This risk closes when D-OPEN-quota-enforcement is decided. If the decision
@@ -5950,9 +5981,9 @@ A phase is done when **all** of the following hold for that phase:
    flag does not default to legacy is not done — it is a forced migration, which D-14 forbids.
 3. **The formal tier for the phase's behavior refines its oracle.** For phases that touch
    namespace/quota semantics (P1 quota, P2 FSO), the corresponding TLA+ model
-   (`ObsAbstract`/`ObsImpl` for OBS+quota; `FsoAbstract`/`FsoImpl` for FSO, now green at
-   bounded scope) must check green against its
-   accepted oracle. For P1 specifically, the *soft-quota* oracle (`ObsAbstract`) is green;
+   (`ObsAbstract`/`ObsImpl` for OBS+quota; `FsoAbstract`/`FsoImpl` for FSO, bounded-green at
+   M2a/M2b with captured verdicts, M3 partial — `FsoM3Full.cfg` in progress) must check green
+   against its accepted oracle. For P1 specifically, the *soft-quota* oracle (`ObsAbstract`) is green;
    the *exact* oracle (`ObsAbstractExact`) is a known counterexample tracked under
    R-quota-enforcement, and whether it must be green is gated on D-OPEN-quota-enforcement.
 4. **Performance is at or above the phase baseline.** Where the phase has a perf gate (P1:
@@ -6234,26 +6265,31 @@ quota-enforcement risk R-quota-enforcement). The models live in the `ozone-11898
   *accepted* oracle for the implementation model. Green.
 - **`ObsImpl`** — the OBS implementation model. Refines `ObsAbstract` (green) — the design is
   internally consistent against the soft-quota oracle.
-- **`ObsAbstractExact`** — the *exact*-quota oracle. The implementation **does not** refine it:
-  `QuotaOvercommit.cfg` checks against `ObsAbstractExact` and TLC returns the counterexample
-  "two commits plan at `used=0`, both apply, `used=2 > limit=1`" (the mechanical proof behind
-  EXC-3 and D-OPEN-quota-enforcement). Deliberately red — it is the formal statement of the
+- **`ObsAbstractExact`** — the *exact*-quota oracle. The implementation is **not expected** to
+  refine it: `QuotaOvercommit.cfg` is the configured red oracle against `ObsAbstractExact`,
+  expected to yield the counterexample "two commits plan at `used=0`, both apply,
+  `used=2 > limit=1`" (the mechanical statement behind EXC-3 and D-OPEN-quota-enforcement); its
+  captured TLC verdict is pending. Deliberately red — it is the formal statement of the
   open quota question, not a bug to be silently fixed. Resolved only when
   D-OPEN-quota-enforcement decides exact (then made green via the leader-local reservation +
   `T-quota-exact-tlc`) or the soft-quota limitation is formally accepted (EXC-3).
-- **`FsoAbstract` / `FsoImpl`** — the FSO linearizability/locking model that P2 checks green
-  against the atomic per-node oracle (the formal counterpart of the T-1..T-8 concurrent
+- **`FsoAbstract` / `FsoImpl`** — the FSO linearizability/locking model that P2 checks against
+  the atomic per-node oracle (the formal counterpart of the T-1..T-8 concurrent
   harness). `FsoImpl` (container/slot objectID-keyed lock manager) refines `FsoAbstract`
-  (atomic per-node oracle). Status: **green (bounded-exhaustive)** — M2a (26,828,240 distinct),
-  M2b directory rename (32,400,283 distinct), and M3 recursive delete green at its tight bound
-  (`FsoM3.cfg`) with the broader `MAX_OPS=2` pass confirming. M3 checks `Accounted` (no
-  permanent unaccounted orphan) rather than strict `NoOrphan`, since transient orphans are by
-  design (EXC-2).
+  (atomic per-node oracle). Status: **M2a/M2b verified (captured); M3 partial** — M2a
+  (26,828,240 distinct) and M2b directory rename (32,400,283 distinct) green with captured
+  verdicts; M3 recursive delete (`FsoM3.cfg`, `MAX_OPS=1`) is configured and run locally but
+  its verdict artifact is not yet captured, and the broader `FsoM3Full.cfg` (`MAX_OPS=2`) pass
+  is IN PROGRESS (last checkpoint ~22M states queued, no completion verdict). M3 checks
+  `Accounted` (no permanent unaccounted orphan, EXC-2 form) rather than strict `NoOrphan`,
+  since transient orphans are by design.
 
 Provenance: the OBS tier (`ObsAbstract`/`ObsImpl`/`ObsAbstractExact`) and the
-`QuotaOvercommit.cfg` counterexample are **verified** against the locking companion (EXC-3,
+`QuotaOvercommit.cfg` counterexample are **configured** against the locking companion (EXC-3,
 §9 traceability, D-OPEN-quota-enforcement evidence "TLC counterexample 2026-06-15
-(ozone-11898-tla)"); the FSO tier (`FsoAbstract`/`FsoImpl`) is now also **verified** —
-bounded-exhaustive TLC green at the stated scope (M2a `fso-m2a-full.out`, M2b
-`fso-m2b-full.out`, M3 tight bound `FsoM3.cfg` with the broader `FsoM3Full.cfg` pass
-confirming; ozone-11898-tla, 2026-06-15).
+(ozone-11898-tla)") — `QuotaOvercommit.cfg` is the configured red oracle; its captured TLC
+verdict is pending. The FSO tier (`FsoAbstract`/`FsoImpl`) is **M2a/M2b verified (captured),
+M3 partial** — M2a `fso-m2a-full.out`, M2b `fso-m2b-full.out` are captured verdicts; M3
+(`FsoM3.cfg`) and the broader `FsoM3Full.cfg` (`MAX_OPS=2`) pass have no captured completion
+verdict yet (ozone-11898-tla, 2026-06-15). These TLA artifacts live in a reviewer-local fork
+and are not committed; pin/snapshot them before treating the formal tier as reproducible.
