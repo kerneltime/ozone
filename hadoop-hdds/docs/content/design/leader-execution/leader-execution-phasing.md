@@ -684,7 +684,7 @@ evidence: ["master §29 P-4", "master §23 RC-xichen-large-value", "S3InitiateMu
 ### P-5 — Batch / background key ops
 
 ```yaml
-- {id: P-5, scope: "batch/background: DeleteKeys, RenameKey/Keys, DeleteOpenKeys, PurgeKeys/Directories", depends_on_phases: [P-2], must_satisfy: [], must_pass: [], config_flag: "per-command", acceptance: "leg work complete"}
+- {id: P-5, scope: "batch/background: DeleteKeys, RenameKey/Keys, DeleteOpenKeys, PurgeKeys/Directories", depends_on_phases: [P-2], must_satisfy: [], must_pass: [T-batch-quota-no-double-decrement], config_flag: "per-command", acceptance: "leg work complete"}
 ```
 
 **Command set.** B1 DeleteKeys (batch), B2 RenameKey, B3 RenameKeys (batch), B4 DeleteOpenKeys,
@@ -714,7 +714,7 @@ leg-work complete. No new invariant beyond those proven in P-1/P-2.
 
 ```yaml
 id: P-5
-scope: "DeleteKeys, RenameKey, RenameKeys, DeleteOpenKeys, PurgeKeys (PurgeDirectories code-homes in P-2)"
+scope: "batch/background: DeleteKeys, RenameKey, RenameKeys, DeleteOpenKeys, PurgeKeys (PurgeDirectories code-homes in P-2)"
 depends_on_phases: [P-2]
 must_satisfy: []
 must_pass: [T-batch-quota-no-double-decrement]
@@ -913,11 +913,18 @@ A compact restatement, so a reviewer can check any single phase's PRs against th
 - **P-7 deletes nothing until everything is migrated.** The legacy path's deletion depends on the
   full P-3/P-4/P-5/P-6 set; a dead-code sweep precedes the delete.
 
-**Cross-cutting tests (apply to every migrated command — NOT a per-phase `must_pass`).** The
-master §29 `P-n` blocks (reproduced verbatim above) deliberately keep these *out* of any single
-phase's `must_pass`, and the expanded playbook blocks match that. They re-run for **every**
-command migration, so they gate the migration as a whole, not one phase (this mirrors the
-test-plan companion §5 "Cross-cutting" note):
+**Cross-cutting tests (apply to every migrated command — NOT a per-phase `must_pass`).** This
+list is for the *cross-cutting* tests only — those that re-run for **every** command migration
+and therefore gate the migration as a whole, not one phase (this mirrors the test-plan companion
+§5 "Cross-cutting" note). The master §29 `P-n` blocks (reproduced verbatim above) deliberately
+keep *these cross-cutting* tests out of any single phase's `must_pass`, and the expanded playbook
+blocks match that. Do not read this as "every test below is excluded from all phase
+`must_pass`": **phase-specific** gates are a separate category and DO appear in their owning
+phase's `must_pass`. Two such phase gates exist — `T-batch-quota-no-double-decrement` is in
+**P-5**'s `must_pass`, and `T-quota-failover` is in **P-1**'s `must_pass`. `T-quota-failover` is
+the one test that is *both*: a P-1 phase gate (it must pass for P-1 to land) and a standing
+cross-cutting re-run on every later change that touches quota — which is why it is also named in
+the list below. Every other entry below is purely cross-cutting (no phase `must_pass` claims it):
 - `T-flag-routing-both-paths` (D-14) — per-command on/off byte-identical parity; run per op as
   each command migrates (heaviest in P-6's Set-A sweep, but applicable everywhere).
 - `T-determinism-follower-byte-identical` and `T-apply-failure-resync` (D-10) — the determinism +

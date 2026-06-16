@@ -174,7 +174,7 @@ matches why you opened the file.
 
 **Reviewer.** You are deciding whether the design is sound and whether its decisions were made for the
 right reasons. Read §2 (Executive summary) end-to-end for the whole story, then go straight to **Part IV
-— the rationale spine**: the decision records `D-1`…`D-16` and `D-SPEC-1`…`D-SPEC-3` with their forces
+— the rationale spine**: the decision records `D-1`…`D-17` and `D-SPEC-1`…`D-SPEC-3` with their forces
 and consequences, the rejected-alternatives wall (§21, the `ALT-n` entries — the "do-not-re-tread"
 ledger), and the review-and-consensus ledger (§23, the `RC-n` entries that map every reviewer concern
 from PR [#7583](https://github.com/apache/ozone/pull/7583) / [#10502](https://github.com/apache/ozone/pull/10502) / [#10503](https://github.com/apache/ozone/pull/10503) to the decision that settles it). If your concern is concurrency or
@@ -5345,7 +5345,7 @@ it directly.
 | I-mixed-mode-safe | T-mixed-mode-no-collision, T-rolling-upgrade-mixed-binary |
 | I-objectid-disjoint | T-mixed-mode-no-collision, T-objectid-disjoint |
 | I-ondisk-invariance-shield | T-rolling-upgrade-mixed-binary |
-| I-quota-commutative | T-quota-concurrent, T-quota-exact-tlc, T-quota-failover |
+| I-quota-commutative | T-batch-quota-no-double-decrement, T-quota-concurrent, T-quota-exact-tlc, T-quota-failover |
 | I-quota-crash-safe | T-quota-concurrent, T-quota-exact-tlc, T-quota-failover |
 | I-txninfo-atomic-with-patch | T-apply-failure-resync, T-txninfo-crash-atomicity |
 
@@ -5744,13 +5744,16 @@ machinery that P2 built, but it does not need snapshot or MPU.
 flipped independently as each is verified.
 
 **Acceptance gate.** Leg-work complete: the listed batch/background commands run on the new
-model. The seeded block carries no `must_satisfy`/`must_pass` because these commands reuse the
-P2 invariants and their per-command tests live in the test-plan companion; the gate is "the
-commands route correctly through the new path under their flags and existing functional tests
-pass."
+model. The seeded block carries no `must_satisfy` because these commands reuse the P2
+invariants, but it does gate on one P-5-specific test: `T-batch-quota-no-double-decrement`,
+which pins that each per-key quota decrement in `DeleteKeys`/`RenameKeys` is applied exactly
+once under client retry and partial-batch failure (`PARTIAL_DELETE`/`PARTIAL_RENAME`). The
+remaining per-command functional tests live in the test-plan companion; the rest of the gate is
+"the commands route correctly through the new path under their flags and existing functional
+tests pass."
 
 ```yaml
-- {id: P-5, scope: "batch/background: DeleteKeys, RenameKey/Keys, DeleteOpenKeys, PurgeKeys/Directories", depends_on_phases: [P-2], must_satisfy: [], must_pass: [], config_flag: "per-command", acceptance: "leg work complete"}
+- {id: P-5, scope: "batch/background: DeleteKeys, RenameKey/Keys, DeleteOpenKeys, PurgeKeys/Directories", depends_on_phases: [P-2], must_satisfy: [], must_pass: [T-batch-quota-no-double-decrement], config_flag: "per-command", acceptance: "leg work complete"}
 ```
 
 ---

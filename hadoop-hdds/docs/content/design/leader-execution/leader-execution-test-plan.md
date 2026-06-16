@@ -363,6 +363,16 @@ remaining work as wider-configuration runs (including a re-run of M3Full with ad
   rename vs delete) all surface at this scale (small-scope hypothesis)."
   *(evidence: `ozone-11898-tla/FsoImpl.cfg`, `ozone-11898-tla/FsoImplSmall.cfg`,
   `ozone-11898-tla/FsoAbstract.tla`)*
+  **Reproducibility disclosure (cited M2a/M2b configs are stale vs. the renamed model):** the
+  cited `FsoImpl.cfg` / `FsoImplSmall.cfg` still declare `INVARIANT NoOrphan`, an invariant that no
+  longer exists in `FsoImpl.tla` after the `NoOrphan` -> `Accounted` model rename, so as-checked-in
+  they parse-error / are un-runnable, and the captured `fso-m2a-full.out` / `fso-m2b-full.out`
+  predate that rename — meaning the FSO formal tier is **not currently reproducible from the cited
+  artifacts** until those configs are reconciled (rename `NoOrphan` -> `Accounted`, or drop the
+  orphan invariant for these refinement-only M2 configs) and re-run to re-capture the verdicts.
+  This is a reproducibility gap, not a result reversal: the captured-green M2a/M2b verdict itself
+  stands (it was produced before the rename against a then-consistent config); only regeneration
+  from today's cited config files is broken. Reconciling the `.cfg` files is the TLA thread's task.
 - **Verdict — M2a/M2b GREEN (bounded-exhaustive, captured); M3 verdict capture pending.** The two
   captured increments report `Model checking completed. No error has been found.`
   - **M2a** (tree: createDir/createFile/commitFile/deleteFile/deleteDir-empty + file rename),
@@ -997,10 +1007,14 @@ so that "phase done" is mechanically checkable. The master §29 blocks are the a
 `must_pass`; any divergence here is a spec defect to reconcile (master §C rule 5 projection-
 freshness).
 
-The `Gating T-n (must pass)` column below restates master §29 `must_pass` **verbatim** — no
-phase adds or drops a gating test here. The cross-cutting tests that apply to *every* migrated
-command (and therefore belong to no single phase) are listed once, below the table, exactly as
-the master §29 prose treats them.
+The `Gating T-n (must pass)` column below restates **each phase's** master §29 `must_pass` set
+**verbatim** — these are the phase-specific gating tests (e.g. P-1's quota set, P-2's `T-1 … T-8`,
+P-5's `T-batch-quota-no-double-decrement`), and this column neither adds a gate the master §29
+phase block omits nor drops one it lists. "Verbatim per phase" does **not** mean phases carry no
+gates of their own — most phases do; it means the per-phase set here is exactly the master's
+per-phase set, modulo nothing. The genuinely **cross-cutting** tests — those that re-run for
+*every* migrated command and therefore belong to no single phase — are deliberately excluded from
+this column and listed once below the table, exactly as the master §29 prose treats them.
 
 | Phase | Scope (abbrev.) | Gating T-n (must pass) | Formal-tier gate |
 |---|---|---|---|
