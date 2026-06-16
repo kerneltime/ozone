@@ -182,8 +182,10 @@ Column meanings:
 
 ## 3. Phase-0 prerequisites (gate EVERY later phase — call these out explicitly)
 
-Master §29 folds three load-bearing prerequisites into `P-0`'s scope line
-(`"...+ legacy->ManagedIndex objectID retrofit + dual-path index durability"`). They are broken
+Master §29 folds **three** load-bearing prerequisites into `P-0`'s scope line
+(`"...+ legacy->ManagedIndex objectID retrofit + dual-path index durability + OMLayoutFeature
+finalization gate"`): **PR-0a** (legacy→ManagedIndex objectID retrofit, D-12), **PR-0b** (dual-path
+applied-index durability), and **PR-0c** (`OMLayoutFeature` finalization gate, D-11). They are broken
 out here because **no command may migrate until all three are in place** — they are not part of any
 single command's PR; they are the soil. Each is stated as: what exists today (verified), what must
 change, why it gates the rest, and which decision constrains it.

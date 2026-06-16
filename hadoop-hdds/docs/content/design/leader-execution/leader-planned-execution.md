@@ -435,11 +435,12 @@ the *limit gate* soft: because commits take only a shared bucket lock and the in
 than a read-modify-write under exclusion, N concurrent commits can each pass the quota check against the
 same pre-increment value and then all apply, transiently over-committing the limit by up to the in-flight
 commit count. The main-chat grill leaned toward accepting this approximate, eventually-consistent
-behavior; but a **TLA+/TLC model has now mechanically confirmed the over-commit** with a concrete
-counterexample (two commits both plan at `used=0`, both apply, `used=2 > limit=1`) and **recommends a
-leader-local atomic reservation** for exact enforcement (an in-memory check-and-reserve, with the DB merge
-remaining the durable truth, decrement-on-abort, and rebuild-from-DB on failover). The question of exact
-vs. approximate is therefore genuinely open, with formal evidence now on the side of exact. The second
+behavior; a **TLA+/TLC model is configured to reproduce the over-commit** with a concrete
+counterexample (two commits both plan at `used=0`, both apply, `used=2 > limit=1`) and the leaning is
+toward a **leader-local atomic reservation** for exact enforcement (an in-memory check-and-reserve, with
+the DB merge remaining the durable truth, decrement-on-abort, and rebuild-from-DB on failover). The
+over-commit is argued from the model and the counterexample is *expected*, but its captured TLC verdict is
+**pending**; the question of exact vs. approximate is therefore genuinely open. The second
 open question is the **retry / idempotency mechanism** (`D-OPEN-retry`), which is *deferred* pending a
 per-operation idempotency audit. The DB patch itself is already idempotent — applying whole-object Puts
 twice is harmless — so the real question is which operations are non-idempotent *to re-execute* (SCM block
@@ -2190,7 +2191,7 @@ sequenceDiagram
         Note over L: collect prior version -> RepeatedOmKeyInfo<br/>withCommittedKeyDeletedFlag(true) (OMKeyCommitRequest.java:358-360)
     end
     rect rgb(245,235,235)
-        Note over L: D-OPEN-quota-enforcement (OPEN):<br/>leaning leader-local atomic reserve(+correctedSpace) here<br/>(NOT decided — TLC found over-commit under soft path)
+        Note over L: D-OPEN-quota-enforcement (OPEN):<br/>leaning leader-local atomic reserve(+correctedSpace) here<br/>(NOT decided — TLC over-commit counterexample expected, verdict pending)
     end
     L->>L: plan DB patch:<br/>Put(keyTable, key -> committed OmKeyInfo)<br/>Delete(openKeyTable, openKey#clientID)<br/>Put(deletedTable, oldVersions)  [if overwrite]<br/>Merge(bucketTable, bucket -> +bytes,+ns,-reclaimed)
     L->>R: submit Batch{ Put, Delete, Put?, Merge }
@@ -2588,7 +2589,7 @@ statement: >
 rationale: >
   Validates the crash-and-resync half of D-10: a follower that cannot apply trusted bytes
   must crash and rebuild deterministically, never continue with a divergent DB.
-covers: [I-inner-domain-agnostic, I-txninfo-atomic-with-patch]
+covers: [I-apply-failure-resync, I-determinism-followers-pure]
 provenance: verified
 evidence: ["OzoneManagerStateMachine.java:483-505", "D-10"]
 ```
@@ -2750,7 +2751,7 @@ statement: >
 rationale: >
   Validates D-11 (additive, inert-until-finalized), the two-gate model (§16.1), and the
   D-12 single-counter retrofit across the full mixed-mode window.
-covers: [I-managed-index-monotonic]
+covers: [I-managed-index-monotonic, I-inner-domain-agnostic, I-ondisk-invariance-shield, I-mixed-mode-safe]
 provenance: verified
 evidence: ["OMLayoutFeature.java:47", "OMBucketCreateRequest.java:421", "OMBucketCreateRequest.java:444", "D-11", "D-12", "D-14"]
 ```
@@ -3973,19 +3974,23 @@ question is whether to accept this approximate enforcement or to make admission 
 **Where the discussion stands (two findings that pull in different directions).** The main-chat grill
 leaned **approximate / eventually-consistent** (locking-3, EXC-3 in the companion): treat the limit as
 best-effort, guarantee only that the counter is exact, and delegate exact enforcement to the existing
-background `QuotaRepair` reconcile. *However*, the TLA+ fork **confirmed the over-commit is real and
-mechanically reproducible**: `QuotaOvercommit.cfg` checks the model against an *exact*-quota oracle
-(`ObsAbstractExact`) and TLC returns a concrete counterexample — two commits plan at `used=0`, both
-apply, `used=2 > limit=1` — while the *soft*-quota oracle (`ObsAbstract`) refines green. So the formal
-tier has *upgraded* the leaning: it recommends a **leader-local atomic reservation** for exact
+background `QuotaRepair` reconcile. *However*, the TLA+ fork **argues the over-commit is real and
+mechanically reproducible**: `QuotaOvercommit.cfg` is configured to check the model against an
+*exact*-quota oracle (`ObsAbstractExact`) and is expected to yield a concrete counterexample — two
+commits plan at `used=0`, both apply, `used=2 > limit=1` — while the *soft*-quota oracle (`ObsAbstract`)
+refines green. The captured TLC verdict for the exact-oracle run is **pending**, so the counterexample is
+expected/argued rather than captured. On that basis the formal tier *upgrades* the leaning: it recommends
+a **leader-local atomic reservation** for exact
 enforcement — an in-memory atomic check-and-reserve on the leader, with the DB merge remaining the
 durable truth, a decrement-on-abort, and a rebuild-from-DB on failover. That keeps D-7's durable
 commutativity while closing the admission window the TLC counterexample exposes.
 
 **Why it stays open.** The two candidate resolutions — (a) accept approximate + lean on `QuotaRepair`,
 versus (b) add a leader-local atomic reservation for exact admission — have different complexity and
-failover costs, and the choice has not been made. The TLC counterexample is decisive *that the gap is
-real*; it is not decisive *that exact enforcement is worth the reservation machinery* for Ozone's
+failover costs, and the choice has not been made. The over-commit gap is established by the argument
+(two commits plan at the same pre-increment usedBytes and both apply) and the configured TLC
+counterexample is expected to mechanize it, with its captured verdict still **pending**; that the gap is
+real does not settle *that exact enforcement is worth the reservation machinery* for Ozone's
 quota semantics (which have historically been best-effort at the edges). This is recorded as
 `status: open` with the leaning explicitly toward (b), and it must remain open until the trade is
 decided. The companion's EXC-3 documents the accepted-limitation framing of (a); this decision is
@@ -4008,10 +4013,10 @@ title: Whether quota admission is exact (leader-local atomic reservation) or app
 status: open
 depends_on: [D-7]
 raised_by: [kerneltime, ivandika3]
-consequences: ["main-chat grill leaned approximate/eventually-consistent (locking-3)", "TLA+ fork CONFIRMED over-commit via TLC counterexample and recommends leader-local reservation (exact; DB merge stays durable truth; decrement-on-abort; rebuild-from-DB on failover)"]
+consequences: ["main-chat grill leaned approximate/eventually-consistent (locking-3)", "TLA+ fork argues over-commit via a configured TLC counterexample (captured verdict pending) and recommends leader-local reservation (exact; DB merge stays durable truth; decrement-on-abort; rebuild-from-DB on failover)"]
 tests: [T-quota-concurrent, T-quota-exact-tlc]
-provenance: verified
-evidence: ["TLC counterexample 2026-06-15 (ozone-11898-tla)", "grill locking-3"]
+provenance: inferred
+evidence: ["TLC counterexample 2026-06-15 (ozone-11898-tla) — counterexample expected/argued, captured TLC verdict pending", "grill locking-3"]
 ```
 
 ### D-OPEN-retry — idempotency / retry-cache mechanism (DEFERRED)
@@ -4976,15 +4981,16 @@ FullTableCache-step failure escalates to reload-or-terminate.
 None of I-quota-commutative / I-quota-crash-safe settles **whether quota admission is exact
 or approximate** — that is **D-OPEN-quota-enforcement (status: open)**. The current record
 is split: the main-chat grill leaned **approximate / eventually-consistent** (companion
-locking-3, EXC-3 "KNOWN, ACCEPTED LIMITATION"), while the **TLA+ fork confirmed over-commit**
-via a TLC counterexample (`QuotaOvercommit.cfg`: two commits plan at `used=0`, both apply,
-`used=2 > limit=1`) and **recommends a leader-local atomic reservation** (exact gate; DB
-merge stays the durable truth; decrement-on-abort; rebuild-from-DB on failover). The
-invariants above are written to be **true under either resolution**: the counter is exact and
-commutative (I-quota-commutative) and durably reconstructable (I-quota-crash-safe) whether or
-not an in-memory reservation is later added for the **gate**. The test `T-quota-exact-tlc` is
-the standing mechanical reproduction of the over-commit so the open question cannot be
-silently closed without confronting it. Treat the enforcement decision as open work tracked
+locking-3, EXC-3 "KNOWN, ACCEPTED LIMITATION"), while the **TLA+ fork argues the over-commit**
+via a configured TLC counterexample (`QuotaOvercommit.cfg`: two commits plan at `used=0`, both
+apply, `used=2 > limit=1`; captured verdict pending) and **recommends a leader-local atomic
+reservation** (exact gate; DB merge stays the durable truth; decrement-on-abort;
+rebuild-from-DB on failover). The invariants above are written to be **true under either
+resolution**: the counter is exact and commutative (I-quota-commutative) and durably
+reconstructable (I-quota-crash-safe) whether or not an in-memory reservation is later added for
+the **gate**. The test `T-quota-exact-tlc` is the standing configured reproduction of the
+over-commit (captured verdict pending) so the open question cannot be silently closed without
+confronting it. Treat the enforcement decision as open work tracked
 by R-quota-enforcement (§30), not as resolved here.
 
 ---
@@ -5273,8 +5279,9 @@ path for the **same** command mix, with the per-command runtime flag (D-14) used
 two paths **in the same binary** (so the comparison isolates the execution model, not build
 or environment differences). The gate is **per-command** because migration is incremental and
 a regression on one migrated command must not hide behind aggregate throughput. Concretely:
-- **P-1 (hardest single-step OBS — CreateKey/CommitKey/AllocateBlock/DeleteKey):** the key
-  path on the new model must hit **≥ baseline** throughput **and** correct quota
+- **P-1 (hardest single-step OBS — CreateKey/CommitKey/AllocateBlock/DeleteKey, plus
+  CreateBucket/DeleteBucket in scope):** the key path on the new model must hit **≥ baseline**
+  throughput **and** correct quota
   (`T-quota-concurrent`); this is where the commutative-merge parallelism (no bucket write
   lock — I-quota-commutative) is expected to **exceed** legacy, since legacy serialized commits
   on the bucket write lock.
@@ -5417,8 +5424,8 @@ and continuously tested against the real tree, and makes **long-lived mixed mode
 first-class supported state**, not an accident (D-11, D-14): a production cluster can run with
 P1 enabled and P2 disabled indefinitely, and that is a correct configuration, not a
 half-finished migration. The price of this property is paid up front in P0 (the objectID
-retrofit and dual-path index durability, below), which exists *solely* to make mixed mode
-safe.
+retrofit, dual-path index durability, and the OMLayoutFeature finalization gate, below), which
+exists *solely* to make mixed mode safe.
 
 **Why this matches the prior art.** Sumit Agrawal's stalled PR [#7583](https://github.com/apache/ozone/pull/7583) already chose `createKey`
 as its beachhead — the single hardest single-step OBS command, because it sits at the
@@ -5429,7 +5436,7 @@ proved it on a narrow path; hard-first is how we carry that ceiling to the comma
 actually gate the double-buffer removal, rather than to the commands that are easy to convert
 but never blocked the deletion.
 
-**Dependency shape of the phases.** P0 is the unwired substrate plus the two mixed-mode
+**Dependency shape of the phases.** P0 is the unwired substrate plus the three mixed-mode
 prerequisites; nothing else can start until it lands. P1 (OBS key) and P2 (FSO) are the two
 hard beachheads and must be sequenced P1→P2 because the FSO multi-step orchestrator (D-6)
 generalizes the single-step OBS request contract — you build the N=1 degenerate case first,
@@ -5447,7 +5454,7 @@ gate**. Do not hand-edit a block; the traceability matrix (§28) is generated fr
 
 ---
 
-#### P-0 — Framework substrate (unwired) + the two mixed-mode prerequisites
+#### P-0 — Framework substrate (unwired) + the three mixed-mode prerequisites
 
 **What it proves.** That the entire new substrate — the twelve components of §11 (the
 replicated-DB module, the `ManagedIndexService`, the lean lock manager, the orchestrator/
@@ -5462,10 +5469,12 @@ never deserializes a domain object (`I-inner-domain-agnostic`, from D-1/D-2); th
 so the applied index can never diverge from the data (`I-txninfo-atomic-with-patch`); and the managed
 index is strictly monotonic (`I-managed-index-monotonic`).
 
-**The showstopper it retires.** Two latent mixed-mode hazards that, if not retired *before*
-any command migrates, make every later phase unsafe:
+**The showstopper it retires.** Three latent mixed-mode hazards that, if not retired *before*
+any command migrates, make every later phase unsafe. The three prerequisites are referenced as
+PR-0a (the legacy→ManagedIndex objectID retrofit), PR-0b (dual-path applied-index durability),
+and PR-0c (the `OMLayoutFeature` finalization gate):
 
-1. **objectID collision across the two execution engines.** Today an object's `objectID` is
+1. **PR-0a — objectID collision across the two execution engines.** Today an object's `objectID` is
    `getObjectIdFromTxId(epoch, ratisIndex)` — the Ratis log index of the txn that created it
    is welded into the identifier (verified: `OmUtils.getObjectIdFromTxId`,
    `OmUtils.java:766`; `OzoneManager.getObjectIdFromTxId` returns
@@ -5483,7 +5492,7 @@ any command migrates, make every later phase unsafe:
    reordered. The managed index is seeded at `max(Ratis index) + 1` at finalization (§16), so
    the new counter starts strictly above every index the legacy path ever used.
 
-2. **dual-path applied-index durability.** The legacy double buffer is the *sole* RocksDB
+2. **PR-0b — dual-path applied-index durability.** The legacy double buffer is the *sole* RocksDB
    writer today and it durably advances the applied index by writing `#TRANSACTIONINFO` in the
    same batch as the data (verified: `OzoneManagerDoubleBuffer.flushBatch` builds one
    `BatchOperation`, adds the data entries via `addToBatch`, then adds
@@ -5503,6 +5512,22 @@ any command migrates, make every later phase unsafe:
    could replay or skip entries. This is why `I-txninfo-atomic-with-patch` is a P0 `must_satisfy`: the
    atomicity that the legacy path gets for free from the single-batch flush must be preserved,
    not weakened, when a second writer appears.
+
+3. **PR-0c — the `OMLayoutFeature` finalization gate.** In a rolling upgrade the cluster runs
+   mixed *binaries* for an unbounded window, so a new-binary leader must never emit the new
+   `PersistDb`/`Batch` envelope or `#MANAGED_INDEX` to a follower whose older binary cannot
+   decode it — that is split-brain (`ALT-no-backwards-compat`, killed by D-11). P0 introduces
+   the new layout feature `OMLayoutFeature.LEADER_SIDE_EXECUTION` (the next ordinal past the
+   current highest `SNAPSHOT_DEFRAG(9)` — verified `OMLayoutFeature.java:47`) and gates the new
+   path behind the existing `getVersionManager().isAllowed(OMLayoutFeature.X)` idiom (already
+   used in real requests, e.g. `OMBucketCreateRequest.java:421,444`). Until the cluster is
+   **finalized** to this feature the new path is **inert**: the additive proto/DB entries exist
+   but no node uses them, so an old binary never receives them (§16.1; D-11). This is the
+   *binary-safety* gate and it is independent of the per-command runtime flag (D-14, the
+   *operational* revert): finalization decides whether the feature is available at all, the
+   flag decides which path is taken given it is. Without the gate in place before any command
+   migrates, the very first new-path command on an un-finalized mixed-binary cluster is a
+   split-brain hazard — which is why it is a P0 prerequisite, not a P1 concern.
 
 **Config flag.** `n/a (inert)` — P0 ships no user-visible behavior; the substrate is dead code
 behind no flag because nothing calls it yet. The *only* externally observable change in P0 is
@@ -5525,7 +5550,7 @@ ever materializing a domain object) all pass.
 
 ---
 
-#### P-1 — Hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey (Sumit's beachhead)
+#### P-1 — Hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey + CreateBucket, DeleteBucket (Sumit's beachhead)
 
 **What it proves.** That the new model produces correct results, at or above baseline
 throughput, on the single hardest *single-step* command family in the system — OBS key
@@ -5538,11 +5563,19 @@ operator (D-7, Option B — whole-row Put resolved by a registered operator at a
 operands), the cache-free read-your-writes guarantee (D-3/D-5 — a same-key successor blocks on
 the lock until the predecessor's bytes are in RocksDB, locking I-12), and the lock-hold-span
 contract (D-5 — hold from before Ratis submit until after quorum-commit-and-apply). The four
-request families are the real, verified classes:
+OBS key request families are the real, verified classes:
 `OMKeyCreateRequest`/`OMKeyCreateRequestWithFSO`, `OMKeyCommitRequest`/
 `OMKeyCommitRequestWithFSO`, `OMAllocateBlockRequest`/`OMAllocateBlockRequestWithFSO`, and
 `OMKeyDeleteRequest`/`OMKeyDeleteRequestWithFSO` (verified: directory listing of
-`hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/key/`).
+`hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/key/`). P-1's
+frozen scope (YAML below) is **six** ops, not four: these four OBS key ops plus `CreateBucket`
+and `DeleteBucket` (`OMBucketCreateRequest`/`OMBucketDeleteRequest`, verified in
+`hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/request/bucket/`), which
+ride the same single-step OBS contract — `CreateBucket` is already the canonical `isAllowed`
+finalization-gate exemplar (`OMBucketCreateRequest.java:421,444`) and seeds the objectID source
+(D-12), so migrating the two bucket ops alongside the key ops keeps the beachhead's lock and
+objectID story whole. `CommitKey` remains the hard core (the four-way intersection above); the
+two bucket ops are in scope but are not what makes P-1 the hardest single-step phase.
 
 **The showstopper it retires.** "Can quota be made commutative without serializing the bucket,
 and does it stay crash-safe?" — the single question on which the *entire throughput thesis*
@@ -5841,10 +5874,10 @@ evidence, and the mitigation or the gate that closes it. The `Q-n` items are the
 locking-design questions carried forward verbatim from the companion's §10 so they live in one
 ledger.
 
-### R-quota-enforcement — exact vs approximate quota admission (OPEN; TLC found over-commit)
+### R-quota-enforcement — exact vs approximate quota admission (OPEN; TLC over-commit counterexample expected, verdict pending)
 
 ```yaml
-- {id: R-quota-enforcement, statement: "Quota *limit* admission is enforced best-effort, not exactly: N commits in flight can each pass the limit check against the same pre-increment usedBytes and all apply, transiently over-committing by up to the in-flight commit count. The usedBytes *counter* is always exact (no lost/double update); only the *gate* is soft.", rationale: "Key commits take only S(bucket) so commits to different keys run in parallel (the throughput goal); usedBytes is a commutative Merge (D-7) not a read-modify-write under X(bucket). A TLA+/TLC counterexample mechanically reproduces the over-commit. The decision between approximate (merge-only) and exact (leader-local atomic reservation) is OPEN.", provenance: verified, evidence: ["leader-execution-locking.md EXC-3", "D-OPEN-quota-enforcement", "TLC counterexample QuotaOvercommit.cfg vs ObsAbstractExact (ozone-11898-tla)"]}
+- {id: R-quota-enforcement, statement: "Quota *limit* admission is enforced best-effort, not exactly: N commits in flight can each pass the limit check against the same pre-increment usedBytes and all apply, transiently over-committing by up to the in-flight commit count. The usedBytes *counter* is always exact (no lost/double update); only the *gate* is soft.", rationale: "Key commits take only S(bucket) so commits to different keys run in parallel (the throughput goal); usedBytes is a commutative Merge (D-7) not a read-modify-write under X(bucket). A TLA+/TLC counterexample is configured to reproduce the over-commit (captured verdict pending). The decision between approximate (merge-only) and exact (leader-local atomic reservation) is OPEN.", provenance: inferred, evidence: ["leader-execution-locking.md EXC-3", "D-OPEN-quota-enforcement", "TLC counterexample QuotaOvercommit.cfg vs ObsAbstractExact (ozone-11898-tla) — counterexample expected/argued, captured TLC verdict pending"]}
 ```
 
 This is the single most important *open* item in the design and it must be reported as open,
@@ -5859,14 +5892,15 @@ not as a settled trade-off. The state of the record:
   exact or approximate. The main-chat grill *leaned* approximate/eventually-consistent
   (locking-3): enforce best-effort, let the background `QuotaRepair` reconcile, accept
   transient over-commit (EXC-3 framed it as a "KNOWN, ACCEPTED LIMITATION"). But the TLA+ fork
-  then **confirmed over-commit via a TLC counterexample** and recommends a *leader-local atomic
-  reservation* (exact admission in leader memory, with the DB merge remaining the durable
-  truth, decrement-on-abort, and rebuild-from-DB on failover). That is a genuine
-  not-yet-resolved tension between two artifacts: the prose spec (lean toward soft) and the
-  formal model (recommends exact). D-OPEN-quota-enforcement records both and is `status: open`.
-- **The TLC evidence is mechanical and reproducible.** `QuotaOvercommit.cfg` is the configured
-  red oracle (`ObsAbstractExact`) expected to yield the counterexample "two commits plan at
-  `used=0`, both apply, `used=2 > limit=1`" (locking EXC-3 "Evidence";
+  then **argues over-commit via a configured TLC counterexample** (captured verdict pending) and
+  recommends a *leader-local atomic reservation* (exact admission in leader memory, with the DB
+  merge remaining the durable truth, decrement-on-abort, and rebuild-from-DB on failover). That
+  is a genuine not-yet-resolved tension between two artifacts: the prose spec (lean toward soft)
+  and the formal model (recommends exact). D-OPEN-quota-enforcement records both and is
+  `status: open`.
+- **The TLC evidence is a configured oracle, verdict pending.** `QuotaOvercommit.cfg` is the
+  configured red oracle (`ObsAbstractExact`) expected to yield the counterexample "two commits
+  plan at `used=0`, both apply, `used=2 > limit=1`" (locking EXC-3 "Evidence";
   D-OPEN-quota-enforcement consequences); its captured TLC verdict is pending. The accepted
   oracle `ObsAbstract` models quota as *soft* and the
   implementation model `ObsImpl` refines it (green). So both are true at once: the design is
@@ -6122,11 +6156,13 @@ Long-lived mixed mode is **first-class** (D-11, D-14), not a migration window to
 A production cluster may run indefinitely with some command families on the new model and others
 on legacy, in any combination consistent with the phase dependencies (§29):
 
-- **What makes mixed mode safe.** The P0 prerequisites: the objectID source is unified across
-  both engines (D-12 — legacy and new both draw from the managed counter, so no collision), and
-  the applied-index durability is coherent across both writers (the extended `lastSkippedIndex`
-  mechanism, §29 P-0). Without P0 these two hazards would make mixed mode unsafe; *with* P0,
-  mixed mode is a correct configuration.
+- **What makes mixed mode safe.** The three P0 prerequisites: the objectID source is unified
+  across both engines (PR-0a / D-12 — legacy and new both draw from the managed counter, so no
+  collision), the applied-index durability is coherent across both writers (PR-0b — the extended
+  `lastSkippedIndex` mechanism, §29 P-0), and the new behavior is finalization-gated so a
+  new-binary leader never emits a patch an old-binary follower cannot decode during a mixed-binary
+  rolling upgrade (PR-0c — the `OMLayoutFeature` gate, D-11; §16.1). Without P0 these three hazards
+  would make mixed mode unsafe; *with* P0, mixed mode is a correct configuration.
 - **Supported combinations.** Any subset of {OBS-key, FSO, snapshot, MPU, batch, Set-A} may be
   enabled, subject to: snapshot-on-new (P3) is only meaningful with FSO-on-new (P2) because the
   Checkpoint op must order against fine-grained FSO ops; MPU-on-new (P4) depends on P3. OBS-key

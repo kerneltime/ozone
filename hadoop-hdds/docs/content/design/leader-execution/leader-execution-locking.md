@@ -201,11 +201,16 @@ placement is specified:
   enumerates current children **under that lock**, and removes the node only when
   childless; a late child (from an in-flight create that resolved before the root
   tombstone) is processed before the node is removed. Guarantees **no orphan**.
-  I-7's strict prose ("no orphan") is the design contract; the FSO TLA model's
-  orphan invariant is named **Accounted** (no PERMANENT orphan — the EXC-2-weakened
-  form of I-7, which the FSO TLA model actually checks; transient orphans during the
-  async per-node purge are allowed and eventually reclaimed), and `Accounted` is the
-  bounded-model realization of that strict contract.
+  I-7's strict prose ("no orphan") is the design contract; the FSO TLA model **defines**
+  its orphan invariant as **Accounted** — no PERMANENT orphan (transient orphans during
+  the async per-node purge are allowed and eventually reclaimed), i.e. the EXC-2-weakened
+  form of I-7. Formal-tier coverage of this contract is **bounded and partial**: M2a (tree
+  + file rename) and M2b (directory rename) establish orphan-freedom for the **non-recursive**
+  ops via **Refinement** to the atomic per-node oracle (captured-green; the model defines no
+  standalone `NoOrphan` invariant for these). The **recursive-delete** `Accounted` verdict
+  (M3 scope) is **not yet captured** — its tight bound is configured but TLC has not produced a
+  verdict — so the recursive-delete realization of I-7 is asserted by the Java harness (T-1)
+  and pending at the formal tier, **not** a captured-green model verdict.
 - **I-8 (no holder lease — correctness-critical).** A held lock is **never** revoked from
   an in-flight holder. Lock release happens only in the holder's own completion path
   (commit or failure). A lease that expired a held lock while its Ratis op was still in

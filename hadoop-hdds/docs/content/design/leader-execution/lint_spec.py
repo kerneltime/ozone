@@ -109,6 +109,41 @@ if m:
         if stale:
             fails.append(f'PROJECTION(§28): {inv} row lists {sorted(stale)} not derivable from sources')
 
+# 6. bidirectional projection: every derived (I -> T) must be LISTED in §28 AND test-plan §6.2
+tp = open(docpath('leader-execution-test-plan.md')).read()
+matrices = [('§28', m.group(1) if m else None),
+            ('§6.2', (lambda mm: mm.group(1) if mm else None)(re.search(r'#+\s*6\.2[^\n]*\n(.*?)(\n#+\s|\Z)', tp, re.S)))]
+for label, body in matrices:
+    if not body:
+        continue
+    for inv, tests in src.items():
+        row = re.search(r'^\|\s*`?' + re.escape(inv) + r'`?\s*\|([^|]*)\|', body, re.M)
+        if not row:
+            continue
+        missing = tests - set(re.findall(r'T-[A-Za-z0-9\-]+', row.group(1)))
+        if missing:
+            fails.append(f'PROJECTION({label} under-listing): {inv} row omits {sorted(missing)} (derived from a covers:/tests: source)')
+
+# 7. P-n must_pass SET must be identical across all single-line {id: P-n ... must_pass:[...]} representations
+pn = defaultdict(set)
+for d in DOCS:
+    for mm in re.finditer(r'\{id:\s*(P-\d)\b[^}]*?must_pass:\s*\[([^\]]*)\][^}]*\}', open(docpath(d)).read()):
+        pn[mm.group(1)].add(frozenset(re.findall(r'T-[A-Za-z0-9\-]+', mm.group(2))))
+for ph in sorted(pn):
+    if len(pn[ph]) > 1:
+        fails.append(f'P-n DIVERGENCE: {ph} must_pass set differs across representations -> {[sorted(s) for s in pn[ph]]}')
+
+# 8. a T-/I- id defined more than once must carry the SAME covers: set (aliases with divergent covers forbidden)
+cov_by_id = defaultdict(set)
+for d in DOCS:
+    for mm in re.finditer(r'\bid:\s*([IT]-[A-Za-z0-9\-]+)(.*?)(?=\n\s*id:|\n#+\s|\Z)', open(docpath(d)).read(), re.S):
+        cv = re.findall(r'covers:\s*\[([^\]]*)\]', mm.group(2))
+        if cv:
+            cov_by_id[mm.group(1)].add(frozenset(re.findall(r'I-[A-Za-z0-9\-]+', cv[0])))
+for idn in sorted(cov_by_id):
+    if len(cov_by_id[idn]) > 1:
+        fails.append(f'DUPLICATE-ID divergent covers: {idn} -> {[sorted(s) for s in cov_by_id[idn]]}')
+
 # ---- report ----
 print(f"DEFINED by family: {dict(sorted(Counter(k.split('-')[0] for k in defined).items()))}")
 print(f"anchors checked: {len(seen)} | invariants: {len(i_def)} defined, {len(i_def & i_cov)} covered")

@@ -600,7 +600,8 @@ statement: >
   state lives in volatile in-memory reserved maps (ALT-quota-reserved-static is rejected
   precisely to avoid crash-recovery of out-of-DB state).
 covers: [I-quota-crash-safe]
-provenance: verified
+provenance: inferred
+provenance_note: crash-safety argued from I-quota-crash-safe (quota lives only in the durable DB row, rebuilt by log replay), not yet verified by code or a crash-modeling TLA action.
 evidence: ["leader-planned-execution.md D-7 tests, ALT-quota-reserved-static (rejected: reserve state outside DB → crash-recovery complexity)", "ObsAbstract soft-quota oracle models commit/apply; ObsImpl refines (green) ozone-11898-tla/obs3-verdict.out"]
 ```
 ```yaml
@@ -1076,7 +1077,7 @@ authority `leader-execution-locking.md` §9) and **master invariants** (slugs) a
 |---|---|---|
 | `I-inner-domain-agnostic` | `T-determinism-follower-byte-identical`, `T-mpu-lifecycle`, `T-proto-roundtrip`, `T-rolling-upgrade-mixed-binary` | D-1/D-2 |
 | `I-cache-free-ryw` | `T-full-suite-green-after-removal`, `T-no-cache-correctness`, `T-ryw-from-db` | D-3 |
-| `I-quota-commutative` | `T-quota-concurrent`, `T-quota-exact-tlc`, `T-quota-failover` | D-7; `ObsImpl` UsedConsistent green |
+| `I-quota-commutative` | `T-batch-quota-no-double-decrement`, `T-quota-concurrent`, `T-quota-exact-tlc`, `T-quota-failover` | D-7; `ObsImpl` UsedConsistent green |
 | `I-quota-crash-safe` | `T-quota-concurrent`, `T-quota-exact-tlc`, `T-quota-failover` | D-7; `ObsImpl` green |
 | `I-determinism-followers-pure` | `T-apply-failure-resync`, `T-determinism-follower-byte-identical`, `T-observability-leader-only-metrics`, `T-security-leader-only-authz-audit` | D-10 |
 | `I-apply-failure-resync` | `T-apply-failure-resync` | D-10 (crash-and-resync half) |
