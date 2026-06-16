@@ -4101,7 +4101,9 @@ evidence: ["per-command inventory 2026-06-15", "leader-execution-locking.md §10
 > An alternative listed here is *heard*, not dismissed — `proposed_by` records who raised it
 > precisely so the rejection reads as a considered judgment, not a brush-off. Two entries are
 > **deferred, not dead** (`deferred_by` rather than `killed_by`): `ALT-quota-rocksdb-native`
-> (a legitimate future optimization once whole-row writes become a bottleneck) — these may
+> (a future optimization once whole-row writes become a bottleneck) and `ALT-quota-cf` (the
+> separate quota column-family that also removes the bucket-cache staleness, deferred by D-17
+> pending a quota migration) — these may
 > return with new evidence, and that is by design. Everything else is closed. The block below is
 > the frozen contract; the CI linter enforces that every entry has a `killed_by` or `deferred_by`
 > and that the referenced decision exists.

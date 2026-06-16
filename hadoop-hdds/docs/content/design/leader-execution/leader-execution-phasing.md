@@ -535,7 +535,7 @@ evidence: ["master §29 P-1", "OMKeyCreateRequest.java:165,338,351", "OMKeyCommi
 ### P-2 — Hardest multi-step FSO + recursive delete
 
 ```yaml
-- {id: P-2, scope: "hardest multi-step FSO: CreateFile/CreateDirectory (implicit parents), FSO delete, recursive rm-rf + DirectoryDeletingService redesign", depends_on_phases: [P-1], must_satisfy: [I-3, I-5, I-6, I-7, I-11], must_pass: [T-1, T-2, T-3, T-4, T-5, T-6, T-7, T-8], config_flag: "ozone.om.leader.execution.fso.enabled", acceptance: "FSO linearizable under T-1..T-8; no orphan; showstoppers retired"}
+- {id: P-2, scope: "hardest multi-step FSO: CreateFile/CreateDirectory (implicit parents), FSO delete, recursive rm-rf + DirectoryDeletingService redesign", depends_on_phases: [P-1], must_satisfy: [I-3, I-5, I-6, I-7, I-11], must_pass: [T-1, T-2, T-3, T-4, T-5, T-6, T-7, T-8], config_flag: "ozone.om.leader.execution.fso.enabled", acceptance: "FSO linearizable under T-1..T-8; no orphan; showstoppers retired; gated-open: [Q-rename-mtime-merge] (FSO cross-parent rename mtime merge-operator interaction, resolve within P-2 — §30)"}
 ```
 
 **Command set.** C5 CreateFile (FSO, multi-step mkdir-p), C6 CreateDirectory (FSO, multi-step),
@@ -736,7 +736,7 @@ evidence: ["master §29 P-5", "leader-execution-locking.md §5", "OMKeyPurgeRequ
 ### P-6 — Easy Set-A sweep (~22 single-table ops)
 
 ```yaml
-- {id: P-6, scope: "easy Set-A sweep (~22 single-table ops: ACLs, tagging, SetTimes, secrets, tokens, tenant, snapshot props, vol/bucket props, prepare)", depends_on_phases: [P-1], must_satisfy: [], must_pass: [], config_flag: "per-command", acceptance: "legacy path retired for simple ops"}
+- {id: P-6, scope: "easy Set-A sweep (~22 single-table ops: ACLs, tagging, SetTimes, secrets, tokens, tenant, snapshot props, vol/bucket props, prepare)", depends_on_phases: [P-1], must_satisfy: [], must_pass: [], config_flag: "per-command", acceptance: "legacy path retired for simple ops; gated-open: [Q-setacl-settimes-placement, Q-hsync-lease] (SetAcl/SetTimes lock placement + hsync/lease-recovery X(parent,file) interaction, resolve before these ops migrate in P-6 — §30)"}
 ```
 
 **Command set.** All of Group A (§4.3): A1-A31 (collapsing to ~22 migration units at the `Type`
@@ -765,7 +765,7 @@ status `open`, `leader-planned-execution.md` open-questions ledger; evidence loc
 P-6's command set and must be resolved before the ops they cover migrate here:
 (1) **Q-setacl-settimes-placement** — the `AllocateBlock` clause is RESOLVED (locking §2.1, Batch 3,
 which is why P-1 is unblocked on that op), but lock placement for **SetAcl/SetTimes** (expected
-`S(bucket)+S(P)+X(P,name)`, locking §10:173) is **still open** and must be confirmed before those
+`S(bucket)+S(P)+X(P,name)`, locking §2.1 coverage map) is **still open** and must be confirmed before those
 ops — A5-A7 (ACL family) and A23 (SetTimes) in P-6's command set — migrate. (2) **Q-hsync-lease** —
 the hsync / lease-recovery interaction with `X(parent, file)` on commit is unspecified and must be
 resolved before the hsync/lease commands migrate; RecoverLease (A29) is in P-6's command set. Not
