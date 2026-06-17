@@ -26,7 +26,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, *(['..'] * 5)))   # .../leader-execution -> repo root
 DOCS = ['leader-planned-execution.md', 'leader-execution-locking.md',
         'leader-execution-components.md', 'leader-execution-test-plan.md',
-        'leader-execution-phasing.md']
+        'leader-execution-phasing.md', 'leader-execution-retry.md']
 FAM = r'(?:D|ALT|RC|I|B|C|P|T|F|A|EXC|Q|R)'
 REF_FIELDS = ['depends_on', 'enables', 'rejects', 'deferred_alternatives', 'addresses',
               'killed_by', 'deferred_by', 'resolved_by', 'implements', 'covers', 'tests',

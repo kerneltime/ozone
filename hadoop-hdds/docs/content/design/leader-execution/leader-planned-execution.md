@@ -4060,15 +4060,31 @@ exists.
 
 ```yaml
 id: D-OPEN-retry
-title: In-flight registry + durable replicated response table vs in-memory-only; pending per-op idempotency audit
-status: deferred
+title: In-flight registry + durable replicated response table; RESOLVED by the retry companion (R-1..R-5) + the per-op idempotency audit
+status: locked
 depends_on: [D-7]
+enables: [D-wal-off]
 raised_by: [ivandika3, kerneltime]
 addresses: [RC-ivandika-retry-cache-semantics]
-consequences: ["DB batch already idempotent (whole-object puts); only RE-EXECUTION is non-idempotent (SCM alloc + quota Merge) → audit scope ~10 ops, not 47", "atomic-with-data-batch is the likely invariant for non-idempotent ops", "P-1 production enablement is GATED: the OBS key path MUST NOT enable the production runtime flag for {CreateKey, CommitKey, AllocateBlock, DeleteKey} until either a durable retry path exists OR those ops are proven safe under client-retry semantics by harness. Dev/staging flag may precede. The non-idempotent-on-re-plan set (SCM block alloc + quota Merge) is what needs the atomic-with-batch retry entry.", "Mechanism under active design in a parallel effort (Ratis retry-cache based durable idempotency for the non-idempotent ops); the P-1 production gate (above) holds until it lands."]
-tests: []
+consequences: ["DB batch already idempotent (whole-object puts); only RE-EXECUTION is non-idempotent (SCM alloc + quota Merge + MPU + moves) → audit scope ~26 ops (idempotency audit), not 47", "RESOLVED: mechanism specified in leader-execution-retry.md — R-1 opaque (clientId,callId) key (no client change); R-2 TTL-only durable completion table; R-3 record written ATOMIC-with-patch (I-dedup-record-atomic); in-flight registry attach-to-future; term-fenced (I-dedup-fence). R-5 rejects a deterministic-id lever (collision-unsafe).", "P-1 production enablement remains GATED until the mechanism LANDS in code: the OBS key path MUST NOT enable the production runtime flag for {CreateKey, CommitKey, AllocateBlock, DeleteKey} until the durable retry path exists. Dev/staging flag may precede.", "ack-based GC + a lease backstop are deferred to a fast-follow (they need a client protocol field); V1 is TTL-only, server-side (B-retry-expiry)."]
+tests: [T-retry-dedup-failover, T-retry-record-atomic, T-retry-handoff-gap, T-retry-stale-leader, T-batch-retry-recompose]
 provenance: verified
-evidence: ["per-command inventory 2026-06-15", "leader-execution-locking.md §10"]
+evidence: ["per-command inventory 2026-06-15", "leader-execution-locking.md §10", "leader-execution-retry.md R-1..R-5, §3", "leader-execution-idempotency-audit.md (N1-N4/I taxonomy; ~26 non-idempotent ops)"]
+```
+
+```yaml
+id: D-wal-off
+title: Disable the RocksDB WAL; the Ratis log is the sole WAL (requires atomic_flush=true)
+status: locked
+depends_on: [D-1, D-3, D-OPEN-retry]
+enables: [I-atomic-flush, I-merge-replay-safe, I-log-retention, I-wal-off-closure]
+raised_by: [kerneltime]
+deciders: [kerneltime]
+consequences: ["Ratis log becomes the sole durability authority; the redundant per-write RocksDB WAL append is reclaimed", "INSEPARABLE from atomic_flush=true: the multi-CF transaction (data + transactionInfoTable + completion CF + quota CF) tears on crash without it, double-applying the quota Merge on replay-from-stale-TransactionInfo", "WAL today is ON with sync=false (DBStoreBuilder.java:227), so the Ratis log is ALREADY the machine-crash authority; P-8 makes it explicit", "phased as P-8 (after P-7 single-writer); gated on the closure audit + a measured NVMe replay benchmark"]
+tests: [T-crash-replay-merge-once, T-wal-off-log-retention, T-wal-off-closure-audit, T-wal-off-recovery]
+phase: P-8
+provenance: verified
+evidence: ["grill 2026-06-16 (kerneltime: drop the double buffer, turn the WAL off)", "leader-execution-retry.md §7 (D-wal-off, I-atomic-flush)", "DBStoreBuilder.java:227 (WriteOptions setSync only, no setDisableWAL), DBStoreBuilder.java:422 (WAL TTL/size managed)"]
 ```
 
 ### Spec-process decisions (about this document, not the design)
@@ -5156,12 +5172,23 @@ constrain any eventual value.
 
 ```yaml
 id: B-retry-expiry
-statement: "Retry-cache entry lifetime/expiry is DEFERRED with the retry mechanism (D-OPEN-retry); no numeric value asserted. Fixed lower-bound facts: entry written by the TERMINAL step only (intermediate sub-steps idempotent-by-structure, need none); whole-object Put/Delete already idempotent, so only RE-EXECUTION of non-idempotent ops (SCM alloc, quota Merge, moves, soft-delete; ~10 ops) needs durable handling. Durable+replicated vs in-memory-only is the deferred decision."
-rationale: "A retention number would imply a chosen mechanism; the mechanism is deferred behind a per-op idempotency audit. Only the lower-bound facts are verified and they constrain the eventual value."
+statement: "Completion-record (retry-cache) entry lifetime. Mechanism now DECIDED (leader-execution-retry.md R-2): a TTL-only durable completion table, server-side, no client change; the entry is written by the TERMINAL step only (intermediate sub-steps idempotent-by-structure). TTL sized >= the worst-case failover + client-retry horizon and no larger; no single number asserted (workload-dependent). ack-based GC + a lease backstop are deferred to a fast-follow (they need a client protocol field). Whole-object Put/Delete are already idempotent; only RE-EXECUTION of the non-idempotent set (SCM alloc, quota Merge, MPU, moves) needs the durable entry."
+rationale: "A hard retention number would over-constrain a workload-dependent value; what is fixed is the mechanism (TTL-only durable, R-2) and the lower bound (>= failover+retry horizon). ack-GC would shrink the table from time-bounded to in-flight-bounded but requires a client change, hence deferred."
 provenance: verified
 evidence:
-  - "leader-planned-execution.md D-OPEN-retry (deferred; ~10-op audit scope), RC-ivandika-retry-cache-semantics"
-  - "leader-execution-locking.md §4.3 (terminal-step retry-cache; intermediate steps idempotent), §10 (deferred mechanism)"
+  - "leader-execution-retry.md R-2 (TTL-only durable), §3.4 (B-retry-expiry sizing), §8 (ack-GC deferred)"
+  - "leader-planned-execution.md D-OPEN-retry (now locked), RC-ivandika-retry-cache-semantics"
+  - "leader-execution-locking.md §4.3 (terminal-step retry-cache; intermediate steps idempotent)"
+```
+
+```yaml
+id: B-replay-length
+statement: "With the WAL off (D-wal-off), OM restart replay length = the transactions committed since the last atomic RocksDB flush, bounded by memtable size / flush cadence. Not a fixed number: a tunable trade of replay time + Ratis-log retention window against flush fsync frequency. Gated by a measured NVMe benchmark (T-wal-off-recovery) before P-8 enablement."
+rationale: "WAL-off shifts crash recovery to Ratis replay from the last durably-flushed index; replay cost is set by how far the memtable runs ahead of SST. Stated to force a measurement (not an assumption) and to couple flush cadence to the operational restart budget."
+provenance: inferred
+evidence:
+  - "leader-execution-retry.md §7.4 (B-replay-length; measure-before-enable gate), §7.3 (I-log-retention)"
+  - "OzoneManagerStateMachine.java:580 (takeSnapshot -> flushDB), RDBStore.java:312 (flushDB)"
 ```
 
 ---
@@ -5356,6 +5383,15 @@ it directly.
 | I-quota-commutative | T-batch-quota-no-double-decrement, T-quota-concurrent, T-quota-exact-tlc, T-quota-failover |
 | I-quota-crash-safe | T-quota-concurrent, T-quota-exact-tlc, T-quota-failover |
 | I-txninfo-atomic-with-patch | T-apply-failure-resync, T-txninfo-crash-atomicity |
+| I-atomic-flush | T-crash-replay-merge-once |
+| I-batch-orthogonal | T-batch-retry-recompose |
+| I-dedup-fence | T-retry-stale-leader |
+| I-dedup-handoff | T-retry-handoff-gap |
+| I-dedup-key | T-retry-dedup-failover |
+| I-dedup-record-atomic | T-retry-record-atomic |
+| I-log-retention | T-wal-off-log-retention |
+| I-merge-replay-safe | T-crash-replay-merge-once |
+| I-wal-off-closure | T-wal-off-closure-audit |
 
 *Generated from `T-n covers:` and `I-n tests:` fields; every invariant has at least one test (lint-enforced).*
 
@@ -5853,8 +5889,48 @@ finalization per D-11, but once finalized the legacy path is gone).
 cache is removed for all commands; the legacy path is deleted from the tree; `lint-spec` is
 green and the TLA+ tiers refine their oracles. (See §31 for the full overall DoD.)
 
+**Durability model — unchanged by P-7, changed by P-8.** P-7 is a *throughput* change, not a
+durability change, and it is important for review that the two are not conflated. Durability is
+**already Ratis-log-authoritative**: the OM RocksDB runs with `sync=false` (`DBStoreBuilder.java:227`),
+so on a machine crash the un-synced RocksDB WAL is lost and recovery comes from replaying the Ratis
+log from the persisted `TransactionInfo` — the RocksDB WAL only accelerates *process*-crash recovery.
+Removing the double buffer (a write-staging optimization) does not touch this. The follow-on **P-8
+(`D-wal-off`)** makes the model explicit by disabling the RocksDB WAL entirely so the Ratis log is the
+*sole* WAL, under the inseparable precondition `atomic_flush=true` (else the OM's multi-column-family
+batch tears on crash and replay double-applies the quota `Merge`). P-8 is gated on a closure audit and
+a measured replay benchmark; full mechanism and invariants are in companion `leader-execution-retry.md`
+§6–§8.
+
 ```yaml
 - {id: P-7, scope: "cleanup: remove double buffer + table cache; delete legacy path; finalize", depends_on_phases: [P-3, P-4, P-5, P-6], must_satisfy: [], must_pass: [], config_flag: "n/a", acceptance: "double buffer gone; single execution model"}
+```
+
+#### P-8 — Disable the RocksDB WAL; the Ratis log becomes the sole WAL (D-wal-off)
+
+**What it proves.** That the OM's RocksDB no longer keeps its own write-ahead log: durability is
+provided entirely by the Ratis log + periodic fsync'd checkpoints, and the redundant per-write WAL
+append is reclaimed. This is a **durability-model** change, deliberately separated from P-7 (a
+throughput change with the durability model unchanged) so the two diffs are independently reviewable.
+
+**The showstopper it retires.** The redundant durability layer. With `sync=false` the RocksDB WAL is
+already not the machine-crash authority — the Ratis log is (`DBStoreBuilder.java:227`) — so P-8 makes
+that explicit and reclaims the write amplification. **Inseparable precondition: D-wal-off ≡ {disableWAL}
+∧ {atomic_flush=true}.** Without `atomic_flush`, the OM's multi-column-family transaction (data +
+`transactionInfoTable` + completion CF + quota CF) tears on crash and replay-from-stale-`TransactionInfo`
+double-applies the non-idempotent quota `Merge` (`I-atomic-flush`).
+
+**Config flag.** `ozone.om.db.wal.disabled` (per-cluster, default off) — enabled only after the closure
+audit (`T-wal-off-closure-audit`) and the measured NVMe replay benchmark (`T-wal-off-recovery`,
+`B-replay-length`) pass.
+
+**Acceptance gate.** WAL disabled with `atomic_flush=true`; every durable write flows through the Ratis
+apply path (`I-wal-off-closure`); log purge gated at `flushDB`'d snapshots (`I-log-retention`); the quota
+`Merge` applies exactly once across a torn-flush crash (`I-atomic-flush` / `I-merge-replay-safe`); replay
+within the operational restart budget. Depends on P-7 (single writer first). Full mechanism + invariants:
+companion `leader-execution-retry.md` §6–§8.
+
+```yaml
+- {id: P-8, scope: "disable RocksDB WAL; Ratis log as sole WAL; enable atomic_flush=true", depends_on_phases: [P-7], must_satisfy: [I-atomic-flush, I-merge-replay-safe, I-log-retention, I-wal-off-closure], must_pass: [T-crash-replay-merge-once, T-wal-off-recovery], config_flag: "ozone.om.db.wal.disabled", acceptance: "WAL off under atomic_flush; Ratis log sole WAL; quota Merge exactly-once on torn-flush replay; replay within budget"}
 ```
 
 > Per-phase command detail + JIRA breakdown → companion `leader-execution-phasing.md`. That
@@ -6072,12 +6148,21 @@ The project is done — and P7 may finalize — when **all** of the following ho
    (`ObsAbstractExact`, the over-commit counterexample) either resolved by
    D-OPEN-quota-enforcement choosing exact (and then made green) or formally acknowledged as
    the accepted-limitation refinement gap under EXC-3.
-7. **The two open decisions are closed or explicitly accepted.** D-OPEN-quota-enforcement and
-   D-OPEN-retry must each reach a `locked` (or formally-accepted) state — the project is not
-   "done with open load-bearing decisions." Either the leader-local reservation is built
-   (exact quota) or the soft-quota limitation is signed off; either the retry mechanism is
-   chosen after the idempotency audit or the audit explicitly concludes the deferred state is
-   acceptable for the shipped command set.
+7. **The two open decisions are closed or explicitly accepted.** Both must reach a `locked`
+   (or formally-accepted) state — the project is not "done with open load-bearing decisions."
+   **D-OPEN-retry is now `locked`**: the retry mechanism is specified in companion
+   `leader-execution-retry.md` (R-1..R-5) after the per-op idempotency audit — what remains is
+   *implementation* (the P-1 production gate holds until the durable retry path lands in code),
+   not the decision. **D-OPEN-quota-enforcement remains open**: either the leader-local
+   reservation is built (exact quota) or the soft-quota limitation is signed off (EXC-3).
+
+**P-8 is a gated follow-on, not part of this overall gate.** The conditions above define "the
+core refactor is done and the double buffer is gone" — reached at **P-7**. **P-8 (`D-wal-off`:
+disable the RocksDB WAL so the Ratis log is the sole WAL)** is an additional optimization layered
+*after* P-7, behind its own flag (`ozone.om.db.wal.disabled`) and gated on the closure audit
+(`T-wal-off-closure-audit`) plus a measured replay benchmark (`T-wal-off-recovery`); it is governed
+by the per-phase DoD (§31.1), not by this overall gate. The durability model is unchanged through
+P-7 (Ratis-log-authoritative under `sync=false`) and only made *explicit* by P-8.
 
 ---
 

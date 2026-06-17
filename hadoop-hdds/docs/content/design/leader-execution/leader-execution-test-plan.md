@@ -1023,9 +1023,131 @@ provenance: inferred
 evidence: ["leader-planned-execution.md §18 (observability: write metrics move to leader-only), D-10", "OMKeyCreateRequest.java:213,225", "OMKeyCommitRequest.java:176-178,491,496", "OzoneManagerRequestHandler.java:427,430"]
 ```
 
+### 4.x Retry / idempotency and terminal-write-path tests (companion `leader-execution-retry.md`)
+
+These nine cover the retry mechanism (R-1…R-5) and the WAL-off terminal write path (D-wal-off).
+They are `inferred` (the design is specified and TLA modeling is owed; the Java tests are not
+yet written). Several carry an explicit negative variant ("MUST reproduce the bug") so the test
+has teeth rather than passing vacuously.
+
+```yaml
+# T-retry-dedup-failover
+id: T-retry-dedup-failover
+statement: >
+  Durable dedup survives failover. Commit a write whose response is recorded in the completion
+  CF (R-3); kill the leader before it replies; retry the same (clientId, callId) on the new
+  leader. Assert the new leader returns the recorded OMResponse from the durable table WITHOUT
+  re-executing (no second SCM alloc, no second quota Merge) and the client sees a single effect
+  — the property today's in-memory Ratis retry cache does NOT provide across failover.
+covers: [I-dedup-key]
+provenance: inferred
+evidence: ["leader-execution-retry.md §1, §3.1-§3.2, R-1", "OzoneManagerRatisServer.java:559 (today's in-memory probe being relocated)"]
+```
+```yaml
+# T-retry-record-atomic
+id: T-retry-record-atomic
+statement: >
+  Completion record and data patch are atomic. Under the spec'd single-BatchOperation apply,
+  assert a reader/replica sees both the effect and its (clientId, callId) record, or neither —
+  never an effect without its record (a retry could re-execute) nor a record without its effect
+  (a lost write masked as done). A non-atomic variant (record written in a separate batch) MUST
+  reproduce one of those torn states, proving teeth.
+covers: [I-dedup-record-atomic]
+provenance: inferred
+evidence: ["leader-execution-retry.md §3.1, §6.2 (unified BatchOperation)", "OzoneManagerDoubleBuffer.java:364 (single BatchOperation today)"]
+```
+```yaml
+# T-retry-handoff-gap
+id: T-retry-handoff-gap
+statement: >
+  No double-execute in the in-flight->durable handoff window. Drive retries arriving (a) before
+  apply, (b) after the completion record is applied but before in-flight removal, and (c) after
+  removal; assert each is deduped (in-flight future or durable record) and the op runs exactly
+  once. A negative variant that removes from the in-flight registry at submit-time (pre-apply)
+  MUST reproduce a double-execute.
+covers: [I-dedup-handoff]
+provenance: inferred
+evidence: ["leader-execution-retry.md §3.3, §5 (I-dedup-handoff: remove strictly post-apply)"]
+```
+```yaml
+# T-retry-stale-leader
+id: T-retry-stale-leader
+statement: >
+  Stale-leader patches are fenced. Force a leader that has lost the Raft term to finish executing
+  and attempt to submit its result patch; assert the submit is refused (term tag) and the patch
+  cannot commit (Raft term), so no effect from the deposed leader reaches the log. Exercises the
+  execute-before-replicate window unique to leader-side execution.
+covers: [I-dedup-fence]
+provenance: inferred
+evidence: ["leader-execution-retry.md §3.5 (Raft term + term-tagged handoff)"]
+```
+```yaml
+# T-batch-retry-recompose
+id: T-batch-retry-recompose
+statement: >
+  Retry is correct under leader-side batch recomposition. Commit a batch B={R1..R10}; fail over;
+  on the new leader let retries of a subset re-batch into a DIFFERENT grouping B'. Assert committed
+  requests are deduped at admission (never re-batched), uncommitted requests execute exactly once
+  in B', and differing batch composition has NO effect on exactly-once. A concurrent double-retry
+  of one request lands in at most one new batch (in-flight registry).
+covers: [I-batch-orthogonal]
+provenance: inferred
+evidence: ["leader-execution-retry.md §4 (per-request, not per-batch, dedup)"]
+```
+```yaml
+# T-crash-replay-merge-once
+id: T-crash-replay-merge-once
+statement: >
+  WAL-off replay applies the quota Merge exactly once. With the WAL disabled and atomic_flush=true,
+  crash the OM with column families at DIVERGENT flush points and replay from the persisted
+  TransactionInfo; assert the quota counter reflects each operation exactly once (no double-Merge).
+  The negative variant with atomic_flush=false MUST reproduce a double-count, proving the
+  precondition is load-bearing and the test has teeth.
+covers: [I-atomic-flush, I-merge-replay-safe]
+provenance: inferred
+evidence: ["leader-execution-retry.md §7.3 (I-atomic-flush, I-merge-replay-safe)", "DBStoreBuilder.java:227 (WriteOptions; atomic_flush currently unset)"]
+```
+```yaml
+# T-wal-off-log-retention
+id: T-wal-off-log-retention
+statement: >
+  Ratis log retains past the durable RocksDB index. With the WAL off, assert log purge occurs only
+  at a flushDB-backed snapshot index (never on applied-index alone): crash the OM after apply but
+  before the next snapshot and assert full recovery via Ratis replay from the last durable index.
+  A negative variant that purges on applied-index MUST lose the un-flushed tail.
+covers: [I-log-retention]
+provenance: inferred
+evidence: ["leader-execution-retry.md §7.3 (I-log-retention)", "OzoneManagerStateMachine.java:580 (takeSnapshot -> flushDB)", "RDBStore.java:312 (flushDB)"]
+```
+```yaml
+# T-wal-off-closure-audit
+id: T-wal-off-closure-audit
+statement: >
+  No durable write bypasses the Ratis apply path. Static + runtime audit enumerating every durable
+  OM RocksDB write (snapshot-chain metadata, bootstrap, background services) and asserting each
+  flows through the replicated apply path OR is explicitly WAL-retained per WriteOptions.disableWAL
+  for an enumerated exception. A durable write found outside the apply path with the WAL off is a
+  data-loss bug; this audit gates P-8 enablement.
+covers: [I-wal-off-closure]
+provenance: inferred
+evidence: ["leader-execution-retry.md §7.3 (I-wal-off-closure), §7.4 gate"]
+```
+```yaml
+# T-wal-off-recovery
+id: T-wal-off-recovery
+statement: >
+  Replay time on NVMe is within budget (benchmark gate, not a correctness assertion). Measure OM
+  restart replay time with the WAL off at the expected memtable size / flush cadence
+  (B-replay-length). Gate: replay completes within the operational restart budget; if not, tighten
+  the atomic-flush cadence. Run before enabling P-8 in production.
+covers: []
+provenance: inferred
+evidence: ["leader-execution-retry.md §7.4 (B-replay-length, measure-before-enable gate)"]
+```
+
 ---
 
-## 5. Per-phase acceptance map (P-0 … P-7 → T-n)
+## 5. Per-phase acceptance map (P-0 … P-8 → T-n)
 
 This map is the test-side projection of the master phasing (`leader-planned-execution.md`
 §29). It restates each phase's `must_pass` set and adds the T-n this companion contributes,
@@ -1052,6 +1174,7 @@ this column and listed once below the table, exactly as the master §29 prose tr
 | **P-5** | Batch/background: DeleteKeys, RenameKey/Keys, DeleteOpenKeys, PurgeKeys/Directories | `T-batch-quota-no-double-decrement` (per-key quota decrement exactly-once under retry + partial-batch failure); multi-slot ordering covered transitively by `T-3` ordering + `NoLeak`, and by the cross-cutting set below | n/a |
 | **P-6** | Easy Set-A sweep (~22 single-table ops) | (none — leg work; per-command flag-routing parity is the cross-cutting `T-flag-routing-both-paths` applied per op, below) | n/a |
 | **P-7** | Cleanup: remove double buffer + table cache; delete legacy path; finalize | (none — full regression green with legacy path REMOVED; `T-ryw-from-db` now the only RYW path; `T-rolling-upgrade-mixed-binary` superseded by finalization) | OBS + FSO models green; `QuotaOvercommit.cfg` per `D-OPEN-quota-enforcement` resolution |
+| **P-8** | Disable RocksDB WAL; Ratis log as sole WAL (atomic_flush=true) | `T-crash-replay-merge-once`, `T-wal-off-recovery` | WAL-off replay model: quota Merge exactly-once on torn-flush (planned; `leader-execution-retry.md` §7) |
 
 **Cross-cutting (applies to every migrated command — NOT a per-phase `must_pass`).** These
 tests gate no single phase because they re-run for *every* command migration; the master §29
@@ -1115,6 +1238,15 @@ authority `leader-execution-locking.md` §9) and **master invariants** (slugs) a
 | `I-ondisk-invariance-shield` | `T-rolling-upgrade-mixed-binary` | D-11/§19 |
 | `I-txninfo-atomic-with-patch` (#TRANSACTIONINFO atomic with patch) | `T-apply-failure-resync`, `T-txninfo-crash-atomicity` | P-0 must_satisfy; `OzoneManagerDoubleBuffer.java:354-382` |
 | `I-checkpoint-exact-index` | `T-snapshot-consistency` | P-3 must_satisfy |
+| `I-dedup-key` | `T-retry-dedup-failover` | retry companion R-1/R-3 |
+| `I-dedup-record-atomic` | `T-retry-record-atomic` | retry companion §3.1 |
+| `I-dedup-handoff` | `T-retry-handoff-gap` | retry companion §3.3 |
+| `I-dedup-fence` | `T-retry-stale-leader` | retry companion §3.5 |
+| `I-batch-orthogonal` | `T-batch-retry-recompose` | retry companion §4 |
+| `I-atomic-flush` | `T-crash-replay-merge-once` | retry companion D-wal-off §7.3 |
+| `I-merge-replay-safe` | `T-crash-replay-merge-once` | retry companion §7.3 |
+| `I-log-retention` | `T-wal-off-log-retention` | retry companion §7.3 |
+| `I-wal-off-closure` | `T-wal-off-closure-audit` | retry companion §7.3 |
 
 ### 6.3 Audit result
 

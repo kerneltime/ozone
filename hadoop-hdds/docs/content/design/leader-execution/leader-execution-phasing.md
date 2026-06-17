@@ -25,7 +25,7 @@ evidence_branch: HDDS-11898-design-docs
 # Leader-Side Execution — Phased Migration Playbook
 
 > **Role.** This is the companion referenced from master `leader-planned-execution.md` §29
-> (Implementation plan / phasing). The master holds the frozen `P-0..P-7` YAML blocks (scope,
+> (Implementation plan / phasing). The master holds the frozen `P-0..P-8` YAML blocks (scope,
 > `depends_on_phases`, `must_satisfy`, `must_pass`, `config_flag`, `acceptance`); **this file does
 > not re-litigate them** — it expands each phase into a per-command migration playbook: the exact
 > command set, the PR/sub-task decomposition (one `PlannedRequest` subclass per write `Type` +
@@ -416,7 +416,7 @@ per-command flag, after the hard machinery is proven.
 
 ---
 
-## 5. Per-phase playbook (P-0 … P-7)
+## 5. Per-phase playbook (P-0 … P-8)
 
 Each phase below reproduces its master §29 `P-n` block verbatim (the frozen contract), then gives
 the per-command PR/sub-task breakdown, the config flag, the prior-phase dependency, and the
@@ -829,6 +829,53 @@ config_flag: "n/a"
 acceptance: "double buffer gone; single execution model; legacy path deleted; flags retired; all I-n tested; lint-spec + TLA+ green"
 provenance: inferred
 evidence: ["master §29 P-7", "OzoneManagerDoubleBuffer.java", "OzoneManagerRatisUtils.java:127-352", "BucketLayoutAwareOMKeyRequestFactory.java:79-211"]
+```
+
+---
+
+### P-8 — Disable the RocksDB WAL; Ratis log as sole WAL
+
+```yaml
+- {id: P-8, scope: "disable RocksDB WAL; Ratis log as sole WAL; enable atomic_flush=true", depends_on_phases: [P-7], must_satisfy: [I-atomic-flush, I-merge-replay-safe, I-log-retention, I-wal-off-closure], must_pass: [T-crash-replay-merge-once, T-wal-off-recovery], config_flag: "ozone.om.db.wal.disabled", acceptance: "WAL off under atomic_flush; Ratis log sole WAL; quota Merge exactly-once on torn-flush replay; replay within budget"}
+```
+
+**Command set.** None. This phase flips RocksDB write options (disable WAL + `atomic_flush=true`) and
+wires log-purge to the flushed snapshot index. It is **not** a command migration; it is a
+durability-model change, separated from P-7 so the throughput diff and the durability diff land
+independently.
+
+**Sub-tasks / PRs:**
+
+- **PR-8.1** enable `atomic_flush=true` on the OM RocksDB (`DBStoreBuilder` DB options) — lands FIRST and
+  independently, since it is safe with the WAL still on and is the precondition for WAL-off
+  (`I-atomic-flush`: without it the multi-CF batch tears on crash → quota `Merge` double-counts on replay).
+- **PR-8.2** add the `ozone.om.db.wal.disabled` flag; when set, the apply-path `WriteOptions` disable the
+  WAL (`DBStoreBuilder.java:227` currently sets only `setSync`, never `setDisableWAL`). Default off.
+- **PR-8.3** gate log purge at the `flushDB`-backed snapshot index (`I-log-retention`); add the closure
+  audit (`T-wal-off-closure-audit`) asserting no durable write bypasses the Ratis apply path
+  (`I-wal-off-closure`).
+- **PR-8.4** the crash-replay exactly-once test (`T-crash-replay-merge-once`, with the `atomic_flush=false`
+  negative variant) and the NVMe replay benchmark (`T-wal-off-recovery`, `B-replay-length`).
+
+**Config flag.** `ozone.om.db.wal.disabled` (default off; enabled per-cluster after the audit + benchmark).
+
+**Dependencies.** P-7 — the replicated-apply path must be the **sole** writer before the WAL is removed,
+so the Ratis log is unambiguously the durability authority for every write.
+
+**Acceptance gate.** WAL disabled with `atomic_flush=true`; the Ratis log is the sole WAL; the quota
+`Merge` applies exactly once across a torn-flush crash; log retention gated at flushed snapshots; replay
+time within the operational restart budget. Full mechanism + invariants: `leader-execution-retry.md` §6–§8.
+
+```yaml
+id: P-8
+scope: "enable atomic_flush=true (PR-8.1), add ozone.om.db.wal.disabled + disable apply-path WAL (PR-8.2), gate log purge at flushed snapshot + closure audit (PR-8.3), crash-replay exactly-once test + NVMe replay benchmark (PR-8.4)"
+depends_on_phases: [P-7]
+must_satisfy: [I-atomic-flush, I-merge-replay-safe, I-log-retention, I-wal-off-closure]
+must_pass: [T-crash-replay-merge-once, T-wal-off-recovery]
+config_flag: "ozone.om.db.wal.disabled"
+acceptance: "WAL off under atomic_flush; Ratis log sole WAL; quota Merge exactly-once on torn-flush replay; log retention gated at flushed snapshot; replay within budget"
+provenance: verified
+evidence: ["master §29 P-8", "leader-execution-retry.md §6-§8 (D-wal-off, I-atomic-flush, I-log-retention, I-wal-off-closure)", "DBStoreBuilder.java:227 (WriteOptions), DBStoreBuilder.java:422 (WAL managed)"]
 ```
 
 ---
