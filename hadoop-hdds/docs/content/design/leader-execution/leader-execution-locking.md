@@ -207,10 +207,12 @@ placement is specified:
   form of I-7. Formal-tier coverage of this contract is **bounded and partial**: M2a (tree
   + file rename) and M2b (directory rename) establish orphan-freedom for the **non-recursive**
   ops via **Refinement** to the atomic per-node oracle (captured-green; the model defines no
-  standalone `NoOrphan` invariant for these). The **recursive-delete** `Accounted` verdict
-  (M3 scope) is **not yet captured** — its tight bound is configured but TLC has not produced a
-  verdict — so the recursive-delete realization of I-7 is asserted by the Java harness (T-1)
-  and pending at the formal tier, **not** a captured-green model verdict.
+  standalone `NoOrphan` invariant for these). The **recursive-delete** `Accounted` property's
+  **tight bound** (`FsoM3.cfg`, MAX_OPS=1) is now **bounded-green and captured** (341,610 distinct
+  states, 2026-06-17): TLC reports "No error has been found." The **broader** bound (`FsoM3Full.cfg`,
+  MAX_OPS=2) still **aborts disk-full and yields no verdict**, so the recursive-delete realization
+  of I-7 is **bounded-green at the tight bound** at the formal tier (and additionally asserted by the
+  Java harness, T-1); its broad bound remains uncaptured.
 - **I-8 (no holder lease — correctness-critical).** A held lock is **never** revoked from
   an in-flight holder. Lock release happens only in the holder's own completion path
   (commit or failure). A lease that expired a held lock while its Ratis op was still in

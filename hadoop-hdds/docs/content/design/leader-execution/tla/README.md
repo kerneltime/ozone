@@ -83,7 +83,7 @@ committed). State counts are exact.
 | `QuotaOvercommit.cfg` | `ObsAbstractExact` | exact-quota precondition under shared-bucket lock | **OVER-COMMIT found (expected)** — negative test; motivates the soft-quota decision (EXC-3) |
 | `FsoImpl.cfg` / `FsoImplSmall.cfg` | `FsoImpl` | M2a: create/commit/delete + file rename | **GREEN** — `26,828,240 distinct states`, depth 41 |
 | `FsoImpl.cfg` (dir-rename mode) | `FsoImpl` | M2b: directory rename (rename-stability F-2) | **GREEN** — `32,400,283 distinct states`, depth 41 |
-| `FsoM3.cfg` | `FsoImpl` | M3: recursive `rm -rf`, tight bound `MAX_OPS=1` | verdict **NOT captured** (re-run to reproduce) — see note |
+| `FsoM3.cfg` | `FsoImpl` | M3: recursive `rm -rf`, tight bound `MAX_OPS=1` | **GREEN (tight bound)** — `341,610 distinct states`, depth 23, "No error has been found" (captured 2026-06-17) |
 | `FsoM3Full.cfg` | `FsoImpl` | M3 broad, `MAX_OPS=2` | **ABORTED — no verdict.** Ran out of disk at ~220M distinct states with ~14M still queued (`Error: ... No space left on device`) |
 
 The two OBS negative tests and the two FSO green tiers (M2a/M2b) are the load-bearing
@@ -91,16 +91,22 @@ results: linearizability + deadlock-freedom + quota accounting for the non-recur
 operations are established by exhaustive refinement, and the negative tests prove the model
 has teeth (it *can* find the deadlock and the over-commit).
 
-### M3 (recursive delete) is NOT green at the formal tier
+### M3 (recursive delete): tight bound green, broad bound still exceeds disk
 
-Be explicit about this, because it is the one place the formal evidence is incomplete: the
-**tight** M3 run (`FsoM3.cfg`, `MAX_OPS=1`) has a designed `Accounted` invariant and is
-runnable, but its passing verdict was **not captured** to a committed artifact; the **broad**
-M3 run (`FsoM3Full.cfg`, `MAX_OPS=2`) **aborted on disk exhaustion** before completing and so
-produced **no verdict**. Recursive-delete orphan-freedom is therefore `inferred` (anchored by
-the lock/linearizability semantics and the M2a/M2b refinement), **not** `verified` at the
-formal tier. The parent `leader-execution-test-plan.md` (T-1 provenance) states this same
-limitation; do not cite M3 as green.
+Be precise about what is and isn't established here, because the two M3 bounds land
+differently. The **tight** M3 run (`FsoM3.cfg`, `MAX_OPS=1`) checks the `Accounted` invariant
+(no *permanent* unaccounted orphan — the EXC-2-weakened form) and now **passes with a captured
+verdict**: `341,610 distinct states`, search depth 23, "No error has been found" (captured
+2026-06-17). The **broad** M3 run (`FsoM3Full.cfg`, `MAX_OPS=2`) still **aborts on disk
+exhaustion** before completing and so produces **no verdict**. So recursive-delete
+orphan-freedom is `verified` at the formal tier *within the tight bound* (`MAX_OPS=1`), and
+remains `inferred` beyond it (anchored by the lock/linearizability semantics and the M2a/M2b
+refinement) until the broad run can complete on larger disk.
+
+The `Accounted` invariant is also the one wired into `FsoImpl.cfg` / `FsoImplSmall.cfg`: those
+configs previously named an older `NoOrphan` invariant and so were not runnable as cited;
+they now use `INVARIANT Accounted` (reconciled), so the M2a, M2b, and M3-tight verdicts all
+reproduce from the committed cfgs via the commands above.
 
 ## Scope and limitations
 

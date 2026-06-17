@@ -5,6 +5,8 @@ date: 2026-06-15
 jira: HDDS-11898
 status: draft (working — produced to close the D-OPEN-retry audit gap)
 author: Ritesh Shukla
+evidence_commit: d0ef506bc53
+evidence_branch: HDDS-11898-design-docs
 ---
 <!--
   Licensed under the Apache License, Version 2.0 (the "License");

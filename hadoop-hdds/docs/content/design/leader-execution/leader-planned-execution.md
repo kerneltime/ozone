@@ -851,8 +851,8 @@ Three things changed between [#7583](https://github.com/apache/ozone/pull/7583)'
    — see `leader-execution-locking.md §8 EXC-3` and §30). The FSO model is bounded-green at M2a and
    M2b (captured verdicts): TLC checked the FSO namespace tier exhaustively in two
    bounded-exhaustive increments — M2a (tree + file rename) and M2b (directory rename) both
-   fully green at `MAX_OPS=2`. M3 (`FsoM3.cfg`, recursive delete, `MAX_OPS=1`) is configured and
-   run locally but its verdict artifact is not yet captured; the broader `FsoM3Full.cfg`
+   fully green at `MAX_OPS=2`. M3 (`FsoM3.cfg`, recursive delete, `MAX_OPS=1`) is now bounded-green with a captured verdict
+   (341,610 distinct states, 2026-06-17); the broader `FsoM3Full.cfg`
    (`MAX_OPS=2`) pass ABORTED on disk-full (`No space left on device`) at depth 36 —
    220,163,827 distinct states, 14,082,268 states still on queue — and produced NO completion
    verdict (re-run on adequate disk, or run the tight bound `FsoM3.cfg` `MAX_OPS=1` for a
@@ -1088,8 +1088,9 @@ does **not** target serializable isolation of multi-operation transactions, beca
 no multi-operation transaction concept to isolate. This criterion is validated two ways:
 the concurrent linearizability harness against the sequential reference model
 (`leader-execution-locking.md §7`), and the formal **TLA+/TLC** models (OBS green; FSO
-bounded-green at M2a/M2b (captured verdicts at `MAX_OPS=2`), M3 partial — `FsoM3Full.cfg`
-in progress, no completion verdict), which check the
+bounded-green at M2a/M2b (captured verdicts at `MAX_OPS=2`) and at the M3 tight bound
+(`FsoM3.cfg`, `MAX_OPS=1`, 341,610 distinct states, captured 2026-06-17); the broader
+`FsoM3Full.cfg` (`MAX_OPS=2`) still aborts disk-full with no completion verdict), which check the
 implementation model refines the abstract sequential model. In
 one line: **borrow per-key serialization, the single serial writer, and idempotent retry;
 do not borrow MVCC, 2PC, or interactive transactions; prove correctness as linearizability
@@ -5261,7 +5262,7 @@ reason the open quota question is **provably** open, not hand-waved):
   `T-quota-exact-tlc`; its captured TLC verdict is pending. This
   is what keeps D-OPEN-quota-enforcement **honestly open**: the over-commit is mechanically
   reproducible, so the open question cannot be silently closed.
-- **FSO model — bounded-green at M2a/M2b (captured); M3 partial.** The `FsoAbstract` (atomic
+- **FSO model — bounded-green at M2a/M2b (captured); M3 tight bound bounded-green (captured), M3Full broad uncaptured.** The `FsoAbstract` (atomic
   per-node oracle) / `FsoImpl` (container/slot objectID-keyed lock manager) models check the FSO
   namespace+locking tier; `FsoImpl` **refines** the atomic oracle and holds deadlock-freedom
   and lock-safety. TLC checked two increments green with captured verdicts: **M2a** (tree:
@@ -5269,14 +5270,14 @@ reason the open quota question is **provably** open, not hand-waved):
   distinct states, `fso-m2a-full.out`), **M2b** (directory rename with objectID/rename
   stability + cycle prevention — 32,400,283 distinct states, `fso-m2b-full.out`). **M3**
   (recursive delete: tombstone + decomposed per-node-locked purge; `FsoM3.cfg`, `MAX_OPS=1`)
-  is configured and run locally but its verdict artifact is not yet captured; the broader
+  is now bounded-green with a captured verdict (341,610 distinct states, 2026-06-17); the broader
   `FsoM3Full.cfg` (`MAX_OPS=2`) pass ABORTED on disk-full (`No space left on device`) at depth
   36 — 220,163,827 distinct states, 14,082,268 states still on queue — and produced NO
   completion verdict (re-run on adequate disk, or run the tight bound `FsoM3.cfg` `MAX_OPS=1`
   for a definitive verdict). M3 checks `Accounted` (no *permanent* unaccounted orphan,
   EXC-2 form) rather than strict `NoOrphan` because transient mid-purge orphans are by design.
-  This is bounded-exhaustive TLC, not a general proof: M2a/M2b green at the stated scope, M3
-  partial (spec §34).
+  This is bounded-exhaustive TLC, not a general proof: M2a/M2b green at the stated scope, the
+  M3 tight bound bounded-green and captured, the M3Full broad bound uncaptured (spec §34).
 
 **Per-phase acceptance** maps into the companion and the phase blocks (§29): P-0
 (`T-cross-thread-release`, `T-objectid-disjoint`, `T-proto-roundtrip`), P-1
@@ -6103,7 +6104,8 @@ A phase is done when **all** of the following hold for that phase:
 3. **The formal tier for the phase's behavior refines its oracle.** For phases that touch
    namespace/quota semantics (P1 quota, P2 FSO), the corresponding TLA+ model
    (`ObsAbstract`/`ObsImpl` for OBS+quota; `FsoAbstract`/`FsoImpl` for FSO, bounded-green at
-   M2a/M2b with captured verdicts, M3 partial — `FsoM3Full.cfg` in progress) must check green
+   M2a/M2b with captured verdicts and at the M3 tight bound (`FsoM3.cfg`, `MAX_OPS=1`, captured
+   2026-06-17), with the broader `FsoM3Full.cfg` (`MAX_OPS=2`) still uncaptured) must check green
    against its accepted oracle. For P1 specifically, the *soft-quota* oracle (`ObsAbstract`) is green;
    the *exact* oracle (`ObsAbstractExact`) is a known counterexample tracked under
    R-quota-enforcement, and whether it must be green is gated on D-OPEN-quota-enforcement.
@@ -6408,10 +6410,10 @@ quota-enforcement risk R-quota-enforcement). The models live in the `ozone-11898
 - **`FsoAbstract` / `FsoImpl`** — the FSO linearizability/locking model that P2 checks against
   the atomic per-node oracle (the formal counterpart of the T-1..T-8 concurrent
   harness). `FsoImpl` (container/slot objectID-keyed lock manager) refines `FsoAbstract`
-  (atomic per-node oracle). Status: **M2a/M2b verified (captured); M3 partial** — M2a
+  (atomic per-node oracle). Status: **M2a/M2b + M3-tight verified (captured); M3Full broad uncaptured** — M2a
   (26,828,240 distinct) and M2b directory rename (32,400,283 distinct) green with captured
-  verdicts; M3 recursive delete (`FsoM3.cfg`, `MAX_OPS=1`) is configured and run locally but
-  its verdict artifact is not yet captured, and the broader `FsoM3Full.cfg` (`MAX_OPS=2`) pass
+  verdicts; M3 recursive delete (`FsoM3.cfg`, `MAX_OPS=1`) is now bounded-green with a captured verdict (341,610 distinct states,
+  2026-06-17), and the broader `FsoM3Full.cfg` (`MAX_OPS=2`) pass
   ABORTED on disk-full (`No space left on device`) at depth 36 — 220,163,827 distinct states,
   14,082,268 states still on queue — and produced NO completion verdict (re-run on adequate
   disk, or run the tight bound `FsoM3.cfg` `MAX_OPS=1` for a definitive verdict). M3 checks
@@ -6422,8 +6424,9 @@ Provenance: the OBS tier (`ObsAbstract`/`ObsImpl`/`ObsAbstractExact`) and the
 `QuotaOvercommit.cfg` counterexample are **configured** against the locking companion (EXC-3,
 §9 traceability, D-OPEN-quota-enforcement evidence "TLC counterexample 2026-06-15
 (ozone-11898-tla)") — `QuotaOvercommit.cfg` is the configured red oracle; its captured TLC
-verdict is pending. The FSO tier (`FsoAbstract`/`FsoImpl`) is **M2a/M2b verified (captured),
-M3 partial** — M2a `fso-m2a-full.out`, M2b `fso-m2b-full.out` are captured verdicts; M3
-(`FsoM3.cfg`) and the broader `FsoM3Full.cfg` (`MAX_OPS=2`) pass have no captured completion
-verdict yet (ozone-11898-tla, 2026-06-15). These TLA artifacts live in a reviewer-local fork
+verdict is pending. The FSO tier (`FsoAbstract`/`FsoImpl`) is **M2a/M2b + M3 tight bound
+verified (captured), M3Full broad uncaptured** — M2a `fso-m2a-full.out`, M2b
+`fso-m2b-full.out`, and the M3 tight bound (`FsoM3.cfg`, `MAX_OPS=1`, 341,610 distinct states,
+2026-06-17) are captured verdicts; only the broader `FsoM3Full.cfg` (`MAX_OPS=2`) pass has no
+captured completion verdict yet (ozone-11898-tla). These TLA artifacts live in a reviewer-local fork
 and are not committed; pin/snapshot them before treating the formal tier as reproducible.
