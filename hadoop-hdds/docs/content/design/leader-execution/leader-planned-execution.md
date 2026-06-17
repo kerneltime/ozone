@@ -5,7 +5,7 @@ date: 2026-06-15
 jira: HDDS-11898
 status: draft
 author: Ritesh Shukla
-evidence_commit: cb9c4772d00
+evidence_commit: d0ef506bc53
 evidence_branch: HDDS-11898-design-docs
 ---
 <!--
@@ -4171,6 +4171,9 @@ flowchart LR
   D_14[D-14] --> D_17[D-17]
   D_7[D-7] --> D_OPEN_quota_enforcement[D-OPEN-quota-enforcement]
   D_7[D-7] --> D_OPEN_retry[D-OPEN-retry]
+  D_1[D-1] --> D_wal_off[D-wal-off]
+  D_3[D-3] --> D_wal_off[D-wal-off]
+  D_OPEN_retry[D-OPEN-retry] --> D_wal_off[D-wal-off]
 ```
 
 *Generated from the `D-n depends_on` fields. An edge A → B means decision B rests on decision A.*
