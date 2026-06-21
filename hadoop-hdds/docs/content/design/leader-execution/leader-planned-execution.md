@@ -4081,7 +4081,7 @@ depends_on: [D-1, D-3, D-OPEN-retry]
 enables: [I-atomic-flush, I-merge-replay-safe, I-log-retention, I-wal-off-closure]
 raised_by: [kerneltime]
 deciders: [kerneltime]
-consequences: ["Ratis log becomes the sole durability authority; the redundant per-write RocksDB WAL append is reclaimed", "INSEPARABLE from atomic_flush=true: the multi-CF transaction (data + transactionInfoTable + completion CF + quota CF) tears on crash without it, double-applying the quota Merge on replay-from-stale-TransactionInfo", "WAL today is ON with sync=false (DBStoreBuilder.java:227), so the Ratis log is ALREADY the machine-crash authority; P-8 makes it explicit", "phased as P-8 (after P-7 single-writer); gated on the closure audit + a measured NVMe replay benchmark"]
+consequences: ["Ratis log becomes the sole durability authority; the redundant per-write RocksDB WAL append is reclaimed", "INSEPARABLE from atomic_flush=true: the multi-CF transaction (data + transactionInfoTable + completion CF + the quota Merge into bucketTable per D-7 Option B) tears on crash without it, double-applying the quota Merge on replay-from-stale-TransactionInfo", "WAL today is ON with sync=false (DBStoreBuilder.java:227), so the Ratis log is ALREADY the machine-crash authority; P-8 makes it explicit", "phased as P-8 (after P-7 single-writer); gated on the closure audit + a measured NVMe replay benchmark"]
 tests: [T-crash-replay-merge-once, T-wal-off-log-retention, T-wal-off-closure-audit, T-wal-off-recovery]
 phase: P-8
 provenance: verified
@@ -5920,7 +5920,7 @@ throughput change with the durability model unchanged) so the two diffs are inde
 already not the machine-crash authority — the Ratis log is (`DBStoreBuilder.java:227`) — so P-8 makes
 that explicit and reclaims the write amplification. **Inseparable precondition: D-wal-off ≡ {disableWAL}
 ∧ {atomic_flush=true}.** Without `atomic_flush`, the OM's multi-column-family transaction (data +
-`transactionInfoTable` + completion CF + quota CF) tears on crash and replay-from-stale-`TransactionInfo`
+`transactionInfoTable` + completion CF + the quota `Merge` into `bucketTable` per D-7 Option B) tears on crash and replay-from-stale-`TransactionInfo`
 double-applies the non-idempotent quota `Merge` (`I-atomic-flush`).
 
 **Config flag.** `ozone.om.db.wal.disabled` (per-cluster, default off) — enabled only after the closure
