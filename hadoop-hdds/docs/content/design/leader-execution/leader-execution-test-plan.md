@@ -974,22 +974,37 @@ evidence: ["leader-execution-components.md C-legacy-removal tests:[T-no-cache-co
 id: T-mixed-mode-cross-model-race
 statement: >
   With one command migrated and a sibling command on the same table still legacy, drive concurrent same-key
-  operations across both paths; assert they serialize via the shared bucket lock and the final DB state is
-  linearizable (no lost update, no dangling blocks).
-covers: [I-mixed-mode-lock-gate]
+  operations across both paths; assert they serialize via the one shared lock manager (both paths acquire the
+  same key/slot lock) and the final DB state is linearizable (no lost update, no dangling blocks).
+covers: [I-mixed-shared-lock]
 provenance: inferred
-evidence: ["D-17", "I-mixed-mode-lock-gate"]
+evidence: ["D-17", "I-mixed-shared-lock"]
 ```
 ```yaml
 # T-mixed-mode-stale-read
 id: T-mixed-mode-stale-read
 statement: >
-  Migrate a quota-bearing command; after it commits a write (key + bucket usedBytes), issue a legacy read op
-  (LookupKey, InfoBucket) and a legacy command reading the same key/bucket; assert both observe the fresh
-  value (no stale FullTableCache bucket, no stale PartialTableCache key).
+  Both directions of cross-model read coherence. (a) Migrated reads legacy's decided write: with a legacy
+  command's write decided but not yet drained, a migrated command on the same key reads cache-first and observes
+  it. (b) Legacy reads migrated's write: migrate a quota-bearing command; after it commits (key + bucket
+  usedBytes), issue a legacy read op (LookupKey, InfoBucket) and a legacy command on the same key/bucket; assert
+  both observe the fresh value (no stale FullTableCache bucket, no stale PartialTableCache key).
 covers: [I-mixed-mode-cache-coherent]
 provenance: inferred
-evidence: ["D-17", "I-mixed-mode-cache-coherent", "FullTableCache.java:200-213"]
+evidence: ["D-17", "I-mixed-mode-cache-coherent", "TypedTable.get cache-first", "FullTableCache.java:200-213"]
+```
+```yaml
+# T-mixed-write-reorder
+id: T-mixed-write-reorder
+statement: >
+  With one command migrated and a legacy sibling on the same key whose durable write is still queued in the
+  double buffer, drive decided order legacy(N-1) -> migrated(N) and assert the final durable RocksDB state
+  reflects the later-decided migrated write (no reorder, no lost update); assert the migrated durable write
+  rides the shared drain in Ratis order. Negative control: with the migrated path writing direct (pre-fix), the
+  same scenario reproduces the lost update.
+covers: [I-mixed-write-order]
+provenance: inferred
+evidence: ["D-17", "I-mixed-write-order", "OzoneManagerDoubleBuffer FIFO flushBatch"]
 ```
 
 ### 4.9 Leader-only security/observability scenarios (consequences of pure-follower apply)
@@ -1238,8 +1253,9 @@ authority `leader-execution-locking.md` §9) and **master invariants** (slugs) a
 | `I-managed-index-monotonic` | `T-flag-routing-both-paths`, `T-managed-index-monotonic`, `T-managed-index-restart-continuity`, `T-mixed-mode-no-collision`, `T-objectid-disjoint`, `T-rolling-upgrade-mixed-binary` | D-8/D-12; P-0 must_satisfy |
 | `I-objectid-disjoint` | `T-mixed-mode-no-collision`, `T-objectid-disjoint` | D-8/D-12 |
 | `I-mixed-mode-safe` | `T-mixed-mode-no-collision`, `T-rolling-upgrade-mixed-binary` | D-11/D-12 |
-| `I-mixed-mode-lock-gate` | `T-mixed-mode-cross-model-race` | D-17 |
+| `I-mixed-shared-lock` | `T-mixed-mode-cross-model-race` | D-17 |
 | `I-mixed-mode-cache-coherent` | `T-mixed-mode-stale-read` | D-17 |
+| `I-mixed-write-order` | `T-mixed-write-reorder` | D-17 |
 | `I-ondisk-invariance-shield` | `T-rolling-upgrade-mixed-binary` | D-11/§19 |
 | `I-txninfo-atomic-with-patch` (#TRANSACTIONINFO atomic with patch) | `T-apply-failure-resync`, `T-txninfo-crash-atomicity` | P-0 must_satisfy; `OzoneManagerDoubleBuffer.java:354-382` |
 | `I-checkpoint-exact-index` | `T-snapshot-consistency` | P-3 must_satisfy |

@@ -3241,7 +3241,7 @@ enables: [I-cache-free-ryw]
 rejects: [ALT-keep-cache, ALT-cf-callback-cache]
 raised_by: [kerneltime, ethan-rose]
 deciders: [kerneltime]
-consequences: ["removes the cache-epoch↔Ratis-index coupling (a known OM bug class)", "future caching = separate post-refactor effort"]
+consequences: ["removes the cache-epoch↔Ratis-index coupling (a known OM bug class)", "future caching = separate post-refactor effort", "END-STATE property: cache-free reads + direct (double-buffer-free) write hold AFTER P-7; during mixed mode the migrated path is SUSPENDED to cache-first reads + shared-drain writes for cross-model coherence (D-17), reverting at P-7/P-8"]
 tests: [T-ryw-from-db, T-no-cache-correctness]
 phase: P-0
 provenance: verified
@@ -3929,31 +3929,42 @@ phase: P-2
 evidence: ["grill locking-5 2026-06-15"]
 ```
 
-### D-17 — Mixed-mode coherence (shared bucket-lock gate + cache invalidate/update on apply)
+### D-17 — Mixed-mode coherence (one shared lock manager + cache-coherent reads + unified durable write order)
 
-Mixed mode (D-14) is long-lived, and it carries two coherence hazards the rest of the design did not cover. **Lock incoherence:** the migrated path takes the new objectID/slot locks (`C-lock-manager`) while the legacy path takes `OzoneManagerLock`'s bucket lock — different lock objects, so a migrated and a legacy command on the same key race on RocksDB (lost update / dangling blocks), not merely stale reads. **Cache staleness:** migrated writes bypass the OM table cache, but legacy commands and read ops consult it; the authoritative `FullTableCache` for volume/bucket never falls through to DB (`FullTableCache.java:200-213`), so a migrated quota `Merge` leaves the cached bucket *permanently* stale, while `PartialTableCache` self-heals on a miss (`PartialTableCache.java:158-169`). The fix is two layers, both landing in P-0: (1) the migrated path acquires the existing `OzoneManagerLock` bucket lock as its bucket-level gate (in addition to its fine-grained key/slot locks), so cross-model same-bucket ops serialize — this is the original "granular locking gatekeeping across old and new model"; (2) the migrated apply, on every node, invalidates each written key in `PartialTableCache` (the DB-fallthrough then serves the fresh value) and puts the new value into the `FullTableCache` for volume/bucket. Quota stays in the bucket row (D-11 preserved); the apply updates the cached copy with the Option-B merged value. Both layers retire at P-7 with the legacy path — and until then the parallelism win is partially gated behind legacy bucket-write-lock ops, an accepted temporary cost. The cleaner alternative — moving volatile quota into a separate domain-agnostic column family (`ALT-quota-cf`), which would also resolve the Lens-3 operator-decodes-`OmBucketInfo` concern — is deferred because it breaks on-disk invariance (D-11) and needs a quota migration.
+Mixed mode (D-14) is long-lived and **per-command**, so a migrated command and a legacy command can touch the same key/bucket concurrently (a migrated `CommitKey` and a legacy `RenameKey` on the same key — reachable by construction, because routing is per-operation-type, not per-key). Making that safe requires sharing **all three** coherence axes between the paths, not just a lock. The originally-recorded fix — a "shared bucket-lock gate" that had the *migrated* path additionally take the legacy `OzoneManagerLock` bucket lock — is **superseded**: it was both *unimplementable* (that lock is thread-affine, so it cannot be released on the continuation thread the leader-side orchestration runs on — D-4/I-9) and *insufficient* (it is released before the legacy durable write, so it serialized execution but neither the read view nor the durable write order, leaving the lost update intact).
+
+The redesign unifies the three axes and restores the **original direction from the first design** (`#7583` integration-point-3, *"Granular locking for old flow"* — the legacy path adopts the new locks, rather than the migrated path reaching down to the legacy one):
+
+1. **One lock authority.** Both paths acquire the new lean lock manager's granular key/slot locks (`C-lock-manager`, non-thread-affine, releasable on the continuation thread per I-9). A cross-model same-key pair takes the **same lock object** and serializes. The thread-affine `OzoneManagerLock` is never the cross-model rendezvous.
+2. **Cache-coherent reads, both directions.** The migrated path reads **cache-first** (`TypedTable.get`), so it observes a legacy command's decided-but-unflushed write held in the table cache; the migrated apply keeps the cache current (invalidate the written `PartialTableCache` key, update the authoritative `FullTableCache` for volume/bucket), so legacy and read ops observe migrated writes. The per-key visibility *hinge* — a migrated op holds its lock across the Ratis round until its write is durable (the lock-spanning model, `#7406` `OMGateway.submitInternal`) — covers the steady-state hand-off; cache-first reads cover the cross-model window the hinge alone does not.
+3. **Unified durable write order.** During mixed mode the migrated durable write rides the **same single double-buffer drain** as legacy — one Ratis-ordered FIFO, one flush daemon — so a migrated write cannot reach RocksDB ahead of an earlier-decided legacy write still queued (the reorder would otherwise survive a crash, since the cache is gone and RocksDB is the truth).
+
+All three are **transition scaffolds** and retire **together at P-7/P-8** with the legacy path: the lock manager becomes the sole native locking, the cache is removed, and the migrated path reverts to its end-state cache-free direct write. Consequently **D-3's cache-free reads and direct, double-buffer-free writes are END-STATE properties, explicitly suspended for the migrated path during mixed mode** — the price of per-command coexistence. The fine-grained-locking parallelism win is live throughout; only the write-path optimization waits for P-7. Quota stays in the bucket row (D-11 preserved): Option B's commutative `Merge` (D-7) plus the leader-local **reservation fold** (`#7406` `OmBucketInfo.getUsedBytes` = persisted + reserved) give lockless cross-model quota-*read* coherence without the bucket lock the prototype still left as a `// TODO remove` — though this does not settle `D-OPEN-quota-enforcement` (exact-vs-approximate admission). The separate-column-family alternative (`ALT-quota-cf`) remains deferred (breaks on-disk invariance D-11, needs a quota migration).
 
 ```yaml
 id: D-17
-title: Mixed-mode coherence — shared bucket-lock gate + cache invalidate/update on the migrated apply
+title: Mixed-mode coherence — one shared lock manager (old adopts new locks) + cache-coherent reads + migrated durable writes via the shared drain
 status: locked
 depends_on: [D-3, D-4, D-7, D-11, D-12, D-14]
-enables: [I-mixed-mode-lock-gate, I-mixed-mode-cache-coherent]
+enables: [I-mixed-shared-lock, I-mixed-mode-cache-coherent, I-mixed-write-order]
 deferred_alternatives: [ALT-quota-cf]
 raised_by: [external-review-lens4]
 deciders: [kerneltime]
 consequences:
-  - "Migrated commands acquire the existing OzoneManagerLock bucket lock as their bucket-level gate (plus fine-grained key/slot locks), so cross-model same-bucket ops serialize and never race on RocksDB."
-  - "The migrated apply keeps the OM table cache coherent on every node: invalidate the written key in PartialTableCache (DB-fallthrough self-heals); put the new value into the authoritative FullTableCache for volume/bucket."
-  - "Both are P-0 deliverables and retire at P-7 with the legacy path; the parallelism win is partially gated behind legacy bucket-write-lock ops until then."
-  - "Quota stays in the bucket row (D-11 preserved); the apply updates the cached bucket copy with the Option-B merged value."
-tests: [T-mixed-mode-cross-model-race, T-mixed-mode-stale-read]
+  - "One lock authority: both paths acquire the new lean lock manager's granular key/slot locks (C-lock-manager, non-thread-affine per I-9); the legacy path ADOPTS the new locks (restoring #7583 integration-point-3) rather than the migrated path taking the thread-affine legacy OzoneManagerLock. A cross-model same-key pair takes the same lock object and serializes."
+  - "Cache-coherent reads, both directions: the migrated path reads cache-first (TypedTable.get) so it sees a legacy command's decided-but-unflushed write; the migrated apply invalidates the written PartialTableCache key and updates the authoritative FullTableCache (volume/bucket) so legacy/read ops see migrated writes."
+  - "Unified durable write order: during mixed mode the migrated durable write rides the same single double-buffer drain as legacy (one Ratis-ordered FIFO, one flush daemon), so no migrated direct write reorders ahead of an earlier-decided legacy write still queued."
+  - "All three axes retire together at P-7/P-8 with the legacy path; the migrated path then reverts to D-3 end-state cache-free direct write. D-3's cache-free reads + direct write are END-STATE, suspended for the migrated path during mixed mode."
+  - "Quota stays in the bucket row (D-11 preserved): Option B commutative Merge (D-7) + leader-local reservation fold (#7406 OmBucketInfo.getUsedBytes = persisted + reserved) give lockless cross-model quota-read coherence; no bucket lock. Does not settle D-OPEN-quota-enforcement (exact-vs-approximate admission)."
+tests: [T-mixed-mode-cross-model-race, T-mixed-mode-stale-read, T-mixed-write-reorder]
 phase: P-0
 provenance: verified
 evidence:
-  - "FullTableCache authoritative, no DB fallthrough — FullTableCache.java:200-213; volume/bucket full-cache — OmMetadataManagerImpl.java:460,494-495,1338"
-  - "PartialTableCache miss -> MAY_EXIST -> DB — PartialTableCache.java:158-169"
-  - "legacy bucket lock OzoneManagerLock BUCKET_LOCK; OMKeyCommitRequest.java:191-194; original 'gatekeeping across old and new model' (kerneltime notes)"
+  - "original direction precedent: #7583 (leader-execution.md:474) integration-point-3 'Granular locking for old flow'"
+  - "superseded gate unimplementable + insufficient: OzoneManagerLock thread-affine OzoneManagerLock.java:158-162 (D-4/I-9) cannot release on continuation thread; released before durable write OMKeyCommitRequest.java:422-426; durable write deferred OzoneManagerDoubleBuffer.java:379-381"
+  - "lock-spanning visibility hinge: migrated holds the key lock across the Ratis round until durable commit — #7406 OMGateway.submitInternal"
+  - "single Ratis-ordered drain: one apply executor + one flush daemon — OzoneManagerStateMachine single-thread executor; OzoneManagerDoubleBuffer FIFO flushBatch"
+  - "FullTableCache authoritative, no DB fallthrough — FullTableCache.java:200-213; PartialTableCache miss -> DB — PartialTableCache.java:158-169; OmMetadataManagerImpl.java:494-495"
 ```
 
 ### D-OPEN-quota-enforcement — exact vs approximate (OPEN, leaning leader-local reservation)
@@ -4386,10 +4397,13 @@ correct (RC-ethan-caching status: superseded by D-3).
 ```yaml
 id: I-cache-free-ryw
 statement: >
-  For migrated commands, no OM table cache exists; read-your-writes is provided by holding
-  the lock on the leader from before Ratis submit until after quorum-commit AND local apply
-  (companion I-2), so a successor always reads the predecessor's already-durable RocksDB
-  bytes. No correctness property depends on a cache (companion I-12).
+  END-STATE (post-P-7): for migrated commands no OM table cache exists; read-your-writes is
+  provided by holding the lock on the leader from before Ratis submit until after quorum-commit
+  AND local apply (companion I-2), so a successor always reads the predecessor's already-durable
+  RocksDB bytes. No correctness property depends on a cache (companion I-12). During mixed mode the
+  cache still exists for the legacy path and the migrated path reads cache-first for cross-model
+  coherence (D-17 I-mixed-mode-cache-coherent); this cache-free end state is restored at P-7 when
+  the cache is removed.
 rationale: >
   Removes the cache-epoch <-> Ratis-index coupling (a known OM bug class) and the stale/torn
   read window; makes reads correct-by-construction against RocksDB instead of correct-only-if
@@ -4940,59 +4954,90 @@ tests: [T-snapshot-consistency]
 
 ---
 
-### I-mixed-mode-lock-gate — a migrated and a legacy command on the same key/bucket serialize through one shared lock
+### I-mixed-shared-lock — a migrated and a legacy command on the same key/bucket serialize through one shared lock manager
 
-During mixed mode the migrated path and the legacy path use different lock managers; this invariant is the shared bucket lock that keeps a migrated CommitKey and a legacy RenameKey on the same key from racing on RocksDB (D-17).
+During mixed mode both paths acquire the SAME lock authority — the new lean lock manager — at the same granularity; the legacy path adopts the new granular locks (the original #7583 integration-point-3 direction) rather than the migrated path reaching down to the thread-affine legacy bucket lock (D-17).
 
 ```yaml
-id: I-mixed-mode-lock-gate
+id: I-mixed-shared-lock
 statement: >
-  During mixed mode a migrated command and a legacy command that touch the same key/bucket never
-  execute concurrently without a shared lock: the migrated path acquires the existing OzoneManagerLock
-  bucket lock (in addition to its fine-grained key/slot locks) so all cross-model same-bucket operations
-  serialize through it. No cross-model operation writes RocksDB outside this shared gate.
+  During mixed mode a migrated command and a legacy command that touch the same key/bucket serialize through
+  one shared lock authority: both paths acquire the new lean lock manager's granular key/slot locks
+  (C-lock-manager), so a cross-model same-key pair takes the same lock object. The thread-affine
+  OzoneManagerLock is NOT the cross-model rendezvous (it cannot release on the continuation thread, D-4/I-9,
+  and is released before the durable write). The shared manager retires to sole-native at P-7.
 rationale: >
-  Migrated and legacy paths use different lock managers; without a shared lock object a migrated CommitKey
-  and a legacy RenameKey on the same key race on RocksDB and corrupt state. The shared bucket lock is the
-  rendezvous; it retires at P-7.
+  Lock-object unification at the fine grain, old-adopts-new (restores #7583 integration-point-3). The
+  superseded inverse — the migrated path additionally taking the legacy bucket lock — was both unimplementable
+  (thread-affinity vs I-9) and insufficient (it serialized execution but neither the read view nor the durable
+  order). Serialized execution is necessary, not sufficient; it is paired with I-mixed-mode-cache-coherent
+  (read view) and I-mixed-write-order (durable order).
 tests: [T-mixed-mode-cross-model-race]
 provenance: verified
-evidence: ["OzoneManagerLock BUCKET_LOCK; OMKeyCommitRequest.java:191-194", "D-17"]
+evidence: ["#7583 (leader-execution.md:474) integration-point-3 'Granular locking for old flow'", "OzoneManagerLock thread-affine OzoneManagerLock.java:158-162 (D-4/I-9)", "D-17"]
 ```
 
 ---
 
-### I-mixed-mode-cache-coherent — no legacy command or read op observes a stale cached value for data a migrated command wrote
+### I-mixed-mode-cache-coherent — neither path observes a stale value for data the other decided (cache-first reads, both directions)
 
-During mixed mode migrated writes bypass the OM table cache while legacy commands and read ops consult it; this invariant is the apply-time invalidate/update that closes the staleness window the authoritative FullTableCache would otherwise leave open forever (D-17).
+During mixed mode the table cache is the shared live-state read view: the migrated path reads cache-first so it observes a legacy command's decided-but-unflushed write, and the migrated apply keeps the cache current so legacy commands and read ops observe migrated writes (D-17).
 
 ```yaml
 id: I-mixed-mode-cache-coherent
 statement: >
-  During mixed mode no legacy command or read operation observes a stale cached value for data a migrated
-  command wrote. On every node the migrated apply invalidates each written key in PartialTableCache
+  During mixed mode neither path observes a stale value for data the other path decided. The migrated path
+  reads cache-first (TypedTable.get), so it observes a legacy command's decided-but-unflushed write held in
+  the table cache. On every node the migrated apply invalidates each written key in PartialTableCache
   (DB-fallthrough then serves the fresh value) and puts the new value into the authoritative FullTableCache
-  for volume/bucket (which never falls through to DB).
+  for volume/bucket (which never falls through to DB), so legacy commands and read ops observe migrated writes.
 rationale: >
-  Migrated writes bypass the cache; reads consult it. PartialTableCache self-heals on a miss but the
-  authoritative FullTableCache (volume/bucket) does not, so a stale bucket would mis-report quota/ACLs
-  indefinitely. Apply-time invalidate/update closes the gap until P-7 removes the cache.
+  The cache is the shared live read view between the two write machineries: legacy's decided write lives in
+  the cache before its drain flush, and migrated's write is installed in the cache at apply. Both directions
+  rest on cache-first reads — which is why D-3's pure-RocksDB reads are SUSPENDED for the migrated path during
+  mixed mode and restored at P-7 when the cache is removed.
 tests: [T-mixed-mode-stale-read]
 provenance: verified
-evidence: ["FullTableCache.java:200-213", "PartialTableCache.java:158-169", "OmMetadataManagerImpl.java:494-495", "D-17"]
+evidence: ["TypedTable.get cache-first (#7406 read path)", "FullTableCache.java:200-213", "PartialTableCache.java:158-169", "OmMetadataManagerImpl.java:494-495", "D-3 (suspended in mixed mode)", "D-17"]
 ```
 
-**Ordering and failure semantics.** On the migrated apply the RocksDB batch is committed
-FIRST; the cache invalidate/update happens AFTER the durable commit, so the cache never
-exposes a value that is not yet durable. For PartialTableCache, invalidation (remove)
+---
+
+### I-mixed-write-order — no migrated durable write reorders ahead of an earlier-decided legacy write
+
+During mixed mode the migrated path's durable write rides the same single double-buffer drain as legacy, applied in Ratis-decided order, so the durable-write-reorder hazard intrinsic to "migrated writes direct, legacy defers to the drain" cannot fire (D-17).
+
+```yaml
+id: I-mixed-write-order
+statement: >
+  During mixed mode the migrated path's durable writes flow through the SAME single double-buffer drain as
+  legacy — one Ratis-ordered FIFO drained by one flush daemon — so no migrated write reaches RocksDB ahead of
+  an earlier-decided legacy write still queued. The migrated path reverts to its end-state direct write at
+  P-7/P-8 when the double buffer is removed.
+rationale: >
+  Legacy holds its lock only to its cache mutation and defers the durable write to the async drain, while a
+  migrated direct write is durable before lock release; on a shared key a later-decided migrated direct write
+  could land before an earlier-decided legacy write still queued, and the inversion survives a crash (cache
+  gone, RocksDB is truth). Routing both through the one Ratis-ordered FIFO makes durable order == decided order,
+  the same guarantee legacy already relies on. This suspends D-3's direct write for the migrated path until P-7.
+tests: [T-mixed-write-reorder]
+provenance: verified
+evidence: ["single apply executor (OzoneManagerStateMachine single-thread) + single flush daemon FIFO (OzoneManagerDoubleBuffer flushBatch)", "legacy lock released before durable write OMKeyCommitRequest.java:422-426", "D-3 (direct write restored at P-7)", "D-17"]
+```
+
+**Ordering and failure semantics.** Because the migrated durable write rides the shared
+double-buffer drain during mixed mode (I-mixed-write-order), it inherits the drain's existing
+atomicity: the RocksDB batch is committed FIRST and the cache update follows the durable commit,
+so the cache never exposes a value that is not yet durable, and the patch + applied index commit
+in one atomic batch (I-txninfo-atomic-with-patch). For PartialTableCache, invalidation (remove)
 suffices — a subsequent read misses and falls through to RocksDB (the authoritative committed
 value). For the AUTHORITATIVE FullTableCache (volume/bucket, which never falls through to DB),
-the apply re-puts the merged value; if that put fails it EVICTS-and-reloads the entry from
-RocksDB; if the reload also fails (a RocksDB read error) the node terminates and re-syncs
-(D-10). The FullTableCache must never serve a value inconsistent with the committed DB. The
-cache step is an in-memory side effect AFTER the atomic DB batch, so it can never leave the DB
-partially written; a PartialTableCache-step failure is non-fatal (DB is the fallback), a
-FullTableCache-step failure escalates to reload-or-terminate.
+the apply re-puts the merged value; if that put fails it EVICTS-and-reloads from RocksDB; if the
+reload also fails (a RocksDB read error) the node terminates and re-syncs (D-10). The cache step
+is an in-memory side effect AFTER the atomic DB batch, so a PartialTableCache-step failure is
+non-fatal (DB is the fallback) while a FullTableCache-step failure escalates to reload-or-terminate.
+At P-7/P-8 the migrated path leaves the drain and the cache is removed, so these mixed-mode
+semantics retire with the legacy machinery (D-3 end state).
 
 ---
 
@@ -5379,8 +5424,9 @@ it directly.
 | I-determinism-followers-pure | T-apply-failure-resync, T-determinism-follower-byte-identical, T-observability-leader-only-metrics, T-security-leader-only-authz-audit |
 | I-inner-domain-agnostic | T-determinism-follower-byte-identical, T-mpu-lifecycle, T-proto-roundtrip, T-rolling-upgrade-mixed-binary |
 | I-managed-index-monotonic | T-flag-routing-both-paths, T-managed-index-monotonic, T-managed-index-restart-continuity, T-mixed-mode-no-collision, T-objectid-disjoint, T-rolling-upgrade-mixed-binary |
+| I-mixed-shared-lock | T-mixed-mode-cross-model-race |
 | I-mixed-mode-cache-coherent | T-mixed-mode-stale-read |
-| I-mixed-mode-lock-gate | T-mixed-mode-cross-model-race |
+| I-mixed-write-order | T-mixed-write-reorder |
 | I-mixed-mode-safe | T-mixed-mode-no-collision, T-rolling-upgrade-mixed-binary |
 | I-objectid-disjoint | T-mixed-mode-no-collision, T-objectid-disjoint |
 | I-ondisk-invariance-shield | T-rolling-upgrade-mixed-binary |
@@ -5586,7 +5632,7 @@ requires and `ReentrantReadWriteLock` cannot provide, see locking I-9), `T-objec
 ever materializing a domain object) all pass.
 
 ```yaml
-- {id: P-0, scope: "framework substrate (12 components) unwired + legacy→ManagedIndex objectID retrofit + dual-path index durability + cross-model shared bucket-lock gate + migrated-apply cache invalidate/update (D-17)", depends_on_phases: [], must_satisfy: [I-inner-domain-agnostic, I-txninfo-atomic-with-patch, I-managed-index-monotonic, I-mixed-mode-lock-gate, I-mixed-mode-cache-coherent], must_pass: [T-cross-thread-release, T-objectid-disjoint, T-proto-roundtrip, T-mixed-mode-cross-model-race, T-mixed-mode-stale-read], config_flag: "n/a (inert)", acceptance: "zero behavior change; all unit tests green; lint-spec passes"}
+- {id: P-0, scope: "framework substrate (12 components) unwired + legacy→ManagedIndex objectID retrofit + dual-path index durability + cross-model one-shared-lock-manager + cache-coherent reads + migrated-writes-via-shared-drain (D-17)", depends_on_phases: [], must_satisfy: [I-inner-domain-agnostic, I-txninfo-atomic-with-patch, I-managed-index-monotonic, I-mixed-shared-lock, I-mixed-mode-cache-coherent, I-mixed-write-order], must_pass: [T-cross-thread-release, T-objectid-disjoint, T-proto-roundtrip, T-mixed-mode-cross-model-race, T-mixed-mode-stale-read, T-mixed-write-reorder], config_flag: "n/a (inert)", acceptance: "zero behavior change; all unit tests green; lint-spec passes"}
 ```
 
 ---

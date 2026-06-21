@@ -425,7 +425,7 @@ acceptance gate.
 ### P-0 — Framework substrate + the three prerequisites (inert)
 
 ```yaml
-- {id: P-0, scope: "framework substrate (12 components) unwired + legacy→ManagedIndex objectID retrofit + dual-path index durability + cross-model shared bucket-lock gate + migrated-apply cache invalidate/update (D-17)", depends_on_phases: [], must_satisfy: [I-inner-domain-agnostic, I-txninfo-atomic-with-patch, I-managed-index-monotonic, I-mixed-mode-lock-gate, I-mixed-mode-cache-coherent], must_pass: [T-cross-thread-release, T-objectid-disjoint, T-proto-roundtrip, T-mixed-mode-cross-model-race, T-mixed-mode-stale-read], config_flag: "n/a (inert)", acceptance: "zero behavior change; all unit tests green; lint-spec passes"}
+- {id: P-0, scope: "framework substrate (12 components) unwired + legacy→ManagedIndex objectID retrofit + dual-path index durability + cross-model one-shared-lock-manager + cache-coherent reads + migrated-writes-via-shared-drain (D-17)", depends_on_phases: [], must_satisfy: [I-inner-domain-agnostic, I-txninfo-atomic-with-patch, I-managed-index-monotonic, I-mixed-shared-lock, I-mixed-mode-cache-coherent, I-mixed-write-order], must_pass: [T-cross-thread-release, T-objectid-disjoint, T-proto-roundtrip, T-mixed-mode-cross-model-race, T-mixed-mode-stale-read, T-mixed-write-reorder], config_flag: "n/a (inert)", acceptance: "zero behavior change; all unit tests green; lint-spec passes"}
 ```
 
 **Command set.** None migrated. This phase builds the 12 components (master §11) and the three
@@ -466,10 +466,10 @@ to P-1 until all three prerequisites (PR-0a/b/c) are merged.**
 ```yaml
 # P-0 playbook block (companion expansion; master §29 holds the canonical P-0)
 id: P-0
-scope: "12 framework components unwired + 3 prerequisites: ManagedIndex objectID retrofit (PR-0a), dual-path applied-index durability (PR-0b), OMLayoutFeature finalization gate (PR-0c) + cross-model shared bucket-lock gate + migrated-apply cache invalidate/update (D-17)"
+scope: "12 framework components unwired + 3 prerequisites: ManagedIndex objectID retrofit (PR-0a), dual-path applied-index durability (PR-0b), OMLayoutFeature finalization gate (PR-0c) + cross-model one-shared-lock-manager + cache-coherent reads + migrated-writes-via-shared-drain (D-17)"
 depends_on_phases: []
-must_satisfy: [I-inner-domain-agnostic, I-txninfo-atomic-with-patch, I-managed-index-monotonic, I-mixed-mode-lock-gate, I-mixed-mode-cache-coherent]
-must_pass: [T-cross-thread-release, T-objectid-disjoint, T-proto-roundtrip, T-mixed-mode-cross-model-race, T-mixed-mode-stale-read]
+must_satisfy: [I-inner-domain-agnostic, I-txninfo-atomic-with-patch, I-managed-index-monotonic, I-mixed-shared-lock, I-mixed-mode-cache-coherent, I-mixed-write-order]
+must_pass: [T-cross-thread-release, T-objectid-disjoint, T-proto-roundtrip, T-mixed-mode-cross-model-race, T-mixed-mode-stale-read, T-mixed-write-reorder]
 config_flag: "n/a (inert)"
 acceptance: "zero behavior change; PR-0a/b/c merged; merge operator registered on all nodes (A-5); lint-spec green"
 provenance: inferred
