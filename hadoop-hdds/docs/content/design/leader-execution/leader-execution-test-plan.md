@@ -135,11 +135,11 @@ The bar is **not uniform** across all observable state (`leader-execution-lockin
   held to **strict linearizability**. The checker demands a single legal sequential order.
 - **Quota usage (`usedBytes` / `usedNamespace`)** is **eventually consistent on the limit
   gate** under the soft-quota decision: the counter *value* is always exact (no lost update,
-  no double count — invariant `UsedConsistent`), but the *limit admission* is best-effort
-  (`EXC-3`, `leader-execution-locking.md` §8). The checker therefore treats the quota
-  **counter** as strictly correct but the quota **gate** as "converges / soft," and does
-  **not** fail a history merely because the limit was transiently over-committed by the
-  in-flight commit count. (This is the OPEN question `D-OPEN-quota-enforcement`; see §1.6.)
+  no double count — invariant `UsedConsistent`), and the *limit admission* is exact in steady
+  state via the leader-local reservation (`I-quota-admission-exact`), soft only in the bounded
+  failover window (`EXC-3` narrowed, `B-quota-failover-window`). The checker treats the quota
+  **counter** as strictly correct and does **not** fail a history merely for a transient
+  over-commit within the failover window. (`D-OPEN-quota-enforcement` resolved exact; see §1.6.)
 - **Subtree reclamation after `rm -rf`** is **eventually consistent** (`EXC-1`, `EXC-2`):
   the namespace root disappears synchronously (`I-5`) but descendant purge and quota release
   drain in the background. The checker treats reclamation as "converges after background work
@@ -158,19 +158,18 @@ reference is **cache-free**: read-your-writes is a property of the *lock hold sp
 "passes" only because a cache masked a missing read is a false pass; the reference model
 having no cache is what makes `T-ryw-from-db` meaningful.
 
-### 1.6 Where the criterion is still OPEN
+### 1.6 The quota-enforcement criterion (RESOLVED → exact)
 
-`D-OPEN-quota-enforcement` (`status: open`, `leader-planned-execution.md`) is unresolved:
-whether quota admission is **approximate** (merge-only, soft gate — the main-chat lean,
-`leader-execution-locking.md` locking-3 / `EXC-3`) or **exact** (a leader-local atomic
-check-and-reserve, with the DB merge remaining the durable truth, decrement-on-abort, and
-rebuild-from-DB on failover). A TLA+/TLC fork has already **confirmed over-commit is
-reachable** under the soft model and recommends the leader-local reservation
-(`QuotaOvercommit.cfg`; §3.4). **This plan does not pre-decide the outcome.** It instead
-ships *two* oracles — a soft-quota oracle the impl refines today, and an exact-quota oracle
-the impl deliberately does **not** refine today — so that whichever way `D-OPEN-quota-
-enforcement` lands, the test that pins it (`T-quota-exact-tlc`) already exists and simply
-flips from "documents the limitation" to "proves the fix." See §3.4 and `T-quota-exact-tlc`.
+`D-OPEN-quota-enforcement` (`status: locked`, `leader-planned-execution.md`) is **resolved**:
+quota admission is **exact** via a leader-local atomic check-and-reserve (the DB merge remains the
+durable truth, the reserve is advisory + reset-on-role-transition + term-fenced —
+`I-quota-admission-exact` / `I-quota-reservation-lifecycle`). Over-commit is narrowed to the
+**bounded failover window** (`B-quota-failover-window`), not the steady state. The TLA+/TLC fork
+**confirmed over-commit is reachable** under the *unreserved* soft model (`QuotaOvercommit.cfg`;
+§3.4) — that counterexample is now the motivation for the reserve. `T-quota-exact-tlc` is the
+standing pin: in the resolved-exact world its configured oracle is expected to turn green once
+`ObsImpl` models the reservation (a formal-thread dependency), flipping from "documents the
+limitation" to "proves the fix." See §3.4 and `T-quota-exact-tlc`.
 
 ---
 
@@ -440,12 +439,11 @@ re-run of M3Full with adequate disk). These remain **bounded** model checks, not
   bounds it to the in-flight commit count. *(evidence: `ozone-11898-tla/QuotaOvercommit.cfg`
   header documenting expected "RefinementExact violated" trace; cross-ref
   `leader-execution-locking.md` EXC-3 / §9)*
-- **Role w.r.t. the OPEN decision** (`D-OPEN-quota-enforcement`): this config is the formal
-  artifact that keeps the decision honest. Today it *documents the accepted limitation*. If
-  `D-OPEN-quota-enforcement` resolves to **exact** (leader-local atomic reservation), the same
-  config becomes the **acceptance gate** for the fix: `ObsImpl` (extended with the reservation)
-  must then **refine `ObsAbstractExact`** and `QuotaOvercommit.cfg` must turn green. The test
-  `T-quota-exact-tlc` (§4) is that flip.
+- **Role w.r.t. the resolved decision** (`D-OPEN-quota-enforcement`, exact): this config is the
+  formal artifact behind the decision. It documented the over-commit that **motivated** the reserve;
+  now that admission is resolved exact, it becomes the **acceptance gate** for the fix: `ObsImpl`
+  (extended with the reservation) must **refine `ObsAbstractExact`** and `QuotaOvercommit.cfg` must
+  turn green (a formal-thread dependency). The test `T-quota-exact-tlc` (§4) is that flip.
 
 ---
 
@@ -594,10 +592,11 @@ statement: >
   the commutative Merge operator (Option B, D-7) under only a SHARED bucket lock. Assert: the
   usedBytes counter is EXACT after both apply (UsedConsistent — the increment is resolved in
   Ratis order on every node, no lost update, no double count), regardless of interleaving.
-  The LIMIT gate is soft (over-commit by the in-flight count is permitted, EXC-3) and the
-  checker does NOT fail on transient over-limit. This is the positive commutativity test that
-  D-7 rests on.
-covers: [I-quota-commutative, I-quota-crash-safe]
+  The LIMIT gate is exact via the leader-local reservation (concurrent commits see each other's
+  reservations; no over-admit — I-quota-admission-exact, D-OPEN-quota-enforcement resolved); over-limit
+  is possible only in the failover window (EXC-3 narrowed, B-quota-failover-window). This is the positive
+  commutativity + admission test that D-7 and the reservation rest on.
+covers: [I-quota-commutative, I-quota-crash-safe, I-quota-admission-exact]
 provenance: verified
 evidence: ["leader-planned-execution.md D-7 tests:[T-quota-concurrent,T-quota-failover]", "ozone-11898-tla/ObsImpl.cfg INVARIANT UsedConsistent (green)", "incrUsedBytes at OMKeyCommitRequest.java:410", "leader-execution-locking.md EXC-3"]
 ```
@@ -609,9 +608,10 @@ statement: >
   set committed. Assert CRASH-SAFETY (I-quota-crash-safe): on failover, usedBytes is rebuilt
   deterministically from the committed Ratis log (the Merge is resolved at apply on the new
   leader exactly as on the old), with no lost increment and no double increment. No quota
-  state lives in volatile in-memory reserved maps (ALT-quota-reserved-static is rejected
-  precisely to avoid crash-recovery of out-of-DB state).
-covers: [I-quota-crash-safe]
+  state lives in volatile in-memory reserved maps for the COUNTER (ALT-quota-reserved-static rejected);
+  the admission reserve is rebuilt empty from the DB on failover (I-quota-reservation-lifecycle), never
+  carried across the leader change.
+covers: [I-quota-crash-safe, I-quota-reservation-lifecycle]
 provenance: inferred
 provenance_note: crash-safety argued from I-quota-crash-safe (quota lives only in the durable DB row, rebuilt by log replay), not yet verified by code or a crash-modeling TLA action.
 evidence: ["leader-planned-execution.md D-7 tests, ALT-quota-reserved-static (rejected: reserve state outside DB → crash-recovery complexity)", "ObsAbstract soft-quota oracle models commit/apply; ObsImpl refines (green) ozone-11898-tla/obs3-verdict.out"]
@@ -620,18 +620,31 @@ evidence: ["leader-planned-execution.md D-7 tests, ALT-quota-reserved-static (re
 # T-quota-exact-tlc
 id: T-quota-exact-tlc
 statement: >
-  The formal pin for D-OPEN-quota-enforcement. Run QuotaOvercommit.cfg: check ObsImpl against
-  the EXACT-quota oracle ObsAbstractExact via RefinementExact. EXPECTED (capture pending): TLC is
-  configured to report RefinementExact VIOLATED with the two-commits-at-used=0-both-apply-to-used=2>limit=1
-  trace — this DOCUMENTS
-  the accepted soft-quota over-commit (EXC-3) as a mechanically reproducible counterexample.
-  IF D-OPEN-quota-enforcement resolves to EXACT (leader-local atomic reservation): the same
-  config must turn GREEN (ObsImpl+reservation refines ObsAbstractExact). The test is the same
-  artifact in both worlds; only the expected verdict flips.
-covers: [I-quota-commutative]
+  The formal pin for D-OPEN-quota-enforcement (RESOLVED exact). Run QuotaOvercommit.cfg: check ObsImpl
+  against the EXACT-quota oracle ObsAbstractExact via RefinementExact. In the resolved-exact world the
+  configured oracle is EXPECTED to turn GREEN (capture pending) once ObsImpl models the leader-local
+  reservation (ObsImpl+reservation refines ObsAbstractExact — no over-commit). The historical RED verdict
+  (RefinementExact VIOLATED: two commits at used=0 both apply to used=2>limit=1) is the over-commit the
+  reservation closes — it documents WHY the reserve exists. Modeling the reservation in ObsImpl is a
+  formal-thread dependency.
+covers: [I-quota-commutative, I-quota-admission-exact]
 provenance: inferred
 provenance_note: configured red oracle; captured TLC verdict pending. QuotaOvercommit.cfg checks ObsImpl against ObsAbstractExact via RefinementExact and is CONFIGURED to fail (exact gate the soft impl deliberately does not refine), but no QuotaOvercommit.out has been captured — the expected "RefinementExact violated" trace is documented in the config header, not yet observed from a run. Flips to verified once the verdict is captured.
 evidence: ["ozone-11898-tla/QuotaOvercommit.cfg (PROPERTY RefinementExact; documented expected 'RefinementExact violated' trace)", "ozone-11898-tla/ObsAbstractExact.tla (exact gate aused+1<=QUOTA_LIMIT)", "leader-planned-execution.md D-OPEN-quota-enforcement (TLC counterexample 2026-06-15)"]
+```
+```yaml
+# T-quota-leader-flap
+id: T-quota-leader-flap
+statement: >
+  Quota reserve role-transition reset (I-quota-reservation-lifecycle, the #7406 Q1 gap). Reserve quota on a
+  leader, force a step-down (notifyNotLeader) then step-up (notifyLeaderChanged) WITHOUT a process restart,
+  and assert no stale reservation survives: getUsedBytes() == persisted usedBytes after the flap (reserve == 0),
+  and a subsequent commit at the limit is admitted (not falsely QUOTA_EXCEEDED by phantom usage). Negative
+  control: without the role-transition reset, the stale reservation persists and the post-flap commit is wrongly
+  rejected.
+covers: [I-quota-reservation-lifecycle]
+provenance: inferred
+evidence: ["#7406 audit 2026-06-21 Q1 (no notifyNotLeader/notifyLeaderChanged reset of static QUOTA_RESOURCE_MAP)", "I-quota-reservation-lifecycle", "leader-planned-execution.md D-OPEN-quota-enforcement (resolved exact)"]
 ```
 ```yaml
 # T-acquire-failure-atomic
@@ -1248,6 +1261,8 @@ authority `leader-execution-locking.md` §9) and **master invariants** (slugs) a
 | `I-cache-free-ryw` | `T-full-suite-green-after-removal`, `T-no-cache-correctness`, `T-ryw-from-db` | D-3 |
 | `I-quota-commutative` | `T-batch-quota-no-double-decrement`, `T-quota-concurrent`, `T-quota-exact-tlc`, `T-quota-failover` | D-7; `ObsImpl` UsedConsistent green |
 | `I-quota-crash-safe` | `T-quota-concurrent`, `T-quota-exact-tlc`, `T-quota-failover` | D-7; `ObsImpl` green |
+| `I-quota-admission-exact` | `T-quota-concurrent`, `T-quota-exact-tlc` | D-OPEN-quota-enforcement (resolved exact) |
+| `I-quota-reservation-lifecycle` | `T-quota-leader-flap`, `T-quota-failover` | D-OPEN-quota-enforcement; #7406 audit |
 | `I-determinism-followers-pure` | `T-apply-failure-resync`, `T-determinism-follower-byte-identical`, `T-observability-leader-only-metrics`, `T-security-leader-only-authz-audit` | D-10 |
 | `I-apply-failure-resync` | `T-apply-failure-resync` | D-10 (crash-and-resync half) |
 | `I-managed-index-monotonic` | `T-flag-routing-both-paths`, `T-managed-index-monotonic`, `T-managed-index-restart-continuity`, `T-mixed-mode-no-collision`, `T-objectid-disjoint`, `T-rolling-upgrade-mixed-binary` | D-8/D-12; P-0 must_satisfy |
@@ -1304,10 +1319,11 @@ Stated so a reviewer reads the omissions as intentional, not as gaps:
 - **Request-level atomicity of composite operations.** Not tested because it is **not a
   property of the design** (`D-16`, §1.3). Testing it would assert a contract the system does
   not offer and `mkdir -p`/HDFS do not offer.
-- **Exact quota-limit enforcement under concurrency.** Not asserted as a *passing* property
-  today; it is asserted as a *documented, reproducible counterexample* (`T-quota-exact-tlc` /
-  `QuotaOvercommit.cfg`) pending `D-OPEN-quota-enforcement`. The plan ships the exact oracle so
-  the test exists for the day the decision lands; it does not pre-decide the decision.
+- **Exact quota-limit enforcement under concurrency.** Asserted as a *passing* property in steady
+  state via the leader-local reservation (`I-quota-admission-exact`, `D-OPEN-quota-enforcement`
+  resolved exact); over-commit only in the bounded failover window (`B-quota-failover-window`). The
+  formal pin `T-quota-exact-tlc` / `QuotaOvercommit.cfg` is expected to turn green once `ObsImpl`
+  models the reservation (captured verdict pending, formal thread).
 - **Retry/idempotency mechanism correctness end-to-end.** `D-OPEN-retry` is **deferred**
   (`leader-planned-execution.md` D-OPEN-retry; `leader-execution-locking.md` §10) pending the
   per-operation idempotency audit. The terminal-step retry-cache *placement* is exercised by

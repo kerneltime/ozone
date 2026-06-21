@@ -409,10 +409,10 @@ per-command flag, after the hard machinery is proven.
 > SetVolumeProperty variants as one, the prepare/finalize cluster as one. The "~" in "~22" is exactly
 > this fan-out latitude; the inventory is intentionally listed at the finer class grain so no class
 > is missed, and the count reconciles to ~22 *migration units* at the `Type` grain. **`QuotaRepair`
-> (A31) is listed in Group A as a single-bucket reconcile**, but note it is also the *mitigation
-> path* for the open quota-enforcement question (see §6.1): if D-OPEN-quota-enforcement settles on
-> approximate enforcement, `QuotaRepair` is what converges `usedBytes` back to exact, so its own
-> migration ordering may be pulled earlier than P-6 — flagged as a dependency, not yet decided.
+> (A31) is listed in Group A as a single-bucket reconcile**, but note it relates to quota enforcement
+> (see §6.1): with D-OPEN-quota-enforcement resolved to **exact** admission (the leader-local reservation
+> is the gate), `QuotaRepair` is no longer the quota-enforcement *mitigation path* — it remains a
+> background counter-reconcile/repair backstop, so its migration ordering has no special quota pull.
 
 ---
 
@@ -479,7 +479,7 @@ evidence: ["master §29 P-0", "OmUtils.java:766-783", "OzoneManagerStateMachine.
 ### P-1 — Hardest single-step OBS key path
 
 ```yaml
-- {id: P-1, scope: "hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey, CreateBucket, DeleteBucket", depends_on_phases: [P-0], must_satisfy: [I-quota-commutative, I-cache-free-ryw], must_pass: [T-quota-concurrent, T-ryw-from-db, T-quota-failover], config_flag: "ozone.om.leader.execution.obs.key.enabled", acceptance: "OBS key path on new model; perf ≥ baseline; quota correct; production flag gated on D-OPEN-retry closure (durable retry) for the four non-idempotent ops — dev/staging may precede"}
+- {id: P-1, scope: "hardest single-step OBS: CreateKey, CommitKey, AllocateBlock, DeleteKey, CreateBucket, DeleteBucket", depends_on_phases: [P-0], must_satisfy: [I-quota-commutative, I-cache-free-ryw, I-quota-admission-exact, I-quota-reservation-lifecycle], must_pass: [T-quota-concurrent, T-ryw-from-db, T-quota-failover, T-quota-leader-flap], config_flag: "ozone.om.leader.execution.obs.key.enabled", acceptance: "OBS key path on new model; perf ≥ baseline; quota correct; production flag gated on D-OPEN-retry closure (durable retry) for the four non-idempotent ops — dev/staging may precede"}
 ```
 
 **Command set.** The OBS halves of C1 CreateKey, C2 CommitKey, C3 AllocateBlock, C4 DeleteKey. (The
@@ -495,8 +495,9 @@ the Merge model under the key path (§4.2 note).
   Tests: `T-ryw-from-db` (successor read sees committed bytes, no cache, D-3/D-5).
 - **PR-1.2** `CommitKeyPlannedRequest` (OBS) — plan: keyTable `Put`, openKeyTable `Delete`,
   deletedTable `Put` for overwrite soft-delete, **quota `Merge`** for `usedBytes`/`usedNamespace`
-  (C2 evidence `:407,410,378`). Tests: `T-quota-concurrent` (N parallel commits, soft over-commit
-  per EXC-3 / D-OPEN-quota-enforcement — see §6.1), `T-quota-failover`.
+  (C2 evidence `:407,410,378`). Tests: `T-quota-concurrent` (N parallel commits — exact admission via
+  the reservation, D-OPEN-quota-enforcement resolved; over-commit only in the failover window, EXC-3),
+  `T-quota-failover`, `T-quota-leader-flap`.
 - **PR-1.3** `AllocateBlockPlannedRequest` (OBS) — plan: leader SCM `allocateBlock`, openKeyTable
   block-append `Put` (C3 evidence `:115`).
 - **PR-1.4** `DeleteKeyPlannedRequest` (OBS) — plan: keyTable tombstone, deletedTable `Put`, quota
@@ -515,17 +516,17 @@ FSO creates).
 
 **Acceptance gate.** OBS key path fully on the new model under the flag; `T-quota-concurrent` and
 `T-ryw-from-db` green; benchmark ≥ prototype 40k baseline (master §27); flag-routing equivalence
-holds; quota counter `UsedConsistent` (locking EXC-3 — the counter is exact even though the limit
-gate is soft). **The soft-vs-exact limit behavior is governed by the OPEN D-OPEN-quota-enforcement
-(§6.1); P-1 lands the commutative Merge regardless, and the enforcement-mode decision is layered on
-top without re-migrating the command.**
+holds; quota counter `UsedConsistent` and **exact admission** via the leader-local reservation
+(`I-quota-admission-exact`; `T-quota-leader-flap` green for the reserve lifecycle). **Admission is
+resolved exact by D-OPEN-quota-enforcement; over-commit is bounded to the failover window
+(`B-quota-failover-window`). P-1 lands the commutative Merge AND the reservation.**
 
 ```yaml
 id: P-1
 scope: "OBS halves of CreateKey, CommitKey, AllocateBlock, DeleteKey; structural CreateBucket/DeleteBucket"
 depends_on_phases: [P-0]
-must_satisfy: [I-quota-commutative, I-cache-free-ryw]
-must_pass: [T-quota-concurrent, T-ryw-from-db, T-quota-failover]
+must_satisfy: [I-quota-commutative, I-cache-free-ryw, I-quota-admission-exact, I-quota-reservation-lifecycle]
+must_pass: [T-quota-concurrent, T-ryw-from-db, T-quota-failover, T-quota-leader-flap]
 config_flag: "ozone.om.leader.execution.obs.key.enabled"
 acceptance: "OBS key lifecycle on new model; perf ≥ 40k baseline; UsedConsistent holds; flag-routing byte-identical; production flag gated on D-OPEN-retry closure (durable retry) for the four non-idempotent ops — dev/staging may precede"
 provenance: inferred
@@ -885,35 +886,32 @@ evidence: ["master §29 P-8", "leader-execution-retry.md §6-§8 (D-wal-off, I-a
 Two decisions are **not settled** and the playbook must route around them without forcing a
 premature resolution. Stating them here prevents a phase from silently assuming an answer.
 
-### 6.1 D-OPEN-quota-enforcement (OPEN — touches P-1, P-4)
+### 6.1 D-OPEN-quota-enforcement (RESOLVED → exact — touches P-1, P-4)
 
-D-OPEN-quota-enforcement (master, status `open`) asks whether quota admission is **exact**
-(leader-local atomic reservation) or **approximate** (merge-only). This is **not resolved**. The
-main-chat grill leaned approximate/eventually-consistent (locking-3 / EXC-3), but a **TLA+/TLC
-counterexample CONFIRMED over-commit** under shared-bucket locks (two commits plan at `used=0`, both
-apply, `used=2 > limit=1` — `QuotaOvercommit.cfg` against `ObsAbstractExact`, locking EXC-3 evidence)
-and the TLA+ fork **recommends leader-local reservation** (exact admission; the DB `Merge` stays the
-durable truth; decrement-on-abort; rebuild-from-DB on failover).
+D-OPEN-quota-enforcement (master, status `locked`) is **resolved**: quota admission is **exact** via a
+leader-local atomic reservation (the DB `Merge` stays the durable truth; the reserve is advisory,
+reset-on-role-transition, term-fenced — `I-quota-admission-exact` / `I-quota-reservation-lifecycle`).
+The TLA+/TLC counterexample that **confirmed over-commit** under the unreserved soft model (two commits
+plan at `used=0`, both apply, `used=2 > limit=1` — `QuotaOvercommit.cfg` against `ObsAbstractExact`) is
+now the motivation for the reserve. Over-commit is bounded to the failover window
+(`B-quota-failover-window`), not the steady state.
 
-**Phasing consequence.** P-1 lands the **commutative `Merge`** (D-7) regardless of how
-D-OPEN-quota-enforcement resolves — the `Merge` is the durable counter and is needed either way.
-The enforcement *mode* (exact reservation vs approximate) is **layered on top** of the same
-committed `Merge` without re-migrating CreateKey/CommitKey: an exact path adds an in-memory
-leader-local check-and-reserve *before* submit (and decrement-on-abort, rebuild-from-DB on failover);
-an approximate path does nothing extra and delegates exactness to `QuotaRepair` (A31) reconcile. So
-P-1's acceptance gate asserts only `UsedConsistent` (the counter is exact); it does **not** assert
-exact-limit enforcement, because that is the open question. The same touchpoint exists at P-4 (MPU
-commit/complete quota Merges). **Anti-pattern:** do not bake exact reservation into the P-1 planner
-as if it were decided — keep the reservation hook separable so the open decision can land either way.
+**Phasing consequence.** P-1 lands the **commutative `Merge`** (D-7) **and** the leader-local
+reservation — the `Merge` is the durable counter, the reservation is the exact admission gate, both on
+the OBS commit path. P-1's acceptance gate now asserts `UsedConsistent` (counter exact) **and** exact
+admission (`T-quota-concurrent`) plus the reserve lifecycle (`T-quota-leader-flap`). The same touchpoint
+exists at P-4 (MPU commit/complete quota Merges). **Anti-pattern:** do not implement the reserve as a
+static, process-global map without the role-transition reset — that is the killed
+`ALT-quota-reserved-static` shape and leaks phantom usedBytes on leader flap (`I-quota-reservation-lifecycle`).
 
 ```yaml
-# touchpoint, not a new decision — mirrors master D-OPEN-quota-enforcement
+# touchpoint, not a new decision — mirrors master D-OPEN-quota-enforcement (resolved)
 id: D-OPEN-quota-enforcement
-status: open
+status: locked
 phase_touchpoints: [P-1, P-4]
-phasing_rule: "land commutative Merge in P-1 unconditionally; keep the exact leader-local reservation hook separable so either resolution layers on without re-migrating the key path"
+phasing_rule: "land the commutative Merge AND the leader-local reservation in P-1 (exact admission); the reserve must be advisory, per-OM instance-scoped, reset-on-role-transition, term-fenced (I-quota-reservation-lifecycle) — not a static map"
 provenance: verified
-evidence: ["master D-OPEN-quota-enforcement", "leader-execution-locking.md EXC-3", "TLC counterexample 2026-06-15 (ozone-11898-tla) QuotaOvercommit.cfg"]
+evidence: ["master D-OPEN-quota-enforcement (locked, exact)", "I-quota-admission-exact, I-quota-reservation-lifecycle, B-quota-failover-window", "leader-execution-locking.md EXC-3 (narrowed)", "#7406 failover audit 2026-06-21"]
 ```
 
 ### 6.2 D-OPEN-retry (DEFERRED — scopes which ops in the inventory need a durable retry entry)

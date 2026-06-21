@@ -45,9 +45,9 @@ Three reading rules carried from §A of the master:
    `tests`, `depends_on`, `phase`, and `anti_patterns` are consumed by the CI `lint-spec`
    projection (master §C). If an `I-n` is listed in no `C-n.implements`, that is a spec defect.
 3. **Locked decisions are honoured, never re-litigated.** This file consumes
-   D-1..D-17, D-SPEC-1..3 and the two OPEN decisions (D-OPEN-quota-enforcement,
-   D-OPEN-retry) exactly as recorded in the master. Where a component touches an open
-   decision, it states the open shape and marks it open — it does not silently settle it.
+   D-1..D-17, D-SPEC-1..3, D-OPEN-quota-enforcement (resolved exact), and D-OPEN-retry
+   (deferred) exactly as recorded in the master. Where a component touches a still-deferred
+   decision, it states the open shape and marks it — it does not silently settle it.
 
 ### 0.1 The one-paragraph mental model the twelve components assemble
 
@@ -651,16 +651,16 @@ implements: [I-quota-commutative, I-quota-crash-safe]
 tests: [T-quota-concurrent, T-quota-failover, T-quota-exact-tlc]
 anti_patterns:
   - "MUST NOT take the bucket WRITE lock to update usedBytes (ALT-quota-wholerow-put killed by D-7) — that re-serializes commits and kills the parallelism the feature exists for. Commits take only S(bucket)."
-  - "MUST NOT hold reserved-quota in static in-memory AtomicLong maps (ALT-quota-reserved-static killed by D-7) — reserve state outside the DB needs crash-recovery + reset-on-failure machinery."
+  - "MUST NOT hold reserved-quota in static, process-global AtomicLong maps (ALT-quota-reserved-static killed by D-7; the #7406 prototype's shape) — the admission reserve must be advisory, per-OM instance-scoped, reset-on-role-transition, and term-fenced (I-quota-reservation-lifecycle); a static reserve without that lifecycle leaks phantom usedBytes on leader flap."
   - "MUST NOT depend on a RocksDB-native merge operator / on-disk operand list (ALT-quota-rocksdb-native deferred by D-7) — Option B applies the merge in the module at apply time and writes the whole row, so bucketTable physical representation is unchanged (D-11)."
   - "MUST NOT register the operator on only some nodes (A-5) — every node must have it before any node can receive a Merge, else apply diverges."
-  - "MUST NOT treat the merge gate as exact quota admission — over-commit is possible (EXC-3); exactness is the OPEN D-OPEN-quota-enforcement decision, not settled here."
+  - "MUST NOT treat the merge counter as the admission gate: the counter is exact (D-7) but admission needs the leader-local reservation (I-quota-admission-exact, D-OPEN-quota-enforcement resolved); without it, over-commit (now narrowed to the failover window, EXC-3)."
 phase: P-1
 provenance: inferred
 evidence:
   - "read-modify-write it replaces — OMKeyCommitRequest.incrUsedBytes line 410, under acquireWriteLock(BUCKET_LOCK) lines 191-194 (hadoop-ozone/.../om/request/key/OMKeyCommitRequest.java)"
   - "D-7 Option B locked; PR#7583 (errose28 merge operator); 'Option B chosen' grill 2026-06-14 — master §20"
-  - "soft-quota over-commit is KNOWN/ACCEPTED (EXC-3) and exactness is OPEN — leader-execution-locking.md §8 EXC-3; master D-OPEN-quota-enforcement (TLC counterexample 2026-06-15)"
+  - "exact admission resolved via leader-local reservation (master D-OPEN-quota-enforcement, locked; I-quota-admission-exact); over-commit narrowed to the failover window (leader-execution-locking.md §8 EXC-3, B-quota-failover-window)"
 ```
 
 Quota is the **one mutable counter two parallel commits race on**, and it is the linchpin of the
@@ -702,22 +702,20 @@ before any node can receive a `Merge`** — otherwise a follower hits an unknown
 operator registry lives in C-replicated-db-module and is wired at startup, and why migrating any
 quota-bearing command is gated behind finalization (every node on the new binary).
 
-**The OPEN exactness question — present as open, do not settle (D-OPEN-quota-enforcement,
-EXC-3).** Because commits take only `S(bucket)` and the merge is commutative-not-serialized, the
-quota *limit* is enforced **best-effort, not exactly**: N commits in flight can each pass the
-check against the same pre-increment `usedBytes` and then all apply, transiently over-committing
-by up to the in-flight count. What **is** guaranteed: the counter never loses or double-counts an
-update — it always equals the true committed size (formally `UsedConsistent`; locking §8 EXC-3).
-This over-commit is **mechanically reproducible**: the TLA+ fork's `QuotaOvercommit.cfg` checks
-the model against the exact oracle `ObsAbstractExact` and TLC returns a counterexample (two
-commits plan at `used=0`, both apply, `used=2 > limit=1`) — and the same TLC pass **recommends a
-leader-local atomic reservation** (atomic check-and-reserve in memory; DB merge remains the
-durable truth; decrement-on-abort; rebuild-from-DB on failover) as the exact-enforcement path.
-**D-OPEN-quota-enforcement is OPEN**: the main-chat grill leaned approximate/eventually-consistent
-(locking-3), the TLC fork confirmed over-commit and leans exact-via-reservation. This component
-ships the **commutative merge unconditionally** (it is the durable truth either way); the *exact
-admission gate* is the open decision layered on top later (mitigation also delegable to the
-existing background `QuotaRepair` reconcile). This C-n does **not** decide it.
+**The exactness question — RESOLVED → exact (D-OPEN-quota-enforcement, EXC-3 narrowed).** Because
+commits take only `S(bucket)` and the merge is commutative-not-serialized, the quota *limit* is not
+automatically exact: absent a reservation, N commits in flight can each pass the check against the
+same pre-increment `usedBytes` and all apply, over-committing by up to the in-flight count. What is
+guaranteed unconditionally: the counter never loses or double-counts — it always equals the true
+committed size (formally `UsedConsistent`; locking §8 EXC-3). This over-commit is **mechanically
+reproducible** (the TLA+ fork's `QuotaOvercommit.cfg` vs the exact oracle `ObsAbstractExact`: two
+commits plan at `used=0`, both apply, `used=2 > limit=1`), and that counterexample **motivates** the
+chosen fix: a **leader-local atomic reservation** (atomic check-and-reserve in memory; DB merge remains
+the durable truth; advisory, reset-on-role-transition, term-fenced — `I-quota-admission-exact` /
+`I-quota-reservation-lifecycle`). **D-OPEN-quota-enforcement is RESOLVED exact**; over-commit is
+narrowed to the bounded failover window (`B-quota-failover-window`). This component ships the
+**commutative merge** (the durable counter); the reservation is the exact admission gate layered on the
+same path (P-1), with its lifecycle as the companion constraint.
 
 ---
 

@@ -442,27 +442,26 @@ and subtree reclamation are **eventually consistent** and the checker treats the
   enhancement.
 - **EXC-2 (eventual subtree purge).** Recursive-delete subtree reclamation is async; the
   namespace root disappears synchronously (I-5) but descendants are reclaimed over time.
-- **EXC-3 (soft quota / bucket quota over-commit) — KNOWN, ACCEPTED LIMITATION.** Because
-  key commits take only a **shared** bucket lock (so commits to different keys run in
-  parallel — the core throughput goal), and bucket `usedBytes` is updated by a commutative
-  merge operator (D-PARENT-2) rather than read-modify-written under an exclusive lock, the
-  quota *limit* is enforced **best-effort, not exactly**: two (or N) commits in flight can
-  each pass the quota check against the same pre-increment `usedBytes` and then both apply,
-  transiently over-committing the limit by up to the in-flight commit count. This is a
-  deliberate trade vs. today's exact (bucket-write-lock) quota, which serialized all commits.
-  - **What is still guaranteed:** the `usedBytes` counter never loses an update — it always
-    equals the true committed size (no double-count, no lost decrement). Only the *limit
-    gate* is soft. (Formally: invariant `UsedConsistent` holds; only refinement against an
-    *exact*-quota oracle fails.)
-  - **Evidence:** `QuotaOvercommit.cfg` is the configured red oracle expected to yield the
-    over-commit counterexample (two commits plan at `used=0`, both apply, `used=2 > limit=1`),
-    checking the model against `ObsAbstractExact`; captured TLC verdict pending (artifact
-    capture owned by the TLA effort). The accepted oracle `ObsAbstract` models quota as soft and
-    the model is expected to refine it.
-  - **Mitigation (separate effort, out of scope for this design):** exact enforcement is
-    delegated to (a) the existing background `QuotaRepair` reconcile, and/or (b) a future
-    leader-local atomic reservation (atomic check-and-reserve in memory, DB merge remains the
-    durable truth, decrement-on-abort, rebuild-from-DB on failover). Tracked separately.
+- **EXC-3 (soft quota over-commit — NARROWED to the failover window; steady-state admission is
+  EXACT).** Because key commits take only a **shared** bucket lock (so commits to different keys run
+  in parallel — the core throughput goal), and bucket `usedBytes` is updated by a commutative merge
+  operator (D-PARENT-2) rather than read-modify-written under an exclusive lock, the *limit gate* is
+  not automatically exact: absent a reservation, N in-flight commits can each pass the check against
+  the same pre-increment `usedBytes` and all apply, over-committing by up to the in-flight count.
+  **This is now closed in steady state** by a leader-local atomic reservation (master
+  `D-OPEN-quota-enforcement`, resolved exact; `I-quota-admission-exact`): concurrent commits see each
+  other's reservations so none over-admits. Over-commit remains possible **only in the bounded
+  failover window** (master `B-quota-failover-window`), self-healing as in-flight entries replay.
+  - **What is still guaranteed unconditionally:** the `usedBytes` counter never loses an update — it
+    always equals the true committed size (no double-count, no lost decrement). Formally
+    `UsedConsistent` holds.
+  - **Evidence:** `QuotaOvercommit.cfg` (vs `ObsAbstractExact`) was the configured red oracle for the
+    over-commit (two commits plan at `used=0`, both apply, `used=2 > limit=1`); in the resolved-exact
+    world it is expected to turn **green** once `ObsImpl` models the reservation (captured TLC verdict
+    pending, owned by the TLA effort).
+  - **Reserve lifecycle:** the reservation is advisory-for-admission-only (DB merge stays the durable
+    truth), instance-scoped, reset-on-role-transition, and term-fenced
+    (`I-quota-reservation-lifecycle`) — the conditions whose absence killed the static-map alternative.
 
 These exceptions are stated so a reviewer reads them as deliberate, not as gaps.
 
@@ -485,7 +484,7 @@ These exceptions are stated so a reviewer reads them as deliberate, not as gaps.
 | I-13 acquire failure-atomic | T-acquire-failure-atomic (mid-loop throw releases K-1 held permits in reverse; no orphaned permit; caller's finally sees no handle) |
 | B-1 stripe sizing | T-7 (throughput under hot parent) |
 | EXC-1/EXC-2 | linearizability checker treats quota/purge as eventually-consistent |
-| EXC-3 soft quota | `UsedConsistent` holds (counter exact); `QuotaOvercommit.cfg` is the configured red oracle expected to yield the over-commit counterexample vs the exact oracle (exact oracle `ObsAbstractExact`); captured TLC verdict pending (artifact capture owned by the TLA effort) |
+| EXC-3 soft quota (narrowed: failover window only) | `UsedConsistent` holds (counter exact); steady-state admission exact via reservation (`I-quota-admission-exact`); `QuotaOvercommit.cfg` vs `ObsAbstractExact` now expected green once `ObsImpl` models the reservation (captured TLC verdict pending, TLA effort) |
 
 ---
 
