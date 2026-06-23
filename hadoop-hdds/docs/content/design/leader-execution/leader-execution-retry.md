@@ -178,6 +178,18 @@ can still see the user request.
 - A dedicated RocksDB column family (the **completion / retry CF**), value =
   the serialized `OMResponse` (the same artifact Ratis caches today), key =
   `clientId#callId`.
+- **Identity binding (`I-dedup-identity-bound`).** The stored value also carries the
+  request's **server-derived** authenticated owner — the short user from
+  `OMRequest.userInfo` / `OMClientRequest.getUserInfo()` (`OMClientRequest.java:164`,
+  server-set, *not* the client-asserted envelope `clientId`). The `(clientId, callId)` key is
+  opaque and **client-supplied**, so binding the owner lets the admission-hit path (§3.2) verify
+  the caller owns the entry before returning bytes. This closes a cross-user disclosure that an
+  un-bound table opens: the cached `OMResponse` for `GetS3Secret` / `GetDelegationToken` carries
+  the live credential in plaintext (`S3GetSecretRequest.java:192`,
+  `OMGetDelegationTokenRequest.java:179`), so returning it to a *forged* `(clientId, callId)`
+  would hand one user another's secret. Today's in-memory Ratis cache is keyed on the
+  IPC-connection-derived id (`OzoneManagerRatisServer.java:514`), which is connection-bound;
+  this durable table substitutes a client-asserted key and so MUST re-bind identity itself.
 - Written by the leader at the operation's terminal step, **inside the same
   `BatchOperation`** that carries the data patch and the `TransactionInfo` update
   (`I-dedup-record-atomic`, `I-txninfo-atomic-with-patch`). A failover replica therefore
@@ -191,8 +203,12 @@ On each write, before acquiring locks or executing:
 
 1. Check the **in-flight registry** (§3.3). Hit → attach to the existing future and
    return its result (no second execution).
-2. Else check the **durable completion table**. Hit → return the cached `OMResponse`
-   verbatim (no re-execution, no re-commit).
+2. Else check the **durable completion table**. Hit → **first verify the requesting
+   (server-derived, authenticated) UGI equals the entry's bound owner (`I-dedup-identity-bound`);
+   on mismatch treat as a miss/deny — never return another user's bytes** — then return the
+   cached `OMResponse` verbatim (no re-execution, no re-commit). The hit path is a
+   credential-return path for the secret/token ops, so the identity re-check is mandatory, not
+   advisory.
 3. Miss → register in the in-flight registry, acquire locks, execute once, build the
    patch + completion record, batch, replicate, apply.
 
@@ -207,6 +223,16 @@ On each write, before acquiring locks or executing:
   committed, so a new leader correctly re-drives them from the client. Across a leader
   change the **durable table is the sole authority**; the in-flight registry's
   correctness role is *only* same-leader concurrent retries.
+- **Removed on every terminal outcome (`I-dedup-inflight-lifecycle`).** Success removes the
+  entry strictly post-apply (`I-dedup-handoff`). Any **pre-commit failure** — SCM `allocateBlock`
+  throw (seam S2), lock-acquire interrupt (S4), reval failure (S5), submit refusal / term loss
+  (S6) — also removes the entry, in the same `finally` that releases the locks, because nothing
+  durable was written and a retry MUST be free to re-execute. The failed attempt's attached
+  waiters are **re-driven** (released to retry), never handed the transient pre-commit error as
+  if it were the terminal result. Only a committed completion record is authoritative; an
+  un-committed failure leaves no dedup state behind. This mirrors the quota reserve's "released on
+  every terminal outcome" rule (master `I-quota-reservation-lifecycle` #2), the sibling
+  leader-local structure with the identical lifecycle need.
 
 ### 3.4 TTL eviction (deterministic)
 
@@ -293,6 +319,13 @@ has the identical leak; batching neither causes nor worsens it.
 - **I-dedup-key** — Dedup is keyed on the end-client `(clientId, callId)`; no other
   identity is minted for dedup purposes (R-1). The full pair is the key — never a
   width-truncated derivative (R-5).
+- **I-dedup-identity-bound** — The `(clientId, callId)` key is opaque and client-supplied, so
+  every completion entry is bound to its request's **server-derived** authenticated owner
+  (`OMRequest.userInfo`), and the admission-hit path (§3.2) MUST verify the caller's
+  authenticated UGI equals that owner before returning the cached `OMResponse`; on mismatch it is
+  a miss/deny. Without this, a caller forging another user's `(clientId, callId)` would receive
+  that user's cached bytes — and for `GetS3Secret` / `GetDelegationToken` those bytes are the
+  plaintext credential. (Covered by `T-retry-cross-user-denied`.)
 - **I-dedup-record-atomic** — The completion record is written in the **same**
   `BatchOperation` as the request's data patch. A reader/replica sees both or neither.
 - **I-txninfo-atomic-with-patch** *(reused from parent)* — `TransactionInfo` is written
@@ -303,6 +336,13 @@ has the identical leak; batching neither causes nor worsens it.
   re-executes (double-apply). Bind removal to the **post-apply** step, not post-submit.
   This is the atomic-replace ("install the new before releasing the old") pattern applied
   to dedup state: the durable record is the new resource, the in-flight entry the old.
+- **I-dedup-inflight-lifecycle** — The in-flight registry entry is removed on **every** terminal
+  outcome of the first attempt: success removes it strictly post-apply (`I-dedup-handoff`), and any
+  pre-commit failure (SCM / lock / reval / submit throw, term loss) removes it in the same
+  `finally` that releases the locks. A failed pre-commit attempt's attached waiters are re-driven,
+  not handed the transient error. Negative constraint: a failure path MUST NOT leave the entry
+  behind (it would leak in leader memory and pin every future retry to a dead/failed future until
+  failover). (Covered by `T-retry-inflight-failure-cleanup`.)
 - **I-dedup-fence** — Patches from a leader that has lost the term cannot commit (Raft
   term) and are refused at submit via the term tag; and a newly-acquired leader withholds
   admission of new planned execution until its applied-index catches the committed-index
@@ -313,8 +353,11 @@ has the identical leak; batching neither causes nor worsens it.
 Anti-patterns (must not appear):
 - A per-replica wall-clock timer evicting completion records (replicas diverge — use
   leader-decided replicated eviction, §3.4).
-- Removing the in-flight entry at submit time / on the leader reply path before apply
-  (violates `I-dedup-handoff`).
+- Removing the in-flight entry at submit time / on the leader reply path **of a request that is
+  still committing** (violates `I-dedup-handoff` — a retry could then find neither the future nor a
+  durable record and double-execute). This forbids early removal of an *in-flight* request only;
+  a request that **fails before commit** is removed immediately in its failure `finally`
+  (`I-dedup-inflight-lifecycle`), since no durable record will ever exist for it.
 - Caching only the "non-idempotent" subset by a runtime tier check (R-4: cache uniformly;
   the audit tiers are analysis, not a switch).
 - Deriving a deterministic `clientID`/`uploadID` into the 64-bit field (R-5: collision).

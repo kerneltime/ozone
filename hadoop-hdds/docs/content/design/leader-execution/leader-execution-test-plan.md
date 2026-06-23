@@ -1103,6 +1103,49 @@ provenance: inferred
 evidence: ["leader-execution-retry.md §3.3, §5 (I-dedup-handoff: remove strictly post-apply)"]
 ```
 ```yaml
+# T-retry-cross-user-denied
+id: T-retry-cross-user-denied
+statement: >
+  Cross-user dedup is denied. User U1 commits a GetS3Secret (its OMResponse, carrying U1's plaintext
+  awsSecret, is recorded in the completion CF under U1's (clientId, callId)). User U2 then submits a
+  request forging U1's (clientId, callId). Assert the admission-hit path compares U2's server-derived
+  authenticated UGI against the entry's bound owner (U1), MISMATCHES, and treats it as a miss/deny —
+  U2 never receives U1's recorded OMResponse. A negative variant with no identity binding MUST hand U2
+  U1's secret, proving the check has teeth.
+covers: [I-dedup-identity-bound]
+provenance: inferred
+evidence: ["leader-execution-retry.md §3.1 (owner binding), §3.2 step 2 (hit-path re-check)", "S3GetSecretRequest.java:192 (response carries plaintext awsSecret)", "OMClientRequest.java:164 (server-derived getUserInfo)"]
+```
+```yaml
+# T-retry-inflight-failure-cleanup
+id: T-retry-inflight-failure-cleanup
+statement: >
+  In-flight registry is cleared on a pre-commit failure. Inject an SCM allocateBlock failure (seam S2)
+  on the first attempt of a (clientId, callId); assert the in-flight entry is removed in the same
+  finally that releases the locks, a subsequent retry RE-EXECUTES (finds neither the future nor a
+  durable record) and can succeed, and no future dangles. Second leg: a concurrent retry attaches to
+  the future, then the original fails pre-commit; assert the waiter is re-driven (re-executes), not
+  handed the transient error as terminal. A negative variant that removes only on success MUST leak
+  the entry / pin the waiter to the failed future.
+covers: [I-dedup-inflight-lifecycle]
+provenance: inferred
+evidence: ["leader-execution-retry.md §3.3 (remove on every terminal outcome), §5 (I-dedup-inflight-lifecycle)", "leader-planned-execution.md §15.2 (S2 SCM allocateBlock can throw)"]
+```
+```yaml
+# T-orchestrator-exceptional-release
+id: T-orchestrator-exceptional-release
+statement: >
+  Orchestrator releases locks on an exceptional Ratis completion. Drive a planned step whose
+  submitToRatis future completes EXCEPTIONALLY (submit refused / term lost / timeout); assert the
+  step's striped permits are released (the stripe returns to full capacity) and the request does NOT
+  advance. A negative variant that releases only in the success continuation (thenCompose) MUST leak
+  the permits — and since there is no lock timeout (I-8) and no reaper, a follow-on acquire on the
+  same stripe MUST block forever, demonstrating the deadlock the whenComplete release prevents.
+covers: [I-9]
+provenance: inferred
+evidence: ["leader-execution-components.md C-orchestrator (whenComplete release on every terminal outcome)", "leader-execution-locking.md I-8 (no lock timeout), I-9 (continuation-thread release)"]
+```
+```yaml
 # T-retry-stale-leader
 id: T-retry-stale-leader
 statement: >
@@ -1277,6 +1320,8 @@ authority `leader-execution-locking.md` §9) and **master invariants** (slugs) a
 | `I-dedup-key` | `T-retry-dedup-failover` | retry companion R-1/R-3 |
 | `I-dedup-record-atomic` | `T-retry-record-atomic` | retry companion §3.1 |
 | `I-dedup-handoff` | `T-retry-handoff-gap` | retry companion §3.3 |
+| `I-dedup-identity-bound` | `T-retry-cross-user-denied` | retry companion §3.1-§3.2 (RF-1) |
+| `I-dedup-inflight-lifecycle` | `T-retry-inflight-failure-cleanup` | retry companion §3.3 (RF-9) |
 | `I-dedup-fence` | `T-retry-stale-leader` | retry companion §3.5 |
 | `I-batch-orthogonal` | `T-batch-retry-recompose` | retry companion §4 |
 | `I-atomic-flush` | `T-crash-replay-merge-once` | retry companion D-wal-off §7.3 |

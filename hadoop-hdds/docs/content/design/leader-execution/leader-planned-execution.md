@@ -2839,7 +2839,17 @@ cleanly:
 The leader-only authorization/audit/minting property above is exercised by the catalog test
 `T-security-leader-only-authz-audit` (test-plan §4) — leader-only authz/audit/minting is a
 direct consequence of followers running no business logic (`I-determinism-followers-pure`).
-This master section invents no new test id.
+
+**The retry dedup-hit path is a credential-return path (`I-dedup-identity-bound`).** The durable
+completion table (retry companion §3) caches each write's `OMResponse`, and for these two minting
+ops that response carries the live credential in plaintext. The table is keyed on the
+**client-supplied** `(clientId, callId)`, so the admission-hit path (retry §3.2 step 2) MUST verify
+the caller's server-derived authenticated UGI equals the entry's bound owner before returning the
+bytes — otherwise a caller forging another user's `(clientId, callId)` is handed that user's
+secret/token. Today's in-memory Ratis cache is connection-bound (`OzoneManagerRatisServer.java:514`);
+the durable table substitutes a client-asserted key and so re-binds identity itself
+(`T-retry-cross-user-denied`). The related at-rest exposure — the plaintext credential now living
+in a durable, replicated CF — is tracked as RF-4 (§30.7).
 
 ---
 
@@ -5494,7 +5504,7 @@ it directly.
 | I-6 | T-1, T-2, T-4, T-5, T-deletedir-vs-openfile |
 | I-7 | T-1 |
 | I-8 | T-holder-lease-negative |
-| I-9 | T-cross-thread-release |
+| I-9 | T-cross-thread-release, T-orchestrator-exceptional-release |
 | I-apply-failure-resync | T-apply-failure-resync |
 | I-cache-free-ryw | T-full-suite-green-after-removal, T-no-cache-correctness, T-ryw-from-db |
 | I-checkpoint-exact-index | T-snapshot-consistency |
@@ -5517,6 +5527,8 @@ it directly.
 | I-dedup-fence | T-retry-stale-leader |
 | I-dedup-handoff | T-retry-handoff-gap |
 | I-dedup-key | T-retry-dedup-failover |
+| I-dedup-identity-bound | T-retry-cross-user-denied |
+| I-dedup-inflight-lifecycle | T-retry-inflight-failure-cleanup |
 | I-dedup-record-atomic | T-retry-record-atomic |
 | I-log-retention | T-wal-off-log-retention |
 | I-merge-replay-safe | T-crash-replay-merge-once |
@@ -6201,19 +6213,20 @@ several in the very decisions this revision *closed* (D-17 mixed-mode, the quota
 retry table). They are tracked here as open items (Lens-F rule: a confirmed finding must land as a
 tracked item, never vanish into "optional"). Per-finding `file:line` evidence lives in the review
 report. **No row is implementation-ready until it is closed.** The two quota provenance demotions
-(RF-7, RF-8) are applied in this same commit; everything else awaits a design decision.
+(RF-7, RF-8) were applied in the register's commit; resolution of the rest is tracked live in the
+Status column below (each `resolved` row names the invariant/test/section that closes it).
 
 | RF | Sev | Tier | Finding → recommendation | Status |
 |----|-----|------|--------------------------|--------|
-| RF-1 | BLOCKER | SECURITY | Durable retry dedup table (retry R-1/§3.2) keys on the client-asserted envelope `clientId` and returns the cached `OMResponse` verbatim with no UGI re-check; `GetS3Secret`/`GetDelegationToken` responses carry plaintext secrets → cross-user disclosure (U2 forging U1's `(clientId,callId)`). Today's Ratis cache is IPC-connection-bound (`OzoneManagerRatisServer.java:514`). **Rec:** bind each completion entry to the server-derived UGI (`OMRequest.userInfo`), assert owner==caller on the dedup hit, add `I-dedup-identity-bound` + `T-retry-cross-user-denied`. | open |
+| RF-1 | BLOCKER | SECURITY | Durable retry dedup table (retry R-1/§3.2) keys on the client-asserted envelope `clientId` and returns the cached `OMResponse` verbatim with no UGI re-check; `GetS3Secret`/`GetDelegationToken` responses carry plaintext secrets → cross-user disclosure (U2 forging U1's `(clientId,callId)`). Today's Ratis cache is IPC-connection-bound (`OzoneManagerRatisServer.java:514`). **Rec:** bind each completion entry to the server-derived UGI (`OMRequest.userInfo`), assert owner==caller on the dedup hit, add `I-dedup-identity-bound` + `T-retry-cross-user-denied`. | **resolved** — retry §3.1 owner-binding + §3.2 hit-path re-check + `I-dedup-identity-bound`; master §17.4; `T-retry-cross-user-denied` |
 | RF-2 | BLOCKER | SAFETY | D-12 objectID retrofit goes live at P-0 but `ManagedIndexService` is seeded only at finalization (P-7); the pre-finalization window mints from an unseeded `AtomicLong(0)`, colliding with persisted low-Ratis-index objectIDs (`OmUtils.java:766-783`). Master self-contradicts at :5657-5658 vs :5699-5700. Falsifies `I-objectid-disjoint`. **Rec:** seed `max(persisted managed idx, lastAppliedRatisIndex)+1` at P-0 / first post-upgrade leader election; persist `#MANAGED_INDEX` from P-0; add a pre-existing-low-index collision test. | open |
-| RF-3 | BLOCKER | SAFETY | Orchestrator releases held locks only in the Ratis success-continuation (`components.md:354` `thenCompose`); an exceptional Ratis completion leaks the striped permits — no timeout (I-8), no reaper → the stripe deadlocks permanently. **Rec:** `whenComplete((c,err)->release(handle)).thenCompose(...)` so release runs on every terminal outcome (I-9); add `T-orchestrator-exceptional-release`. | open |
+| RF-3 | BLOCKER | SAFETY | Orchestrator releases held locks only in the Ratis success-continuation (`components.md:354` `thenCompose`); an exceptional Ratis completion leaks the striped permits — no timeout (I-8), no reaper → the stripe deadlocks permanently. **Rec:** `whenComplete((c,err)->release(handle)).thenCompose(...)` so release runs on every terminal outcome (I-9); add `T-orchestrator-exceptional-release`. | **resolved** — C-orchestrator `whenComplete` release + anti-pattern; `T-orchestrator-exceptional-release` |
 | RF-4 | MAJOR | SECURITY | R-4 caches every write's `OMResponse`; secret/token responses store the live credential in plaintext in the durable, replicated, TTL-lived completion CF — worse than today's in-memory single-node cache, and it silently bypasses `VaultS3SecretStore` when configured; revoke can't purge it. **Rec:** exclude/redact/encrypt credential-bearing responses; MUST-NOT-write `awsSecret` to the local CF when an external `S3SecretStore` is set; add `I-no-plaintext-secret-at-rest`. | open |
 | RF-5 | MAJOR | SAFETY | §17.1 claims ACL authz is uniformly in `preExecute` (leader-only, unchanged). False for key/bucket/prefix ACL ops + bucket-delete, whose `checkAcls` runs in `validateAndUpdateCache` (every node today: `OMKeyAclRequest.java:92`, `OMBucketAclRequest.java:92`, `OMPrefixAclRequest.java:81`, `OMBucketDeleteRequest.java:106`). A P-6 migrator could ship an op whose authz silently never runs. **Rec:** correct §17.1; add a migration invariant "if `checkAcls` is in `validateAndUpdateCache` today, the migrated plan step MUST carry it; dropped authz = fail-closed defect." | open |
 | RF-6 | MAJOR | DESIGN-GAP | A follower fail-stop on apply leaves only opaque `(cf,key,value)` bytes — inner Batch is domain-agnostic (§10:473), audit is leader-only (§17.3/§18.3): no cmdType/clientId/user/local-audit to diagnose the one failure the feature exists to surface. **Rec:** carry cmdType + clientId#callId on the OUTER envelope; log a structured record before `terminate()`; add `T-apply-failure-forensics`. | open |
 | RF-7 | MAJOR | SAFETY/EVIDENCE | `I-quota-admission-exact` (P-1's core) was stamped `provenance: verified` but is modeled by NO TLA artifact (ObsImpl is still soft; gate-oracle RED, reproduced used=2); 40k measured the rejected static-map shape. **Provenance demoted to `inferred` in this commit.** **Rec:** extend ObsImpl with a `reserved` var + atomic reserve-then-check-then-rollback, refine ObsAbstractExact green; re-measure on the instance-scoped shape; demote test-plan `T-quota-concurrent` too. | open |
 | RF-8 | MAJOR | SAFETY/CONSISTENCY | `B-quota-failover-window` (stamped verified, **demoted `inferred` in this commit**) contradicts the applied-index catch-up gate (retry §3.5 #4): under the gate the over-commit residual is ZERO (a no-admission pause), not soft. **Rec:** commit to the gate framing, rewrite the bound as a liveness pause, **close EXC-3 fully**; add a crash-with-unapplied-deltas TLA action. | open |
-| RF-9 | MAJOR | SAFETY | In-flight registry (retry §3.3) has no removal on any pre-commit failure path (SCM throw S2, lock-interrupt S4, reval S5, submit/term-loss S6); `I-dedup-handoff` binds removal to durable-apply only → leaks the entry + hands attached retries a stale transient error as terminal. The sibling quota-reserve releases "on every terminal outcome"; the registry doesn't. **Rec:** add `I-dedup-inflight-lifecycle` (remove on EVERY terminal outcome; failed pre-commit → remove + re-drive waiters); reconcile the §5 anti-pattern. | open |
+| RF-9 | MAJOR | SAFETY | In-flight registry (retry §3.3) has no removal on any pre-commit failure path (SCM throw S2, lock-interrupt S4, reval S5, submit/term-loss S6); `I-dedup-handoff` binds removal to durable-apply only → leaks the entry + hands attached retries a stale transient error as terminal. The sibling quota-reserve releases "on every terminal outcome"; the registry doesn't. **Rec:** add `I-dedup-inflight-lifecycle` (remove on EVERY terminal outcome; failed pre-commit → remove + re-drive waiters); reconcile the §5 anti-pattern. | **resolved** — retry §3.3 + `I-dedup-inflight-lifecycle` + reconciled §5 anti-pattern; `T-retry-inflight-failure-cleanup` |
 | RF-10 | MAJOR | SAFETY | Recursive `rm -rf` (C7) is mis-marked "idempotent on re-exec" (phasing:328); code throws `KEY_NOT_FOUND` on the re-tombstone (`OMKeyDeleteRequestWithFSO.java:115-117`) → N4 by the audit's own taxonomy, yet absent from the audit. P-2 (owns C7) lacks the D-OPEN-retry gate P-1 carries. **Rec:** reclassify C7 N4; add recursive delete to audit Tier-A; record the completion record at the root-tombstone step; gate P-2 on D-OPEN-retry. | open |
 | RF-11 | MAJOR | CONSISTENCY/SAFETY | Phasing idempotency column marks CreateSnapshot/GetDelegationToken/GetS3Secret/TenantAssignUserAccessId `idempotent=yes` (phasing:330,380,383,388); the audit classifies all four Tier-A non-idempotent (re-mint random secret/token/snapshotId). Master honestly carries them open (§6:6114); phasing silently closes them. **Rec:** correct the 4 cells; add a lint cross-check phasing-column == audit-verdict. | open |
 | RF-12 | MAJOR | DESIGN-GAP | No liveness/progress invariant for the NO-LOCK-TIMEOUT design; TLA `Termination` is defined (`ObsImpl.tla:295`, `FsoImpl.tla:408`) but referenced by no cfg, and `Spec` carries no fairness conjunct. The "a hang is the signal" claim is formally unchecked. **Rec:** add `WF_vars` + wire `PROPERTY Termination`/leadsto into a fast cfg, OR add a named prose `I-progress-under-no-timeout` recording it as argued-not-modeled. | open |

@@ -351,17 +351,20 @@ interface: |
   final class LeaderPlanner {
     CompletableFuture<OMResponse> execute(PlannedRequest req);  // drives req's step-iterator to completion
     // loop: while req.hasNextStep(): step=req.nextStep(); acquire(step.locks);
-    //       reval(step); Batch=step.plan(); submitToRatis(Batch).thenCompose(commit -> { release; req.advance(commit); })
+    //       reval(step); Batch=step.plan();
+    //       submitToRatis(Batch).whenComplete((commit, err) -> release(step.locks))  // release on EVERY terminal outcome
+    //                           .thenCompose(commit -> req.advance(commit))          // advance only on success
     // continuation-driven: the worker thread is freed during each Ratis await (I-9 driver)
   }
 depends_on: [D-6, D-16, C-planned-request, C-lock-manager, C-replicated-db-module]
 implements: [I-3, I-2, I-9]
-tests: [T-1, T-5, T-8]
+tests: [T-1, T-5, T-8, T-orchestrator-exceptional-release]
 anti_patterns:
   - "MUST NOT pre-compute the full multi-step chain up front (ALT-static-step-decomposition killed by D-6) — a concurrent delete can invalidate a statically-planned chain; reval re-resolves per step."
   - "MUST NOT hold chain/resolution state in the orchestrator (ALT-stateless-request-orchestrator killed by D-6) — the request owns the iterator (locality of the decomposition logic)."
   - "MUST NOT hold a lock across the inter-step gap (I-3) — release per step; the gap is intentional."
   - "MUST NOT block the worker thread on the Ratis await — register a continuation and free the thread (I-9 driver); hold the client RPC, not a thread."
+  - "MUST NOT release the step's locks only in the success continuation (thenCompose). A Ratis future that completes EXCEPTIONALLY (submit refused, term lost, timeout) would skip that release and leak the striped permits — and with no lock timeout (I-8) and no lock reaper the stripe deadlocks permanently. Release in a whenComplete/finally that runs on every terminal outcome (success OR exception), then advance only on success (T-orchestrator-exceptional-release)."
   - "MUST NOT write a retry-cache entry on a non-terminal step — only the terminal step records (clientId#callId -> response) (D-6, locking §4.3)."
 phase: P-0 / P-2
 provenance: inferred
