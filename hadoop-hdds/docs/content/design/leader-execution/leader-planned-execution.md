@@ -211,10 +211,11 @@ concern was heard. Go directly to **Part IV §23**, the `RC-n` ledger: every con
 raised it, on which PR, its status (`adopted` / `addressed` / `deferred` / `open` / `rejected`), and the
 `D-n` that resolves it — framed as *heard*, not dismissed. If you want to argue *against* a choice, first
 read §21 (the `ALT-n` wall): the alternative you have in mind is very likely already there with the
-decision that killed it and the one-breath reason why. Two questions are still genuinely open and welcome
-new argument — `D-OPEN-quota-enforcement` (quota admission, resolved exact) and `D-OPEN-retry` (the retry /
-idempotency mechanism); everything else in Part IV is locked, and re-litigating it should start by
-engaging the recorded rationale rather than the original premise.
+decision that killed it and the one-breath reason why. The two formerly-open questions —
+`D-OPEN-quota-enforcement` (quota admission, resolved → exact via the leader-local reservation) and
+`D-OPEN-retry` (the retry / idempotency mechanism, resolved → durable replicated completion table) — are
+now both locked; everything in Part IV is locked, and re-litigating any of it should start by engaging
+the recorded rationale rather than the original premise.
 
 ## 2. Executive summary
 
@@ -432,28 +433,29 @@ revert, shared identity counter, fail-loud followers — is what turns "long-liv
 into a first-class, stable operating state, and it is what lets us land the hard parts incrementally in
 master without ever shipping an unstable build.
 
-### The two questions still open
+### The two formerly-open questions (now resolved)
 
-Two things are deliberately not yet decided. The first is **quota enforcement exactness**
-(`D-OPEN-quota-enforcement`). The commutative-merge design guarantees the `usedBytes` counter is always
+Two things were deliberately left open and are now both resolved. The first is **quota enforcement
+exactness** (`D-OPEN-quota-enforcement`, resolved → exact). The commutative-merge design guarantees the
+`usedBytes` counter is always
 *exact* — it equals the true committed size, never double-counted, never a lost decrement — but it makes
 the *limit gate* soft: because commits take only a shared bucket lock and the increment is a merge rather
 than a read-modify-write under exclusion, N concurrent commits can each pass the quota check against the
 same pre-increment value and then all apply, transiently over-committing the limit by up to the in-flight
-commit count. The main-chat grill leaned toward accepting this approximate, eventually-consistent
-behavior; a **TLA+/TLC model is configured to reproduce the over-commit** with a concrete
-counterexample (two commits both plan at `used=0`, both apply, `used=2 > limit=1`) and the leaning is
-toward a **leader-local atomic reservation** for exact enforcement (an in-memory check-and-reserve, with
-the DB merge remaining the durable truth, decrement-on-abort, and rebuild-from-DB on failover). The
-over-commit is argued from the model and the counterexample is *expected*, but its captured TLC verdict is
-**pending**; the question of exact vs. approximate is therefore genuinely open. The second
-open question is the **retry / idempotency mechanism** (`D-OPEN-retry`), which is *deferred* pending a
-per-operation idempotency audit. The DB patch itself is already idempotent — applying whole-object Puts
+commit count. The main-chat grill leaned toward accepting this approximate behavior; a **TLA+/TLC model
+is configured to reproduce the over-commit** (two commits both plan at `used=0`, both apply,
+`used=2 > limit=1`). This is now **resolved → exact** via a **leader-local atomic reservation** (an
+in-memory check-and-reserve, the DB merge remaining the durable truth, reset-on-role-transition +
+rebuild-from-DB on failover — `D-OPEN-quota-enforcement`, `I-quota-admission-exact`); over-commit is
+narrowed to the bounded failover window (`B-quota-failover-window`), its captured TLC verdict pending
+(formal thread). The other formerly-open question, the **retry / idempotency mechanism**
+(`D-OPEN-retry`), is now **resolved** (durable replicated completion table; companion
+`leader-execution-retry.md`) after the per-operation idempotency audit. The DB patch itself is already idempotent — applying whole-object Puts
 twice is harmless — so the real question is which operations are non-idempotent *to re-execute* (SCM block
 allocation and the quota Merge are the obvious ones), and that smaller set (the inventory suggests on the
-order of ten operations, not all forty-seven) is what dictates whether the retry-cache entry must be a
-durable, replicated `(clientId, callId) → response` table written *atomically with the data batch*, or
-whether in-memory-only state suffices. No retry mechanism is fixed until that audit exists.
+audit classifies ~26 client-facing ops in two tiers, not all forty-seven) is what dictates the
+retry-cache entry: a durable, replicated `(clientId, callId) → response` table written *atomically with
+the data batch* (resolved — D-OPEN-retry, companion `leader-execution-retry.md`).
 
 ## 3. Nomenclature / glossary
 
@@ -1061,11 +1063,11 @@ machinery it explicitly **does not**.
 - **(c) A durable retry / idempotency record.** Analogous to a transaction-log dedup
   table, so a client retry of an already-applied request (after failover or timeout) is
   recognized and not double-applied — the standard "exactly-once apply over an
-  at-least-once transport" requirement. For OM this is `D-OPEN-retry` (deferred pending the
-  per-operation idempotency audit), and the audit's finding is that the **DB batch is
+  at-least-once transport" requirement. For OM this is `D-OPEN-retry` (resolved — durable
+  replicated completion table; the audit is done), whose finding is that the **DB batch is
   already idempotent** (whole-object puts); only **re-execution** of non-idempotent steps
   (SCM block allocation, the quota `Merge`) needs the durable record — so the dedup scope
-  is ~10 ops, not all 47 (locking companion §10).
+  is ~26 ops in two tiers, not all 47 (companion leader-execution-idempotency-audit.md).
 
 **NOT needed / explicitly out of scope (§6):**
 
@@ -1963,7 +1965,7 @@ message PersistDbRequest {            // the replicated unit on the new write pa
   // The domain-agnostic patch to apply (12.2). The ONLY thing followers act on.
   Batch batch = 2;
 
-  // Retry / idempotency descriptors — see 12.4 and D-OPEN-retry (DEFERRED).
+  // Retry / idempotency descriptors — see 12.4 and D-OPEN-retry (RESOLVED).
   // A batched Ratis transaction can answer MANY clients (RC-ivandika-retry-cache-
   // semantics); each terminal-step client maps to one ClientRequestInfo so the
   // (clientId, callId) -> response association survives failover. Written by the
@@ -1994,24 +1996,26 @@ encoding, so legacy (Ratis-index-derived) and new (managed-index-derived) object
 disjoint by construction for the whole mixed-mode window (D-12). The structured block with
 its provenance, evidence, and tests lives in §24; the proto field is constrained by it here.
 
-### 12.4 Retry / idempotency (OPEN — D-OPEN-retry, deferred)
+### 12.4 Retry / idempotency (RESOLVED — D-OPEN-retry, durable replicated completion table)
 
 The outer envelope carries `repeated ClientRequestInfo` because a single batched Ratis
 transaction can answer many clients (RC-ivandika-retry-cache-semantics, PR#7583). The **shape**
-is frozen (a per-client `(clientId, callId)` list, populated by the terminal step of a
-multi-step request only — D-6, `leader-execution-locking.md` §4.3). The **durability mechanism
-is OPEN** (D-OPEN-retry, status `deferred`): whether the `(clientId, callId) → response`
-association is a **durable, replicated table written atomically with the data `Batch`** plus a
-leader-local in-flight registry, or **in-memory-only**, is not yet decided. The deciding input
-is a per-operation idempotency audit: the DB `Batch` is already idempotent for whole-object
-`Put`/`Delete`, so only **re-execution** of non-idempotent operations (SCM block allocation,
-the quota `Merge`, table moves, soft-delete) needs the atomic durable entry — narrowing the
-audit to roughly ten operations, not the full write surface (D-OPEN-retry consequences;
-locking §10). Until that audit exists, no retry mechanism is fixed; the proto reserves the
-field and the spec records the constraint.
+is a per-client `(clientId, callId)` list, populated by the terminal step of a multi-step request
+only — D-6, `leader-execution-locking.md` §4.3. The **durability mechanism is RESOLVED**
+(D-OPEN-retry, status `locked`; companion `leader-execution-retry.md` R-1..R-5): the
+`(clientId, callId) → response` association is a **durable, replicated completion table written
+atomically with the data `Batch` + TransactionInfo** (`I-dedup-record-atomic`), one record per
+request in the batch, plus a leader-local in-flight registry; dedup is checked at admission before
+execution. This is a NEW per-client mechanism, not an extension of Ratis's cache — the batching
+submits under the OM's own `(clientId, callId)`, so Ratis cannot dedup an individual client's retry
+(verified, prototype). The per-op idempotency audit (done) classifies the non-idempotent set at
+**~26 ops** in two tiers: the DB `Batch` is idempotent for whole-object `Put`/`Delete`, so only
+**re-execution** of non-idempotent ops (SCM block allocation, the quota `Merge`, table moves,
+soft-delete) is the hazard. R-4 caches every write op uniformly. The proto reserves the field; the
+mechanism lands in code at P-1 (the production gate).
 
 ```yaml
-# RC linkage (already in §23): RC-ivandika-retry-cache-semantics → D-OPEN-retry (deferred);
+# RC linkage (already in §23): RC-ivandika-retry-cache-semantics → D-OPEN-retry (resolved);
 # RC-ivandika-terminology: use "retryCache" (Ratis-aligned), never "replayCache".
 ```
 
@@ -2213,7 +2217,7 @@ sequenceDiagram
     R-->>L: committed & applied
     L->>LK: release X(bucket,key) + S(bucket)   (reverse order; I-2 ends)
     L-->>C: OK
-    Note over C,F: retry-cache entry (clientId#callId -> response) is the TERMINAL step's<br/>responsibility; commit is single-step so it writes it here — D-OPEN-retry (DEFERRED)
+    Note over C,F: retry-cache entry (clientId#callId -> response) is the TERMINAL step's<br/>responsibility; commit is single-step so it writes it here — D-OPEN-retry (RESOLVED)
 ```
 
 Oracle / asserts:
@@ -2628,19 +2632,20 @@ statically-planned chain, and a persisted saga is explicitly out of scope (locki
 §4.3 "decision A: no persisted orchestration/saga state"). The contract is: per-step
 durability + idempotent retry, **not** all-or-nothing.
 
-### 15.7 The non-idempotent re-execution problem (D-OPEN-retry, DEFERRED)
+### 15.7 The non-idempotent re-execution problem (D-OPEN-retry, RESOLVED)
 
 The DB patch itself is idempotent for whole-object `Put`/`Delete` (re-applying the same
-bytes is a no-op). What is **not** idempotent is **re-execution** of an op that (a) calls
+bytes is a no-op). What is **not** idempotent is **re-execution** (re-plan) of an op that (a) calls
 SCM block allocation (allocates fresh blocks each run) or (b) emits a commutative quota
-`Merge` (re-running double-counts the delta). Per the per-command inventory, the
-non-idempotent set is ~10 ops (those using `Merge`, SCM alloc, table moves, or soft-delete),
-not all ~47 (D-OPEN-retry consequences; locking companion §10). The likely invariant for
-those ops is a **durable, replicated `(clientId, callId) → response` table written
-atomically with the data batch**, plus a leader-local in-flight registry — but the exact
-mechanism is **deferred** pending the op-by-op idempotency audit (D-OPEN-retry; locking
-companion §10). Until then, the terminal-step retry-cache (§13.5) is the in-memory baseline;
-this section flags the gap, it does not close it.
+`Merge` (re-running double-counts the delta). Per the idempotency audit (done), the
+non-idempotent set is **~26 ops** in two tiers (those using `Merge`, SCM alloc, table moves,
+soft-delete, plus the spurious-error set), not all ~47 (D-OPEN-retry; companion
+`leader-execution-idempotency-audit.md`). The invariant is a **durable, replicated
+`(clientId, callId) → response` table written atomically with the data batch**
+(`I-dedup-record-atomic`), plus a leader-local in-flight registry — **resolved** in companion
+`leader-execution-retry.md` (R-1..R-5). The terminal-step retry-cache (§13.5) is the seam where the
+durable entry is written; what remains is the mechanism landing in code (the P-1 production gate),
+not the decision.
 
 ---
 
@@ -3048,9 +3053,9 @@ evidence: ["OzoneManager.java:4656", "OMKeyCommitRequest.java:383-384", "OzoneMa
 >   the downstream consequences. The YAML is authoritative for cross-references; the prose
 >   is authoritative for intent.
 > - `status: locked` means the decision is settled and a change requires re-opening with
->   new evidence. `status: deferred` (D-OPEN-retry) is deliberately *not* settled and is
->   flagged as such in both block and prose — do not read it as decided. (D-OPEN-quota-enforcement
->   was `status: open`; it is now `locked` — resolved to exact admission.)
+>   new evidence. (D-OPEN-retry and D-OPEN-quota-enforcement were `status: deferred`/`open`; both
+>   are now `locked` — retry resolved to the durable replicated completion table, quota to exact
+>   admission via the leader-local reservation. No `D-OPEN-*` decision remains unsettled.)
 > - Where a decision kills an alternative, the alternative is recorded in §21 with a
 >   `killed_by` back-pointer, so the rejection is addressable, not folded into a paragraph.
 > - The locking companion `leader-execution-locking.md` is the contract for everything
@@ -4036,46 +4041,48 @@ evidence:
   - "TLC over-commit counterexample QuotaOvercommit.cfg vs ObsAbstractExact (ozone-11898-tla) motivates the reserve; captured verdict pending (formal thread)"
 ```
 
-### D-OPEN-retry — idempotency / retry-cache mechanism (DEFERRED)
+### D-OPEN-retry — idempotency / retry-cache mechanism (RESOLVED → durable replicated completion table)
 
-**THIS DECISION IS DEFERRED — it is not settled, and it gates the framework's terminal-step
-retry-cache contract.** It is pending a per-operation idempotency audit and must not be treated as
-decided.
+**THIS DECISION IS RESOLVED.** The mechanism is specified in companion `leader-execution-retry.md`
+(R-1..R-5) and the per-op idempotency audit (`leader-execution-idempotency-audit.md`) is done; the
+earlier "deferred pending audit" framing is superseded. What remains is *implementation landing in
+code* (the P-1 production gate), not the decision.
 
 **Context and forces.** A single batched Ratis transaction under leader-side execution answers many
 clients at once, which ivandika3 flagged on [#7583](https://github.com/apache/ozone/pull/7583): *how do the retry / reply caches work* when one
-txn serves many `(clientId, callId)` pairs (`RC-ivandika-retry-cache-semantics`)? The deeper
-question is which operations are *safe to re-execute* on a client retry. The DB batch itself is
-largely idempotent — whole-object `Put`s and `Delete`s applied twice yield the same bytes — so the
-risk is not in *applying* a committed patch twice (the apply is idempotent), it is in *re-executing*
-the business logic to *re-plan* a patch for an operation whose planning has side effects that do not
-commute with themselves.
+txn serves many `(clientId, callId)` pairs (`RC-ivandika-retry-cache-semantics`)? Verified in the
+prototype: it submits the batched `PersistDb` under the OM's OWN `(clientId, callId)`, collapsing the N
+original client keys into one Ratis key — so Ratis's retry cache cannot dedup an individual client's
+retry, and the original ids ride as inert payload consumed by nothing. The deeper question is which
+operations are *safe to re-execute* on a client retry. The DB batch itself is largely idempotent —
+whole-object `Put`s and `Delete`s applied twice yield the same bytes — so the risk is not in *applying*
+a committed patch twice (the apply is idempotent), it is in *re-executing* the business logic to
+*re-plan* a patch for an op whose planning has self-non-commuting side effects (SCM block allocation,
+the quota `Merge`).
 
-**Why it is deferred rather than decided.** The choice is between (a) a durable, replicated
-`(clientId, callId) → response` table written **atomically with the data batch**, plus a leader-local
-in-flight registry, versus (b) in-memory-only retry state. Picking correctly requires knowing *which
-operations are non-idempotent under re-execution*, because only those need the atomic durable entry —
-a naturally-idempotent pure `Put`/`Delete` can tolerate weaker handling. The per-command inventory of
-2026-06-15 narrowed the audit scope sharply: the DB batch is already idempotent, so only
-**re-execution** of *non-idempotent* operations is unsafe — concretely SCM block allocation and the
-commutative quota `Merge` (a re-planned quota op double-counts), table moves, and soft-deletes. That is
-roughly **~10 operations, not all 47**. The likely invariant for those non-idempotent ops is
-"retry-cache entry written atomically with the data batch" — but the mechanism is *not fixed* until the
-operation-by-operation idempotency audit exists. D-6 already constrains the shape: the retry-cache entry
-is written on the **terminal** step only (intermediate sub-steps are idempotent by structure), and
-ivandika3's terminology correction is adopted — it is the **retryCache**, not a "replayCache," aligning
-with Ratis (`RC-ivandika-terminology`).
+**The resolution.** A NEW per-original-client durable mechanism, NOT a thin extension of Ratis's cache
+(the batching decouples the Ratis key from the client key): a durable, replicated `(clientId, callId) →
+response` completion table, **one record per request in the batch**, written **atomically with the data
+batch + TransactionInfo** (`I-dedup-record-atomic`), plus a leader-local in-flight registry
+(attach-to-future); dedup is checked at admission BEFORE execution, so a committed retry is served from
+the durable table verbatim (never re-executed). TTL eviction is leader-decided and replicated (no
+per-replica timer); stale-leader patches are term-fenced (`I-dedup-fence`). R-4: V1 caches EVERY write op
+uniformly (the audit's tiers size the TTL, not a runtime switch). R-5 rejected a deterministic-id lever
+as collision-unsafe. ivandika3's terminology correction is adopted — **retryCache**, not "replayCache."
 
-**Consensus state.** Raised by ivandika3 and kerneltime. Deferred pending the per-op idempotency audit;
-the scope-narrowing evidence is the per-command inventory of 2026-06-15 and §10 of the locking companion.
-This decision *addresses* `RC-ivandika-retry-cache-semantics`. No tests are mapped yet (`tests: []`) —
-which is correct for a deferred decision and is *not* a coverage defect, because no invariant is asserted
-until the audit fixes the mechanism.
+**The audit (done).** The per-op idempotency audit classifies the client-facing non-idempotent set at
+**~26 operations** in two tiers (A = durable entry strictly required, B = suppress a spurious error),
+superseding the earlier "~10" estimate. The hazard is **re-plan** (re-executing on the leader), not
+follower replay.
 
-**Consequences (as recorded, pending the audit).** The DB batch is already idempotent (whole-object
-puts); only *re-execution* is non-idempotent (SCM alloc + quota Merge), so the audit scope is ~10 ops,
-not 47. The likely invariant for non-idempotent ops is atomic-with-data-batch. Deferred until the audit
-exists.
+**Consensus state.** Raised by ivandika3 and kerneltime; resolved by the retry companion + the audit.
+This decision *addresses* `RC-ivandika-retry-cache-semantics`. Tests: `T-retry-dedup-failover`,
+`T-retry-record-atomic`, `T-retry-handoff-gap`, `T-retry-stale-leader`, `T-batch-retry-recompose`.
+
+**Consequences.** The DB batch is already idempotent (whole-object puts); only *re-execution* is
+non-idempotent (SCM alloc + quota Merge + MPU + moves), so the audit scope is ~26 ops, not 47. The
+durable atomic-with-batch completion table is the mechanism. P-1 PRODUCTION enablement remains GATED
+until it LANDS in code (dev/staging may precede); the decision itself is locked.
 
 ```yaml
 id: D-OPEN-retry
@@ -4228,7 +4235,7 @@ flowchart LR
 - {id: RC-szetszwo-mgl, raised_by: szetszwo, concern: "Lock tree should lock ancestors (MGL); why no volume/root lock; volume rename?", raised_on: "PR#7583", status: addressed, resolved_by: [D-4], endorsed_by: []}
 - {id: RC-szetszwo-split-locking-doc, raised_by: szetszwo, concern: "Split OBS locking into its own design doc", raised_on: "PR#7583", status: adopted, resolved_by: [D-4], endorsed_by: []}
 - {id: RC-szetszwo-target3, raised_by: szetszwo, concern: "Compatibility may not matter if target is Ozone 3.0.0", raised_on: "PR#7583", status: addressed, resolved_by: [D-11], endorsed_by: []}
-- {id: RC-ivandika-retry-cache-semantics, raised_by: ivandika3, concern: "Batched Ratis txn answers many clients; how do retry/reply caches work?", raised_on: "PR#7583", status: deferred, resolved_by: [D-OPEN-retry], endorsed_by: []}
+- {id: RC-ivandika-retry-cache-semantics, raised_by: ivandika3, concern: "Batched Ratis txn answers many clients; how do retry/reply caches work?", raised_on: "PR#7583", status: resolved, resolved_by: [D-OPEN-retry], endorsed_by: []}
 - {id: RC-ivandika-terminology, raised_by: ivandika3, concern: "Use 'retryCache' not 'replayCache' (align with Ratis)", raised_on: "PR#7583", status: adopted, resolved_by: [], endorsed_by: []}
 - {id: RC-ivandika-audit, raised_by: ivandika3, concern: "Write audit logs will be leader-only now", raised_on: "PR#7583", status: addressed, resolved_by: [D-10], endorsed_by: []}
 - {id: RC-ivandika-seqdiagram, raised_by: ivandika3, concern: "Add detailed sequence diagrams ([HDDS-1595](https://issues.apache.org/jira/browse/HDDS-1595) style)", raised_on: "PR#7583", status: open, resolved_by: [], endorsed_by: []}
@@ -5256,26 +5263,25 @@ evidence:
 
 ---
 
-### B-retry-expiry — DEFERRED with the retry mechanism (no value fixed; bounded below by client-retry semantics)
+### B-retry-expiry — TTL sized by the resolved retry mechanism (bounded below by failover + client-retry horizon)
 
-The retry-cache entry's **lifetime/expiry** (`clientId#callId → response`) is **not fixed**
-because the retry/idempotency **mechanism itself is deferred** (D-OPEN-retry, status:
-deferred; companion §10) pending the per-operation idempotency audit. What **is** fixed today
-(and bounds the problem from below): the retry-cache entry is written by the **terminal step
-only** of a multi-step op (companion §4.3) — intermediate sub-steps are **idempotent by
-structure** (`create dir` on an existing dir is a no-op) and need **no** entry; and the DB
-batch is **already idempotent** for whole-object `Put`/`Delete` ops, so only **re-execution**
-of **non-idempotent** ops (SCM block allocation, quota `Merge`, table moves, soft-delete) is
-the real exposure — an audit scope of **~10 ops, not 47** (D-OPEN-retry consequence). The
-expiry value, retention policy, and whether the table is **durable+replicated** vs
-**in-memory-only** are exactly what D-OPEN-retry must decide; until then no `B-retry-expiry`
-number is asserted. This bound is a **placeholder with a defined lower bound** (terminal-step,
-non-idempotent-only), not a settled capacity.
+The retry-cache entry's **lifetime/expiry** (`clientId#callId → response`) is sized by the
+**resolved** retry mechanism (D-OPEN-retry, status: locked; companion `leader-execution-retry.md`
+R-2/§3.4): V1 is **TTL-only, durable, server-side**. The TTL is **bounded below** by the worst-case
+failover + client-retry horizon (a retry within the TTL is deduped; a retry after it may re-execute —
+`EXC-RETRY-1`); the table holds ≈ `write-rate × TTL` records on disk. What **is** fixed: the entry is
+written by the **terminal step only** of a multi-step op (companion §4.3) — intermediate sub-steps are
+**idempotent by structure** (`create dir` on an existing dir is a no-op) and need **no** entry; and the
+DB batch is **already idempotent** for whole-object `Put`/`Delete`, so only **re-execution** of
+**non-idempotent** ops (SCM block allocation, quota `Merge`, table moves, soft-delete — ~26 ops in two
+tiers) is the real exposure. The **table is durable+replicated** (resolved, not in-memory-only); the
+precise TTL **number** is a tuning value set at implementation against the failover+retry horizon, not a
+design constant.
 
-**Justification:** asserting an expiry value would imply a chosen mechanism; the mechanism is
-deferred behind a deliberate audit (D-OPEN-retry). The lower-bound facts (terminal-step-only;
-non-idempotent set ~10 ops; whole-object Puts already idempotent) are what is **verified** and
-constrain any eventual value.
+**Justification:** the mechanism is resolved (D-OPEN-retry, locked) and is TTL-only durable; the precise
+TTL number is a tuning value, not a design constant, sized against the failover + client-retry horizon.
+The lower-bound facts (terminal-step-only; non-idempotent set ~26 ops in two tiers; whole-object Puts
+already idempotent) are what is **verified** and constrain the value.
 
 ```yaml
 id: B-retry-expiry
@@ -6102,36 +6108,33 @@ locked); what remains is *implementation correctness*, not an open trade. The st
   is implemented (`T-quota-leader-flap` green) and the failover-window bound is enforced (applied-index
   gating). P-1 lands the commutative Merge AND the reservation.
 
-### R-retry — idempotency / retry-cache mechanism (DEFERRED; pending per-op audit)
+### R-retry — idempotency / retry-cache mechanism (RESOLVED → durable completion table; residual = implementation + EXC-RETRY-1)
 
 ```yaml
-- {id: R-retry, statement: "The retry/idempotency mechanism is unfixed: choice between (a) a durable replicated (clientId,callId)→response table written ATOMICALLY WITH THE DATA BATCH plus a leader-local in-flight registry, vs (b) in-memory-only retry state. A re-EXECUTED non-idempotent op (SCM block alloc, quota Merge, table move, soft-delete) double-applies; the DB *batch* is already idempotent (whole-object Puts), so only re-execution is the hazard. This risk is the gate on P-1 production enablement (D-OPEN-retry consequence): the OBS key production flag for {CreateKey, CommitKey, AllocateBlock, DeleteKey} is held until durable retry exists or those ops are proven safe under client retry; the quota double-apply leg is the failover path exercised by T-quota-failover (a client retry across a leader crash must not re-apply the quota Merge).", rationale: "Batched Ratis txn answers many clients, so retry/reply-cache semantics under batching are non-trivial (ivandika3). The non-idempotent set dictates which ops need the atomic durable entry; the audit scopes it to ~10 ops, not all 47.", provenance: verified, evidence: ["D-OPEN-retry (status deferred)", "RC-ivandika-retry-cache-semantics", "leader-execution-locking.md §10 retry note", "per-command inventory 2026-06-15"]}
+- {id: R-retry, statement: "The retry/idempotency mechanism is RESOLVED (D-OPEN-retry, locked): a durable replicated (clientId,callId)→response completion table written ATOMICALLY WITH THE DATA BATCH (one record per request in the batch, I-dedup-record-atomic) plus a leader-local in-flight registry; dedup checked at admission before execution. It is a NEW per-client mechanism, not an extension of Ratis's cache — the batched PersistDb submits under the OM's own (clientId,callId), so Ratis cannot dedup an individual client's retry (verified, prototype). A re-EXECUTED non-idempotent op (SCM block alloc, quota Merge, table move, soft-delete) double-applies on re-plan; the durable entry serves the committed retry verbatim instead. RESIDUAL: (1) implementation must LAND in code — the OBS key production flag for {CreateKey, CommitKey, AllocateBlock, DeleteKey} is held until then (dev/staging may precede); (2) EXC-RETRY-1 — a retry after the durable TTL may double-execute (closed only by the deferred ack-GC + lease, needs a client protocol field); (3) the audit's section-6 judgment calls (token/secret minting, CreateSnapshot id, post-commit ack point).", rationale: "Batched Ratis txn answers many clients, so retry/reply-cache semantics under batching are non-trivial (ivandika3) — resolved by a new per-client durable completion table. The audit (done) classifies the non-idempotent set at ~26 ops in two tiers, not ~10.", provenance: verified, evidence: ["D-OPEN-retry (status locked)", "leader-execution-retry.md R-1..R-5, §3", "leader-execution-idempotency-audit.md (~26 ops, two tiers)", "RC-ivandika-retry-cache-semantics", "#7406 prototype: batched submit under OM clientId, no new-path dedup (// TODO handle replay)"]}
 ```
 
-Deferred, not decided (D-OPEN-retry, `status: deferred`). The shape of the deferral:
+Resolved (D-OPEN-retry, `status: locked`); what remains is implementation, not a decision. The state of the record:
 
-- **Why it can be deferred safely.** The replicated DB *batch* is already idempotent by
-  construction — whole-object Puts and Deletes re-applied produce the same DB state. The hazard
-  is exclusively **re-execution** of a non-idempotent *plan*: re-running a commit that does an
-  SCM block allocation, a commutative quota `Merge`, a table move, or a soft-delete would
-  double-apply (e.g. double-count quota). So the question is not "how do 47 ops handle retry"
-  but "which ~10 non-idempotent ops need the atomic durable retry entry" (D-OPEN-retry
-  consequences: "audit scope ~10 ops, not 47").
-- **The terminology constraint (do not regress).** Use `retryCache`, not `replayCache`, to
-  align with Ratis (`RC-ivandika-terminology`, status adopted). This is a settled naming
-  decision even though the mechanism is deferred.
-- **The likely landing.** D-OPEN-retry records "atomic-with-data-batch is the likely invariant
-  for non-idempotent ops" — i.e. when the mechanism is chosen it will most plausibly be a
-  durable `(clientId, callId) → response` entry written in the *same* batch as the data (so the
-  retry entry and the data commit-or-fail together), plus a leader-local in-flight registry to
-  short-circuit retries that arrive while the original is still in flight. The locking
-  companion's §4.3/§10 already constrains the *framework* contract: the retry-cache entry is
-  written by the **terminal step only**; intermediate multi-step sub-ops are idempotent by
-  structure and need no entry (locking §4.3).
-- **Closure gate.** This risk closes when the per-operation idempotency audit exists and
-  D-OPEN-retry is decided. No retry mechanism is fixed until that audit classifies every OM
-  write as idempotent or non-idempotent under client retry (locking §10). The audit is a
-  prerequisite, recorded but not yet performed.
+- **Why it is safe.** The replicated DB *batch* is already idempotent by construction — whole-object Puts
+  and Deletes re-applied produce the same DB state. The hazard is exclusively **re-execution (re-plan)** of
+  a non-idempotent op: re-running a commit that does an SCM block allocation, a commutative quota `Merge`, a
+  table move, or a soft-delete would double-apply (e.g. double-count quota). The durable completion table
+  serves a committed retry from the cache instead of re-planning it.
+- **The audit (done).** The per-op idempotency audit classifies **~26 client-facing non-idempotent ops** in
+  two tiers (A = durable entry strictly required, B = suppress a spurious error) — superseding the earlier
+  "~10" estimate. R-4 caches every write op uniformly; the tiers size the TTL (`B-retry-expiry`), not a
+  runtime switch.
+- **Terminology (settled).** Use `retryCache`, not `replayCache`, to align with Ratis
+  (`RC-ivandika-terminology`, adopted).
+- **The mechanism (resolved).** A durable `(clientId, callId) → response` entry written in the *same* batch
+  as the data (`I-dedup-record-atomic`), plus a leader-local in-flight registry to short-circuit retries
+  arriving while the original is in flight. The locking companion's §4.3/§10 constrains the framework
+  contract: the entry is written by the **terminal step only**; intermediate multi-step sub-ops are
+  idempotent by structure (locking §4.3).
+- **Closure.** The *decision* is closed (companion `leader-execution-retry.md` R-1..R-5). The *residual* is
+  implementation landing (the P-1 production gate), the `EXC-RETRY-1` after-TTL double-execute (closed only
+  by the deferred ack-GC + lease), and the audit's §6 judgment calls.
 
 ### R-mpu-large-value — large MPU DB values inflate the replicated patch (OPEN review concern)
 

@@ -150,12 +150,16 @@ objectID differs from a lost first attempt):
 CreateVolume, CreateBucket, CreateTenant, DeleteVolume, DeleteBucket, DeleteTenant,
 SetVolumeProperty/owner, DeleteSnapshot, RenameSnapshot, TenantRevokeUserAccessId.
 
-**AMBIGUOUS — gated on an unfixed design choice:**
-- **CreateKey / CreateFile / InitiateMPU** — harmful only via `UniqueId.next()` clientID/uploadID churn
-  (see §5 lever 1) and block leak; a durable entry fixes both, OR deterministic ids remove the N1 tag.
-- **DeleteKeys / RenameKeys** — batch atomicity: if LSE treats a batch as one `(clientId,callId)` unit,
-  the cached response replays and the subset-divergence disappears; if batches stay best-effort
-  per-entry, no per-element cache helps and the contradiction is intrinsic.
+**RESOLVED → Tier A (the design choices are now made):**
+- **CreateKey / CreateFile / InitiateMPU** — `R-5` (retry doc) rejected the deterministic-id lever as
+  collision-unsafe, so the `UniqueId.next()` clientID/uploadID churn (and block leak) stands → these need
+  the durable entry (**Tier A**). With R-4 uniform caching the entry is written regardless; the point is
+  that they are *non-idempotent* and the entry is *load-bearing*, not merely spurious-error suppression.
+- **DeleteKeys / RenameKeys** — batch atomicity is fixed as **one `(clientId,callId)` retry unit**: the
+  whole batch is one client request → one completion record capturing the (possibly partial,
+  `PARTIAL_DELETE`/`PARTIAL_RENAME`) response, replayed verbatim on retry. The subset-divergence
+  disappears and a re-planned `Merge` cannot double-count (**Tier A**). (Not best-effort per-entry — a
+  per-element cache was the rejected alternative.)
 
 **Idempotent (no retry entry needed):** CreateDirectory, RecoverLease, DeleteOpenKeys, PurgeKeys,
 SetVolumeProperty/quota, SetBucketProperty (quota+owner), Add/Remove/SetAcl (all object types),
@@ -179,7 +183,7 @@ Set/RevokeS3Secret, FinalizeUpgrade, Prepare, CancelPrepare, SetSafeMode, SetRan
 **Conclusion for the mechanism:** deterministic ids alone are insufficient (they don't cover N3/N4); a
 durable replicated retry entry is necessary for the Tier-A/Tier-B set; a leader-local in-flight registry
 is additionally needed to serialize *concurrent* retries before the first commit lands. The protection
-set is ~26 client-facing ops (not ~10), but lever 1 shrinks the create-path subset.
+set is ~26 client-facing ops (not ~10) — the create-path subset stays Tier A (R-5 rejected the deterministic-id lever).
 
 ## 6. Flagged judgment calls (for design review)
 
@@ -188,7 +192,8 @@ set is ~26 client-facing ops (not ~10), but lever 1 shrinks the create-path subs
   whether secret/token minting moves out of the re-planned path.
 - **CreateSnapshot** — the snapshotId is minted in `preExecute` and names an on-disk checkpoint dir; a
   lost-window re-plan strands a checkpoint. Decide: deterministic snapshotId, or retry-entry coverage.
-- **Batch ops (DeleteKeys/RenameKeys)** — fix the batch-atomicity contract (one retry unit vs per-entry).
+- **Batch ops (DeleteKeys/RenameKeys)** — RESOLVED: **one `(clientId,callId)` retry unit**; the completion
+  record captures the partial-success response (`PARTIAL_DELETE`/`PARTIAL_RENAME`), replayed verbatim (Tier A). Not best-effort per-entry.
 - **QuotaRepair** — the one unguarded additive delta; whether it becomes the *exact-quota mitigation*
   path (per `D-OPEN-quota-enforcement`) interacts with its retry handling.
 - **Durability ordering** — the self-healing ops (§3.1 footnote) are only safe if the first mutation is

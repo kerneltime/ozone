@@ -174,9 +174,9 @@ Column meanings:
 > specifically **SCM block allocation** (a fresh `allocateBlock` returns *new* block IDs every call)
 > and **quota `Merge`** (a second `+correctedSpace` double-counts). The inventory's idempotency
 > column reports **(b)** — re-execution — because that is what dictates which ops need the durable
-> retry entry. Per the deferred-retry note (master D-OPEN-retry; locking §10), the DB batch is
-> already idempotent and **only re-execution** of the SCM/quota/move/soft-delete set is not, which
-> is why the retry audit scope is ~10 ops, not 47.
+> retry entry. Per D-OPEN-retry (master, resolved; locking §10), the DB batch is already idempotent
+> and **only re-execution** of the SCM/quota/move/soft-delete set is not, which is why the retry audit
+> classifies ~26 client-facing ops in two tiers, not 47.
 
 ---
 
@@ -914,14 +914,16 @@ provenance: verified
 evidence: ["master D-OPEN-quota-enforcement (locked, exact)", "I-quota-admission-exact, I-quota-reservation-lifecycle, B-quota-failover-window", "leader-execution-locking.md EXC-3 (narrowed)", "#7406 failover audit 2026-06-21"]
 ```
 
-### 6.2 D-OPEN-retry (DEFERRED — scopes which ops in the inventory need a durable retry entry)
+### 6.2 D-OPEN-retry (RESOLVED — durable replicated completion table; scopes which ops need a durable entry)
 
-D-OPEN-retry (master, status `deferred`) asks whether idempotency uses an in-flight registry +
-**durable replicated `(clientId, callId) → response` table written atomically with the data batch**,
-versus in-memory-only. It is **deferred pending the per-operation idempotency audit** — which this
-inventory now supplies. The idempotency column (§2, §4) is exactly that audit: the **DB batch is
-already idempotent** (whole-object `Put`/`Delete`), and **only re-execution** of the non-idempotent
-set is unsafe. From the inventory, the non-idempotent-on-re-execution set is:
+D-OPEN-retry (master, status `locked`; companion `leader-execution-retry.md` R-1..R-5) uses an in-flight
+registry + a **durable replicated `(clientId, callId) → response` completion table written atomically
+with the data batch** (one record per request in the batch), checked at admission before execution —
+**resolved**, not in-memory-only. The per-operation idempotency audit
+(`leader-execution-idempotency-audit.md`) supplies the classification. The idempotency column (§2, §4)
+is that audit: the **DB batch is already idempotent** (whole-object `Put`/`Delete`), and **only
+re-execution (re-plan)** of the non-idempotent set is unsafe. The re-plan-unsafe set the phasing must
+track:
 
 - **SCM-bearing:** C1 CreateKey, C3 AllocateBlock, C5 CreateFile (fresh block IDs each plan).
 - **Quota-`Merge`-bearing:** C2 CommitKey, C4 DeleteKey, C14 CommitMPUPart, C15 CompleteMPU,
@@ -929,28 +931,26 @@ set is unsafe. From the inventory, the non-idempotent-on-re-execution set is:
 - **Table-move:** C11 SnapshotMoveDeletedKeys, C12 SnapshotMoveTableKeys (re-move double-counts
   reclaim).
 
-That is ~10 ops, **not 47** (master D-OPEN-retry `consequences`: "audit scope ~10 ops"). The
-naturally-idempotent pure `Put`/`Delete` ops (all of Group A, plus B2/B3 renames) tolerate weaker
-handling. The likely invariant (master) is "durable retry entry written **atomic-with-data-batch**"
-for the non-idempotent set only — but **no retry mechanism is fixed** until D-OPEN-retry is taken.
+The audit's full client-facing non-idempotent set is **~26 ops** in two tiers (Tier A durable-entry-
+required, Tier B suppress-spurious-error); the list above is the phasing-critical re-plan subset. R-4:
+V1 caches **every** write op uniformly (the tiers size the TTL, not a runtime switch), so the
+naturally-idempotent `Put`/`Delete` ops also get an entry but their TTL residual is harmless.
 
 **Phasing consequence.** Each phase that introduces a non-idempotent op (P-1 SCM+quota, P-3 moves,
-P-4 MPU, P-5 DeleteKeys) must leave the **terminal-step retry-cache write point** as a seam (the
-multi-step framework already writes the retry-cache entry on the terminal step only — locking §4.3),
-so that when D-OPEN-retry lands, the durable atomic-with-batch entry can be wired in at that seam
-for exactly the ~10 ops without touching the idempotent ones. **Anti-pattern:** do not add a durable
-retry table for Group A ops "for uniformity" — they do not need it, and D-OPEN-retry has not chosen
-the mechanism.
+P-4 MPU, P-5 DeleteKeys) wires the **terminal-step retry-cache write** (the multi-step framework writes
+the entry on the terminal step only — locking §4.3). The decision is locked; what each phase gates is the
+mechanism **landing in code** — P-1's production flag for {CreateKey, CommitKey, AllocateBlock, DeleteKey}
+is held until the durable retry path lands (dev/staging may precede).
 
 ```yaml
-# touchpoint, not a new decision — mirrors master D-OPEN-retry
+# touchpoint, not a new decision — mirrors master D-OPEN-retry (resolved)
 id: D-OPEN-retry
-status: deferred
+status: locked
 phase_touchpoints: [P-1, P-3, P-4, P-5]
 non_idempotent_on_reexec: [CreateKey, AllocateBlock, CreateFile, CommitKey, DeleteKey, CommitMPUPart, CompleteMPU, DeleteKeys, SnapshotMoveDeletedKeys, SnapshotMoveTableKeys]
-phasing_rule: "leave terminal-step retry-cache write as a seam (locking §4.3); wire durable atomic-with-batch entry only for the ~10 non-idempotent ops once D-OPEN-retry is taken; never add it to Group A"
+phasing_rule: "wire the terminal-step durable atomic-with-batch completion entry (locking §4.3) at each phase introducing a non-idempotent op; R-4 caches every write op uniformly; P-1 production flag held until the durable retry path lands in code (dev/staging may precede)"
 provenance: verified
-evidence: ["master D-OPEN-retry", "leader-execution-locking.md §4.3,§10", "inventory §4 idempotency column"]
+evidence: ["master D-OPEN-retry (locked)", "leader-execution-retry.md R-1..R-5", "leader-execution-locking.md §4.3,§10", "audit §4 idempotency column (~26 ops, two tiers)"]
 ```
 
 ---
@@ -972,9 +972,10 @@ A compact restatement, so a reviewer can check any single phase's PRs against th
   counter (D-12) is the one that bites first and silently if skipped.
 - **Hard-first ordering is a risk control, not a preference (D-13).** P-5/P-6 depend *behind* the
   hard phases; the easy work can never be used to declare premature victory.
-- **The open decisions stay open (§6.1, §6.2).** P-1 lands the quota `Merge` unconditionally but
-  keeps exact-reservation separable; the non-idempotent ~10 ops keep a retry-cache seam without
-  fixing the mechanism. Do not pre-settle either in a phase PR.
+- **The resolved decisions land in code, not re-litigated (§6.1, §6.2).** P-1 lands the quota `Merge`
+  AND the leader-local reservation (exact admission, resolved), and wires the durable retry-cache entry
+  (resolved) at the terminal step for the non-idempotent ops. Both decisions are locked; the phase PRs
+  implement them, they do not re-open them.
 - **P-7 deletes nothing until everything is migrated.** The legacy path's deletion depends on the
   full P-3/P-4/P-5/P-6 set; a dead-code sweep precedes the delete.
 

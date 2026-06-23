@@ -224,7 +224,13 @@ On each write, before acquiring locks or executing:
   executed patch is **term-tagged** and refused at submit if the term advanced — the
   leader-side analogue of an epoch fence, closing the window where an old leader finishes
   *executing* after losing leadership (we execute before replicating, so this window is
-  real).
+  real). And on the *acquiring* side: a **new leader withholds admission of new planned
+  execution until its applied-index has caught the committed-index observed at the term
+  change** — it never plans against a prefix it has not yet applied. Until catch-up, the new
+  leader's leader-local state (the in-flight registry, and the quota reserve) is not yet
+  authoritative. This applied-index catch-up gate is the hook the quota reserve's
+  failover-window bound depends on (master `B-quota-failover-window` /
+  `I-quota-reservation-lifecycle` #4).
 - `EXC-RETRY-1` (accepted residual): a retry of a non-idempotent operation **after** the
   durable TTL may double-execute. This is the same *kind* of residual as today's
   10-minute in-memory window, but durable and sized via `B-retry-expiry`. It is eliminated
@@ -296,7 +302,9 @@ has the identical leak; batching neither causes nor worsens it.
   This is the atomic-replace ("install the new before releasing the old") pattern applied
   to dedup state: the durable record is the new resource, the in-flight entry the old.
 - **I-dedup-fence** — Patches from a leader that has lost the term cannot commit (Raft
-  term) and are refused at submit via the term tag (§3.5).
+  term) and are refused at submit via the term tag; and a newly-acquired leader withholds
+  admission of new planned execution until its applied-index catches the committed-index
+  observed at the term change (the catch-up gate the quota reserve hooks onto) (§3.5).
 - **I-inner-domain-agnostic** *(reused from parent)* — Followers apply the completion
   record as opaque bytes alongside the data patch; no node re-derives the response.
 

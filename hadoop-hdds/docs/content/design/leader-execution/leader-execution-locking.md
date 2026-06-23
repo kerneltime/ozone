@@ -497,15 +497,15 @@ These exceptions are stated so a reviewer reads them as deliberate, not as gaps.
 - `SetAcl`/`SetTimes` placement (expected: `S(bucket)+S(P)+X(P,name)`). (`AllocateBlock` placement is now specified in §2.1.)
 - Volume-lock escape hatch: none today (no volume rename); builder-extensible if a future
   volume op can invalidate an in-flight key op.
-- **Retry / idempotency mechanism — DEFERRED (parent-level decision; gates the framework's
-  terminal-step retry-cache contract).** The choice between (a) a durable, replicated
-  `(clientId, callId) → response` table written **atomically with the data batch** plus a
-  leader-local in-flight registry, versus (b) in-memory-only retry state, is **deferred
-  pending a thorough per-operation audit that classifies every OM write operation as
-  idempotent or non-idempotent under client retry/replay.** The non-idempotent set — any op
-  using a commutative `Merge` (quota), SCM block allocation, table moves, or soft-delete —
-  is what dictates which operations require the atomic durable retry entry: a re-planned
-  non-idempotent op double-applies (e.g. double-counts quota). Naturally-idempotent pure
-  `Put`/`Delete` ops may tolerate weaker handling. No retry mechanism is fixed until this
-  operation-by-operation idempotency audit exists. (This note lives here for now; it belongs
-  in the parent `leader-planned-execution.md` once that design doc is reorganized.)
+- **Retry / idempotency mechanism — RESOLVED (parent-level decision D-OPEN-retry, locked;
+  companion `leader-execution-retry.md` R-1..R-5).** The mechanism is (a): a durable, replicated
+  `(clientId, callId) → response` completion table written **atomically with the data batch**, one
+  record per request in the batch, plus a leader-local in-flight registry; dedup checked at admission
+  before execution (NOT in-memory-only — and not a thin extension of Ratis's cache, since the batched
+  submit collapses the N client keys into one Ratis key). The per-operation audit
+  (`leader-execution-idempotency-audit.md`, done) classifies the non-idempotent set at **~26 ops** in
+  two tiers — any op using a commutative `Merge` (quota), SCM block allocation, table moves, or
+  soft-delete is re-plan-unsafe (a re-planned non-idempotent op double-applies). R-4 caches every write
+  op uniformly. What remains is implementation landing in code (the P-1 production gate). (This note
+  lives here for now; it belongs in the parent `leader-planned-execution.md` once that design doc is
+  reorganized.)

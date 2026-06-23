@@ -719,62 +719,58 @@ same path (P-1), with its lifecycle as the companion constraint.
 
 ---
 
-## C-retry — idempotency / retry-cache mechanism (DEFERRED)
+## C-retry — idempotency / retry-cache mechanism (RESOLVED → durable replicated completion table)
 
 ```yaml
 id: C-retry
 target_files:
-  - hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/execution/retry/  # NEW (shape only; not built in P-0): InFlightRegistry, (optional) ReplicatedResponseTable
+  - hadoop-ozone/ozone-manager/src/main/java/org/apache/hadoop/ozone/om/execution/retry/  # NEW (P-1): InFlightRegistry, ReplicatedResponseTable (durable (clientId,callId)->response CF)
 interface: |
-  // SHAPE ONLY — the choice is OPEN (D-OPEN-retry):
-  //  (a) leader-local in-flight registry  (clientId,callId) -> CompletableFuture<response>   [dedupes concurrent retries]
-  //   +  durable replicated table (clientId,callId) -> response  WRITTEN ATOMICALLY WITH THE DATA BATCH  [survives failover]
-  //  (b) in-memory-only retry state                                                          [weaker; loses on failover]
-  // terminal step records exactly one entry (D-6, locking §4.3); intermediate steps are idempotent by structure
+  // RESOLVED (D-OPEN-retry, locked): a NEW per-client mechanism, NOT an extension of Ratis's cache
+  //  leader-local in-flight registry  (clientId,callId) -> CompletableFuture<response>   [dedupes concurrent retries; attach-to-future]
+  //   +  durable replicated table (clientId,callId) -> response  WRITTEN ATOMICALLY WITH THE DATA BATCH + TransactionInfo  [survives failover]
+  //  one record per request in the batch; dedup checked at admission BEFORE execution (committed retry served verbatim, never re-planned)
+  //  TTL-only durable eviction, leader-decided + replicated; term-fenced (I-dedup-fence). terminal step records (D-6, locking §4.3)
 depends_on: [D-OPEN-retry, D-7, C-orchestrator, C-merge-operator]
-implements: []
-tests: []
+implements: [I-dedup-fence]
+tests: [T-retry-dedup-failover, T-retry-record-atomic, T-retry-handoff-gap, T-retry-stale-leader, T-batch-retry-recompose]
 anti_patterns:
-  - "MUST NOT fix a mechanism before the per-operation idempotency audit exists (D-OPEN-retry). The audit classifies every OM write as idempotent or non-idempotent under client retry/replay."
-  - "MUST NOT assume the DB batch needs a retry entry to be idempotent — whole-object Puts/Deletes already are; only RE-EXECUTION of a non-idempotent op (SCM block alloc, quota Merge, table move, soft-delete) double-applies."
+  - "MUST NOT rely on Ratis's retry cache for the new path — the batched PersistDb submits under the OM's own (clientId,callId), collapsing N client keys into one Ratis key, so Ratis cannot dedup an individual client's retry. A NEW per-client durable table is required (D-OPEN-retry)."
+  - "MUST NOT assume the DB batch needs a retry entry to be idempotent — whole-object Puts/Deletes already are; only RE-EXECUTION (re-plan) of a non-idempotent op (SCM block alloc, quota Merge, table move, soft-delete) double-applies."
   - "MUST NOT write a retry-cache entry on a non-terminal step (D-6) — only the terminal step records (clientId#callId -> response)."
   - "MUST NOT name it 'replayCache' — align with Ratis: 'retryCache' (RC-ivandika-terminology)."
-phase: P-1+  # deferred; scoped, not built, in P-0
+phase: P-1  # mechanism lands at P-1 (the production gate); scoped (not built) in P-0
 provenance: verified
 evidence:
-  - "DEFERRED with full rationale — master D-OPEN-retry (status deferred); leader-execution-locking.md §10 (last bullet, the audit gate)"
+  - "RESOLVED — master D-OPEN-retry (status locked); leader-execution-retry.md R-1..R-5, §3; leader-execution-locking.md §10"
   - "terminal-step-only retry entry — leader-execution-locking.md §4.3; raised by ivandika3 (RC-ivandika-retry-cache-semantics), terminology RC-ivandika-terminology"
-  - "audit scope ~10 non-idempotent ops not 47 — per-command inventory 2026-06-15 (master D-OPEN-retry consequences)"
+  - "audit scope ~26 non-idempotent ops (two tiers) not 47 — leader-execution-idempotency-audit.md"
 ```
 
-**This component is deferred by decision (D-OPEN-retry), not omitted by oversight.** It is
-documented here so the framework reserves the seam and so a reader does not mistake its absence
-for a gap — exactly the "state exceptions as deliberate" discipline the locking companion uses.
+**This component is RESOLVED by decision (D-OPEN-retry), built at P-1.** It is documented here so the
+framework reserves the seam in P-0 and so a reader sees the mechanism, not a gap.
 
-**Why it is open.** ivandika3 raised the question on [#7583](https://github.com/apache/ozone/pull/7583): a **batched** Ratis transaction can
-answer **many** clients, so how do retry/reply caches work
-(RC-ivandika-retry-cache-semantics)? The honest answer is that the mechanism depends on a
-classification that does not yet exist. The framing (master D-OPEN-retry; locking §10): the **DB
-batch is already idempotent** for whole-object `Put`/`Delete` ops (re-applying the same bytes is
-a no-op). The danger is **RE-EXECUTION** of a **non-idempotent** op — one that does SCM block
-allocation, a commutative quota `Merge` (C-merge-operator — a re-planned commit double-counts),
-a table move, or a soft-delete. Only those ops need the durable retry entry. The per-command
-inventory (2026-06-15) scopes the non-idempotent set at **~10 ops, not 47** — so the audit is
-tractable, but it **gates the choice**.
+**Why it is needed.** ivandika3 raised the question on [#7583](https://github.com/apache/ozone/pull/7583): a **batched** Ratis transaction can
+answer **many** clients, so how do retry/reply caches work (RC-ivandika-retry-cache-semantics)? Verified
+in the prototype: the batch submits under the OM's own `(clientId, callId)`, so Ratis's retry cache
+cannot dedup an individual client's retry — a NEW per-client mechanism is required. The **DB batch is
+already idempotent** for whole-object `Put`/`Delete` (re-applying the same bytes is a no-op); the danger
+is **RE-EXECUTION (re-plan)** of a **non-idempotent** op — SCM block allocation, a commutative quota
+`Merge` (C-merge-operator — a re-planned commit double-counts), a table move, or a soft-delete. The
+audit (`leader-execution-idempotency-audit.md`, done) classifies the non-idempotent set at **~26 ops in
+two tiers**.
 
-**The shape, not the choice.** Two candidate shapes are on the table and **neither is fixed**:
-(a) a **leader-local in-flight registry** `(clientId, callId) → future` (dedupes concurrent
-retries cheaply) **plus** a **durable, replicated `(clientId, callId) → response` table written
-atomically with the data batch** (survives failover — the likely invariant for non-idempotent
-ops); or (b) **in-memory-only** retry state (weaker; loses dedup on failover, tolerable only for
-naturally-idempotent ops). The **atomic-with-data-batch** property is the leading candidate
-invariant for the non-idempotent set.
+**The mechanism (resolved — D-OPEN-retry / leader-execution-retry.md R-1..R-5).** A **leader-local
+in-flight registry** `(clientId, callId) → future` (dedupes concurrent retries; attach-to-future)
+**plus** a **durable, replicated `(clientId, callId) → response` completion table written atomically
+with the data batch + TransactionInfo** (`I-dedup-record-atomic`, survives failover), one record per
+request in the batch, checked at admission before execution. R-4: every write op is cached uniformly
+(the tiers size the TTL, not a runtime switch). Not in-memory-only; not a thin Ratis-cache extension.
 
-**The one fixed sub-decision (D-6, carried).** Regardless of mechanism, the retry entry is
-written by the **terminal step only** of a multi-step request; intermediate sub-steps are
-idempotent by structure (locking §4.3). And the name is **`retryCache`**, not `replayCache`
-(RC-ivandika-terminology, adopted). Beyond these, **no mechanism is committed until the
-per-operation idempotency audit exists**.
+**Fixed sub-decisions (carried).** The retry entry is written by the **terminal step only** of a
+multi-step request; intermediate sub-steps are idempotent by structure (locking §4.3). The name is
+**`retryCache`**, not `replayCache` (RC-ivandika-terminology, adopted). What remains is the mechanism
+landing in code (the P-1 production gate).
 
 ---
 

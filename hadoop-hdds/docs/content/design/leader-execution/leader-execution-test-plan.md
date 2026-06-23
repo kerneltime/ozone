@@ -1324,13 +1324,15 @@ Stated so a reviewer reads the omissions as intentional, not as gaps:
   resolved exact); over-commit only in the bounded failover window (`B-quota-failover-window`). The
   formal pin `T-quota-exact-tlc` / `QuotaOvercommit.cfg` is expected to turn green once `ObsImpl`
   models the reservation (captured verdict pending, formal thread).
-- **Retry/idempotency mechanism correctness end-to-end.** `D-OPEN-retry` is **deferred**
-  (`leader-planned-execution.md` D-OPEN-retry; `leader-execution-locking.md` §10) pending the
-  per-operation idempotency audit. The terminal-step retry-cache *placement* is exercised by
-  `T-8` (no double-apply), but the full durable-vs-in-memory replicated-response-table choice
-  is not tested until the audit fixes which ops require the atomic-with-data-batch entry. The
-  retry-cache code seam this will build on is verified at
-  `OzoneManagerRatisServer.java:559-567` (`checkRetryCache` / `getRetryCache().getIfPresent`).
+- **Retry/idempotency mechanism correctness end-to-end.** `D-OPEN-retry` is **resolved**
+  (`leader-planned-execution.md` D-OPEN-retry, locked; companion `leader-execution-retry.md` R-1..R-5;
+  audit done) — a durable replicated `(clientId,callId)→response` completion table written
+  atomic-with-batch. The terminal-step retry-cache *placement* is exercised by `T-8` (no double-apply)
+  and the mechanism by `T-retry-dedup-failover` / `T-retry-record-atomic` / `T-batch-retry-recompose`;
+  what is not yet *tested in code* is the implementation landing (the P-1 production gate). The seam this
+  builds on is verified at `OzoneManagerRatisServer.java:559-567` (`checkRetryCache` /
+  `getRetryCache().getIfPresent`) — but the new path needs a NEW per-client table, since the batched
+  submit collapses the N client keys into one Ratis key.
 - **Synchronous quota release on `rm -rf`** and **eager empty-intermediate-dir cleanup** —
   `EXC-1` and `B-2` are accepted limitations; the harness asserts *eventual* convergence and
   *bounded, idempotent-on-retry* leftover dirs, not synchronous/eager behavior.
