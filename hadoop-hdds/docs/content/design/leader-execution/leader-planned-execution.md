@@ -2689,11 +2689,28 @@ feature is available"; finalization is "is the feature available at all." A
 D-14 are `locked`, and D-14 `depends_on: [D-11]`, so the ordering is: finalize first, then
 the flag has meaning.
 
+**When finalization is crossed (timing — load-bearing for objectID disjointness).** The
+`OMLayoutFeature` finalization is crossed **after the P-0 binary rollout completes and before
+P-1 migrates any command** — never at the end. P-0 lands the substrate inert; the operator
+finalizes once every OM is on the new binary; only then do the P-1+ flags have any effect (the
+negative constraint above). The phasing companion's "P-7 … finalize" is a **mislabel**: P-7
+deletes the legacy path and drops the per-command flags, it does **not** cross the layout feature
+(which happened pre-P-1). **Seed atomicity:** `ManagedIndexService.seedFromFinalization(max(observed
+Ratis index)+1)` MUST complete *within* the finalize transition, before the feature is marked
+available — so the very first managed-index objectID is minted from an already-seeded counter.
+Because finalization precedes all migration, **no command ever mints from an unseeded counter**:
+pre-finalization the legacy path mints from the Ratis index exactly as today, and the D-12 retrofit
+(legacy sources from the managed counter) activates *at* finalization, together with the seed. This
+is why old and new objectID ranges are disjoint by construction (`I-objectid-disjoint`) and the
+seed timing is not a mixed-window collision hazard.
+
 ### 16.2 The managed-index handoff (seed = max(Ratis idx)+1)
 
 The new `ManagedIndexService` is a monotonic counter that replaces "Ratis index" as the
-source of object identity. On the **first** finalization, the managed counter must be seeded
-so that it never collides with any objectID the legacy path already minted. Legacy objectIDs
+source of object identity. On the **first** finalization — crossed after the P-0 rollout and
+**before any command migrates** (§16.1), and whose seed completes *within* the finalize
+transition before any new-path mint — the managed counter must be seeded so that it never
+collides with any objectID the legacy path already minted. Legacy objectIDs
 are `getObjectIdFromTxId(epoch, ratisIndex)` (`OmUtils.java:766-769`, calling
 `addEpochToTxId` at `:778-783`). Therefore the managed counter is seeded to
 **`max(observed Ratis index) + 1`** at handoff, so the first managed index is strictly
@@ -2722,8 +2739,11 @@ its own managed index — the low 8 bits go dead-zero (D-8 consequences; locking
 This is `I-managed-index-monotonic` applied to the mixed-mode boundary (canonical definition:
 §24): object identity (objectID/updateID) is sourced from exactly one monotonic ManagedIndex
 counter on BOTH the legacy and new execution paths during mixed mode; the counter is seeded
-at finalization to `max(observed Ratis index)+1` so new objectIDs are strictly greater than
-any legacy objectID; the encoding `getObjectIdFromTxId(epoch,index)` is unchanged. Two
+at finalization (crossed before any command migrates, §16.1) to `max(observed Ratis index)+1`
+so new objectIDs are strictly greater than any legacy objectID; pre-finalization the legacy
+path mints from the Ratis index unchanged (the managed counter is unused until the
+finalize-seed), so no mint ever draws from an unseeded counter; the encoding
+`getObjectIdFromTxId(epoch,index)` is unchanged. Two
 counters minting objectIDs in the unbounded mixed-binary/mixed-flag window could collide and
 alias two distinct objects (silent corruption); one shared monotonic counter, seeded above
 the legacy high-water mark, makes old and new objectID ranges disjoint by construction. The
@@ -5667,8 +5687,12 @@ and PR-0c (the `OMLayoutFeature` finalization gate):
    (D-12) so old and new are disjoint *by construction* (D-8: "old/new objectID disjoint by
    construction on upgrade"). This is a Phase-0 prerequisite before ANY command migrates
    (D-12 consequence) — it is the single most important reason P0 cannot be skipped or
-   reordered. The managed index is seeded at `max(Ratis index) + 1` at finalization (§16), so
-   the new counter starts strictly above every index the legacy path ever used.
+   reordered. The managed index is seeded at `max(Ratis index) + 1` at finalization (§16) — and
+   finalization is crossed after the P-0 rollout and **before P-1 migrates any command** (§16.1),
+   so the counter is seeded before its first use; the new counter starts strictly above every
+   index the legacy path ever used, and pre-finalization the legacy path mints from the Ratis
+   index unchanged. The D-12 retrofit and the seed activate **together** at finalization — there
+   is no window in which a managed-index mint draws from an unseeded counter.
 
 2. **PR-0b — dual-path applied-index durability.** The legacy double buffer is the *sole* RocksDB
    writer today and it durably advances the applied index by writing `#TRANSACTIONINFO` in the
@@ -6219,7 +6243,7 @@ Status column below (each `resolved` row names the invariant/test/section that c
 | RF | Sev | Tier | Finding → recommendation | Status |
 |----|-----|------|--------------------------|--------|
 | RF-1 | BLOCKER | SECURITY | Durable retry dedup table (retry R-1/§3.2) keys on the client-asserted envelope `clientId` and returns the cached `OMResponse` verbatim with no UGI re-check; `GetS3Secret`/`GetDelegationToken` responses carry plaintext secrets → cross-user disclosure (U2 forging U1's `(clientId,callId)`). Today's Ratis cache is IPC-connection-bound (`OzoneManagerRatisServer.java:514`). **Rec:** bind each completion entry to the server-derived UGI (`OMRequest.userInfo`), assert owner==caller on the dedup hit, add `I-dedup-identity-bound` + `T-retry-cross-user-denied`. | **resolved** — retry §3.1 owner-binding + §3.2 hit-path re-check + `I-dedup-identity-bound`; master §17.4; `T-retry-cross-user-denied` |
-| RF-2 | BLOCKER | SAFETY | D-12 objectID retrofit goes live at P-0 but `ManagedIndexService` is seeded only at finalization (P-7); the pre-finalization window mints from an unseeded `AtomicLong(0)`, colliding with persisted low-Ratis-index objectIDs (`OmUtils.java:766-783`). Master self-contradicts at :5657-5658 vs :5699-5700. Falsifies `I-objectid-disjoint`. **Rec:** seed `max(persisted managed idx, lastAppliedRatisIndex)+1` at P-0 / first post-upgrade leader election; persist `#MANAGED_INDEX` from P-0; add a pre-existing-low-index collision test. | open |
+| RF-2 | MINOR (was BLOCKER) | CONSISTENCY | **Blocker severity RETRACTED after end-to-end tracing of finalization timing.** The objectID-collision claim assumed finalization is crossed *last* (P-7); but §16.1 mandates **finalize-first** (the per-command flag MUST NOT enable the new path on an un-finalized cluster), so the managed counter is seeded *before any command migrates* — the D-12 retrofit is inert at P-0 and activates *at* finalization together with the seed, so no mint ever draws from an unseeded counter and `I-objectid-disjoint` holds. The genuine defect was a CONSISTENCY contradiction: §16.1 (finalize-first) vs the phasing P-7 "finalize" mislabel (finalize-last). **Resolved:** reconciled finalization timing across §16.1/§16.2/§16.3/P-0; fixed the phasing P-7 heading/scope/narrative ("finalize" → "delete legacy path + drop flags; layout finalization already crossed pre-P-1"); added the seed-atomicity precondition (`seedFromFinalization` completes within the finalize transition before any new-path mint). | **resolved** |
 | RF-3 | BLOCKER | SAFETY | Orchestrator releases held locks only in the Ratis success-continuation (`components.md:354` `thenCompose`); an exceptional Ratis completion leaks the striped permits — no timeout (I-8), no reaper → the stripe deadlocks permanently. **Rec:** `whenComplete((c,err)->release(handle)).thenCompose(...)` so release runs on every terminal outcome (I-9); add `T-orchestrator-exceptional-release`. | **resolved** — C-orchestrator `whenComplete` release + anti-pattern; `T-orchestrator-exceptional-release` |
 | RF-4 | MAJOR | SECURITY | R-4 caches every write's `OMResponse`; secret/token responses store the live credential in plaintext in the durable, replicated, TTL-lived completion CF — worse than today's in-memory single-node cache, and it silently bypasses `VaultS3SecretStore` when configured; revoke can't purge it. **Rec:** exclude/redact/encrypt credential-bearing responses; MUST-NOT-write `awsSecret` to the local CF when an external `S3SecretStore` is set; add `I-no-plaintext-secret-at-rest`. | open |
 | RF-5 | MAJOR | SAFETY | §17.1 claims ACL authz is uniformly in `preExecute` (leader-only, unchanged). False for key/bucket/prefix ACL ops + bucket-delete, whose `checkAcls` runs in `validateAndUpdateCache` (every node today: `OMKeyAclRequest.java:92`, `OMBucketAclRequest.java:92`, `OMPrefixAclRequest.java:81`, `OMBucketDeleteRequest.java:106`). A P-6 migrator could ship an op whose authz silently never runs. **Rec:** correct §17.1; add a migration invariant "if `checkAcls` is in `validateAndUpdateCache` today, the migrated plan step MUST carry it; dropped authz = fail-closed defect." | open |

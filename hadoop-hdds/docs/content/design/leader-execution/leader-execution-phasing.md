@@ -123,8 +123,9 @@ Concretely the order is:
   PurgeKeys/Directories).
 - **P-6** sweeps the **easy Set-A** single-table ops (ACLs, tagging, SetTimes, secrets, tokens,
   tenant, snapshot props, vol/bucket props, prepare).
-- **P-7** is **cleanup**: remove the double buffer and table cache, delete the legacy path,
-  finalize.
+- **P-7** is **cleanup**: remove the double buffer and table cache, delete the legacy path, and
+  drop the per-command flags. (The `OMLayoutFeature` finalization is **not** crossed here — it was
+  crossed before P-1 per §16.1 / master §16; P-7 only retires the now-callerless legacy fallback.)
 
 P-5 and P-6 deliberately `depend_on_phases` the early hard phases (P-2 / P-1 respectively in
 master §29), **not** the other way round: the easy work is gated *behind* the hard work so it can
@@ -784,17 +785,17 @@ provenance: inferred
 evidence: ["master §29 P-6", "getOMAclRequest OzoneManagerRatisUtils.java:354-373", "OMKeySetTimesRequest.java:236", "S3PutObjectTaggingRequest.java:139", "OMBucketSetPropertyRequest.java:189,211"]
 ```
 
-### P-7 — Cleanup: remove double buffer + table cache; finalize
+### P-7 — Cleanup: remove double buffer + table cache; delete legacy path
 
 ```yaml
-- {id: P-7, scope: "cleanup: remove double buffer + table cache; delete legacy path; finalize", depends_on_phases: [P-3, P-4, P-5, P-6], must_satisfy: [], must_pass: [], config_flag: "n/a", acceptance: "double buffer gone; single execution model"}
+- {id: P-7, scope: "cleanup: remove double buffer + table cache; delete legacy path; drop per-command flags (OMLayoutFeature finalization already crossed pre-P-1, §16.1)", depends_on_phases: [P-3, P-4, P-5, P-6], must_satisfy: [], must_pass: [], config_flag: "n/a", acceptance: "double buffer gone; single execution model"}
 ```
 
 **Command set.** None new. This phase **deletes**: the double buffer (`OzoneManagerDoubleBuffer`),
 the OM table caches (D-3), and every legacy `OMClientRequest.validateAndUpdateCache` body now that
-all commands route to `PlannedRequest`. Then it drops the per-command flags (D-14) — once every
-command is on the new path and finalization is crossed cluster-wide, the legacy fallback has no
-callers.
+all commands route to `PlannedRequest`. Then it drops the per-command flags (D-14): once every
+command is on the new path — and finalization was already crossed cluster-wide before P-1 (§16.1) —
+the legacy fallback has no callers.
 
 **Sub-tasks / PRs:**
 
