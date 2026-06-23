@@ -592,10 +592,14 @@ statement: >
   the commutative Merge operator (Option B, D-7) under only a SHARED bucket lock. Assert: the
   usedBytes counter is EXACT after both apply (UsedConsistent — the increment is resolved in
   Ratis order on every node, no lost update, no double count), regardless of interleaving.
-  The LIMIT gate is exact via the leader-local reservation (concurrent commits see each other's
-  reservations; no over-admit — I-quota-admission-exact, D-OPEN-quota-enforcement resolved); over-limit
-  is possible only in the failover window (EXC-3 narrowed, B-quota-failover-window). This is the positive
-  commutativity + admission test that D-7 and the reservation rest on.
+  The LIMIT gate is ALSO asserted exact via the leader-local reservation (concurrent commits see each
+  other's reservations under the reserve-before-check + consistent-fold ordering; no over-admit —
+  I-quota-admission-exact). NOTE (RF-7): the captured green ObsImpl verdict cited below establishes only the
+  COUNTER exactness (UsedConsistent); the reservation gate is modeled by NO TLA artifact yet, so the
+  admission-gate coverage of I-quota-admission-exact is `inferred` here, pending an ObsImpl extended with a
+  `reserved` variable refining ObsAbstractExact. Over-limit is possible only in the failover window (EXC-3,
+  B-quota-failover-window). So this test is VERIFIED for the counter (UsedConsistent green) and INFERRED for
+  the admission gate.
 covers: [I-quota-commutative, I-quota-crash-safe, I-quota-admission-exact]
 provenance: verified
 evidence: ["leader-planned-execution.md D-7 tests:[T-quota-concurrent,T-quota-failover]", "ozone-11898-tla/ObsImpl.cfg INVARIANT UsedConsistent (green)", "incrUsedBytes at OMKeyCommitRequest.java:410", "leader-execution-locking.md EXC-3"]
