@@ -80,7 +80,7 @@ committed). State counts are exact.
 | `ObsImpl3.cfg` | `ObsImpl` | **3-proc** lifecycle + quota | **GREEN** — `60,976,791 distinct states`, depth 55 |
 | `ObsImplCollide.cfg` | `ObsImpl` | `STRIPES=1` forced stripe collision | GREEN (collision-safe: dedup-to-strongest holds) |
 | `ObsImplBug.cfg` | `ObsImpl` | `SORTED=FALSE` (argument-order acquisition) | **DEADLOCK found (expected)** — negative test proving the total-order acquisition is load-bearing |
-| `QuotaOvercommit.cfg` | `ObsAbstractExact` | exact-quota precondition under shared-bucket lock | **OVER-COMMIT found (expected)** — negative test; motivates the soft-quota decision (EXC-3) |
+| `QuotaOvercommit.cfg` | `ObsImpl` (vs `ObsAbstractExact` oracle) | exact-quota precondition under shared-bucket lock | **OVER-COMMIT found (expected)** — negative test. Run: `-config QuotaOvercommit.cfg ObsImpl.tla` (the cfg's `RefinementExact` is defined in `ObsImpl.tla`; it does **not** run against `ObsAbstractExact.tla` directly — that fails on undefined `LockInv`). |
 | `FsoImpl.cfg` / `FsoImplSmall.cfg` | `FsoImpl` | M2a: create/commit/delete + file rename | **GREEN** — `26,828,240 distinct states`, depth 41 |
 | `FsoImpl.cfg` (dir-rename mode) | `FsoImpl` | M2b: directory rename (rename-stability F-2) | **GREEN** — `32,400,283 distinct states`, depth 41 |
 | `FsoM3.cfg` | `FsoImpl` | M3: recursive `rm -rf`, tight bound `MAX_OPS=1` | **GREEN (tight bound)** — `341,610 distinct states`, depth 23, "No error has been found" (captured 2026-06-17) |

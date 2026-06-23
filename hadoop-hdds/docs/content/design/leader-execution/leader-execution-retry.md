@@ -85,7 +85,9 @@ in-memory response cache**:
   `OmClientProtocol.proto`); `callId` is taken from the IPC layer server-side.
 - The OM forwards the **whole `OMRequest`** as the Ratis log entry, stamping the
   end-client's `(clientId, callId)` onto the `RaftClientRequest`
-  (`OzoneManagerRatisServer.java:512`).
+  (`OzoneManagerRatisServer.java` `submitRequest(OMRequest, ClientId, long)`, ~`:303-313`;
+  note `:512`/`createRaftRequestImpl` is the OM's *own* server-thread identity path, not the
+  end-client one).
 - Every node re-executes the request in `applyTransaction` and produces an
   `OMResponse`. The leader's reply is wrapped as the Raft reply `Message`
   (`OMRatisHelper.java:57`) and stored in Ratis's in-memory `RetryCache`, keyed by
