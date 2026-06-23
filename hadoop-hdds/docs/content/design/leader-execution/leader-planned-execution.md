@@ -447,8 +447,9 @@ is configured to reproduce the over-commit** (two commits both plan at `used=0`,
 `used=2 > limit=1`). This is now **resolved → exact** via a **leader-local atomic reservation** (an
 in-memory check-and-reserve, the DB merge remaining the durable truth, reset-on-role-transition +
 rebuild-from-DB on failover — `D-OPEN-quota-enforcement`, `I-quota-admission-exact`); over-commit is
-narrowed to the bounded failover window (`B-quota-failover-window`), its captured TLC verdict pending
-(formal thread). The other formerly-open question, the **retry / idempotency mechanism**
+eliminated — the failover window is a bounded no-admission pause (a liveness cost), not an over-commit,
+via the applied-index catch-up gate (`B-quota-failover-window`; EXC-3 CLOSED), its reservation-modeling
+TLC verdict pending (formal thread). The other formerly-open question, the **retry / idempotency mechanism**
 (`D-OPEN-retry`), is now **resolved** (durable replicated completion table; companion
 `leader-execution-retry.md`) after the per-operation idempotency audit. The DB patch itself is already idempotent — applying whole-object Puts
 twice is harmless — so the real question is which operations are non-idempotent *to re-execute* (SCM block
@@ -2182,8 +2183,9 @@ rows) — still bytes, still domain-agnostic, the background deletion side is **
 > apply, `used=2 > limit=1`; `EXC-3`) — which **motivates** the resolution: a leader-local atomic
 > reservation (exact check-and-reserve in memory; the DB `Merge` stays the durable truth; advisory,
 > reset-on-role-transition, term-fenced — `I-quota-admission-exact` / `I-quota-reservation-lifecycle`).
-> The "reserve" box in the diagram is the **adopted** exact-admission gate; over-commit is narrowed to
-> the bounded failover window (`B-quota-failover-window`).
+> The "reserve" box in the diagram is the **adopted** exact-admission gate; over-commit is eliminated —
+> the failover window is a bounded no-admission pause, not an over-commit, via the applied-index catch-up
+> gate (`B-quota-failover-window`; EXC-3 CLOSED).
 
 ```mermaid
 sequenceDiagram
@@ -2203,7 +2205,7 @@ sequenceDiagram
         Note over L: collect prior version -> RepeatedOmKeyInfo<br/>withCommittedKeyDeletedFlag(true) (OMKeyCommitRequest.java:358-360)
     end
     rect rgb(245,235,235)
-        Note over L: D-OPEN-quota-enforcement (RESOLVED exact):<br/>leader-local atomic reserve(+correctedSpace) here<br/>(I-quota-admission-exact; over-commit only in failover window, B-quota-failover-window)
+        Note over L: D-OPEN-quota-enforcement (RESOLVED exact):<br/>leader-local atomic reserve(+correctedSpace) here<br/>(I-quota-admission-exact; exact in all cases — failover = no-admission pause via catch-up gate, B-quota-failover-window)
     end
     L->>L: plan DB patch:<br/>Put(keyTable, key -> committed OmKeyInfo)<br/>Delete(openKeyTable, openKey#clientID)<br/>Put(deletedTable, oldVersions)  [if overwrite]<br/>Merge(bucketTable, bucket -> +bytes,+ns,-reclaimed)
     L->>R: submit Batch{ Put, Delete, Put?, Merge }
@@ -3993,7 +3995,7 @@ consequences:
   - "Cache-coherent reads, both directions: the migrated path reads cache-first (TypedTable.get) so it sees a legacy command's decided-but-unflushed write; the migrated apply invalidates the written PartialTableCache key and updates the authoritative FullTableCache (volume/bucket) so legacy/read ops see migrated writes."
   - "Unified durable write order: during mixed mode the migrated durable write rides the same single double-buffer drain as legacy (one Ratis-ordered FIFO, one flush daemon), so no migrated direct write reorders ahead of an earlier-decided legacy write still queued."
   - "All three axes retire together at P-7/P-8 with the legacy path; the migrated path then reverts to D-3 end-state cache-free direct write. D-3's cache-free reads + direct write are END-STATE, suspended for the migrated path during mixed mode."
-  - "Quota stays in the bucket row (D-11 preserved): Option B commutative Merge (D-7) + leader-local reservation fold (#7406 OmBucketInfo.getUsedBytes = persisted + reserved) give lockless cross-model quota-read coherence; no bucket lock. Exact admission is resolved by D-OPEN-quota-enforcement (leader-local reservation; over-commit only in the bounded failover window)."
+  - "Quota stays in the bucket row (D-11 preserved): Option B commutative Merge (D-7) + leader-local reservation fold (#7406 OmBucketInfo.getUsedBytes = persisted + reserved) give lockless cross-model quota-read coherence; no bucket lock. Exact admission is resolved by D-OPEN-quota-enforcement (leader-local reservation + applied-index catch-up gate; exact in all cases — the failover window is a no-admission pause, not an over-commit)."
 tests: [T-mixed-mode-cross-model-race, T-mixed-mode-stale-read, T-mixed-write-reorder]
 phase: P-0
 provenance: verified
@@ -4028,10 +4030,14 @@ a quota: never over-admit (exact), at worst spuriously reject under a tight race
 client retries). The earlier (a) lean rested on (b) being "expensive machinery"; the prototype dissolves
 that.
 
-**The bounded residual (accepted).** Over-commit remains possible ONLY in the failover window
-(B-quota-failover-window): the new leader starts with reserve=0 and persisted-from-DB truth, so
-in-flight-across-failover commits are unaccounted until they replay — bounded by in-flight count,
-self-healing. This **narrows EXC-3** from "soft always" to "soft only in the failover window."
+**The failover window is a no-admission PAUSE, not an over-commit (EXC-3 CLOSED).** The new leader starts
+with reserve=0 and persisted-from-DB truth, so in-flight-across-failover deltas are momentarily unaccounted
+in its reserve — but the applied-index catch-up gate (retry §3.5 / I-dedup-fence #4) WITHHOLDS admission
+until its applied-index catches the committed-index at the term change, i.e. until those inherited deltas
+have applied into persisted usedBytes. So the new leader never admits a commit while the inherited deltas
+are unaccounted: there is no over-commit. The cost is a bounded **no-admission pause** (a liveness/latency
+cost, B-quota-failover-window), bounded by the catch-up time (in-flight count × replay rate). This **closes
+EXC-3** (over-commit eliminated), trading the former soft-quota residual for a brief failover admission pause.
 
 **Lifecycle — distinguished from the killed ALT-quota-reserved-static.** A reserve outside the DB is
 acceptable ONLY with the lifecycle whose absence killed `ALT-quota-reserved-static` (static in-memory
@@ -4052,14 +4058,14 @@ regression).
 
 ```yaml
 id: D-OPEN-quota-enforcement
-title: Quota admission resolved to exact via a leader-local atomic reservation (DB Merge stays durable truth); over-commit only in the bounded failover window
+title: Quota admission resolved to exact in all cases via a leader-local atomic reservation + the applied-index catch-up gate (DB Merge stays durable truth); failover window is a no-admission pause, not an over-commit
 status: locked
 depends_on: [D-7]
 enables: [I-quota-admission-exact, I-quota-reservation-lifecycle]
 raised_by: [kerneltime, ivandika3]
 deciders: [kerneltime]
 consequences:
-  - "Exact steady-state admission via a leader-local atomic reservation (fold: getUsedBytes = persisted + reserved); DB Merge stays durable truth (I-quota-crash-safe). Over-commit only in the bounded failover window (B-quota-failover-window) — narrows EXC-3 from soft-always to soft-in-failover."
+  - "Exact steady-state admission via a leader-local atomic reservation (fold: getUsedBytes = persisted + reserved); DB Merge stays durable truth (I-quota-crash-safe). Exact in all cases via the reservation + the applied-index catch-up gate; the failover window is a no-admission pause (B-quota-failover-window), not an over-commit — closes EXC-3."
   - "Cost objection dissolved: the reserve is a lockless per-bucket AtomicLong (#7406, in the 40k-ops/sec measurement) and the same fold is D-17's cross-model quota-read-coherence mechanism."
   - "Reserve lifecycle (I-quota-reservation-lifecycle) is the condition under which a reserve is acceptable vs the killed ALT-quota-reserved-static static-map shape: advisory, instance-scoped, released-on-every-outcome, reset-on-role-transition, term+index-fenced. Mechanisms #3 (term-fencing) + #4 (applied-index window-gating) are requirements ON the retry thread (I-dedup-fence)."
 tests: [T-quota-concurrent, T-quota-exact-tlc, T-quota-leader-flap]
@@ -4595,7 +4601,7 @@ tests: [T-quota-failover, T-quota-exact-tlc]
 
 ### I-quota-admission-exact — steady-state quota admission is exact (no over-commit) via a leader-local atomic reservation
 
-The D-7 commutative Merge makes the quota *counter* exact, not the *limit gate*. This invariant closes the gate: a leader-local atomic reservation makes concurrent same-bucket commits see each other's in-flight usage, so none is admitted past the limit — exact in steady state, soft only in the bounded failover window (B-quota-failover-window; EXC-3 narrowed; D-OPEN-quota-enforcement resolved).
+The D-7 commutative Merge makes the quota *counter* exact, not the *limit gate*. This invariant closes the gate: a leader-local atomic reservation makes concurrent same-bucket commits see each other's in-flight usage, so none is admitted past the limit — exact in steady state, and exact at failover too via the applied-index catch-up gate (I-dedup-fence #4), which withholds admission until inherited deltas apply. There is no over-commit window: the failover window is a bounded no-admission pause (B-quota-failover-window), not an over-commit (EXC-3 CLOSED; D-OPEN-quota-enforcement resolved).
 
 ```yaml
 id: I-quota-admission-exact
@@ -4612,7 +4618,11 @@ statement: >
   or a volatile base with the apply committing the base-increment and reserve-decrement as one observable
   step), so no reader sees a torn (base, reserved) pair; and the bytes and namespace reserves for one commit
   install and release together (no half-installed reserve). The DB Merge (D-7) remains the durable truth
-  (I-quota-crash-safe). Over-commit is possible ONLY in the bounded failover window (B-quota-failover-window).
+  (I-quota-crash-safe). Admission is exact in ALL cases: at failover the applied-index catch-up gate
+  (I-dedup-fence #4) withholds admission on a newly acquired leader until its applied-index catches the
+  committed-index at the term change, so inherited committed-but-unapplied deltas are applied before any new
+  admission — there is NO over-commit window, only a bounded no-admission pause (B-quota-failover-window;
+  EXC-3 CLOSED).
 rationale: >
   D-7 makes the counter exact but commits take only S(bucket) and the counter is a commutative Merge, not a
   read-modify-write under X(bucket), so N in-flight commits can each pass the limit check against the same
@@ -4621,7 +4631,7 @@ rationale: >
   spurious reject) is best-effort — the correct fail direction for a quota.
 tests: [T-quota-concurrent, T-quota-exact-tlc]
 provenance: inferred  # demoted 2026-06-23 fresh-eyes review (RF-7): the reservation is modeled in NO TLA artifact -- ObsImpl is still the SOFT model (CommitPlan reads bare `used+1<=QUOTA_LIMIT`, no `reserved` var) and the QuotaOvercommit gate-oracle is RED (reproduced used=2>limit=1). The cited #7406 evidence is the REJECTED ALT-quota-reserved-static shape, so the as-designed instance-scoped reservation is also unmeasured. Re-stamp `verified` only after a reserved-variable ObsImpl refines ObsAbstractExact green.
-evidence: ["#7406 QuotaResource reservation + OmBucketInfo.getUsedBytes = persisted + reserved; checkUpdateBucketQuota addUsedBytes-then-rollback (NOTE: #7406 is the rejected ALT-quota-reserved-static shape, RF-7)", "D-OPEN-quota-enforcement (resolved exact)", "leader-execution-locking.md EXC-3 (narrowed to failover window)", "RF-7 (review 2026-06-23): modeled in no TLA artifact; reserve-before-check ordering unpinned (see §30 register)"]
+evidence: ["#7406 QuotaResource reservation + OmBucketInfo.getUsedBytes = persisted + reserved; checkUpdateBucketQuota addUsedBytes-then-rollback (NOTE: #7406 is the rejected ALT-quota-reserved-static shape, RF-7)", "D-OPEN-quota-enforcement (resolved exact)", "leader-execution-locking.md EXC-3 (CLOSED via reservation + catch-up gate)", "RF-7 (review 2026-06-23): modeled in no TLA artifact; reserve-before-check ordering unpinned (see §30 register)"]
 ```
 
 ---
@@ -5152,8 +5162,9 @@ I-quota-commutative / I-quota-crash-safe settle the *counter*; the *admission ga
 **D-OPEN-quota-enforcement (status: locked)** → exact via a leader-local atomic reservation
 (I-quota-admission-exact), with the reserve lifecycle that distinguishes it from the killed
 `ALT-quota-reserved-static` (I-quota-reservation-lifecycle). The counter invariants remain true and are
-now joined by the admission invariants. Over-commit is narrowed from "soft always" (the earlier EXC-3
-framing) to "soft only in the bounded failover window" (B-quota-failover-window). `T-quota-exact-tlc` is
+now joined by the admission invariants. Over-commit is ELIMINATED (the earlier EXC-3 "soft always"
+framing is closed): exact in all cases via the reservation + the failover applied-index catch-up gate;
+the failover window is a bounded no-admission pause (B-quota-failover-window), not an over-commit. `T-quota-exact-tlc` is
 the standing reproduction: in the resolved-exact world its configured oracle is expected to turn GREEN
 once `ObsImpl` models the reservation (a formal-thread dependency, captured verdict pending);
 `T-quota-leader-flap` regresses the role-transition reset. The residual standing risk is the failover
@@ -5343,13 +5354,13 @@ evidence:
 
 ```yaml
 id: B-quota-failover-window
-statement: "Quota over-commit is possible ONLY between a leader acquiring leadership and the apply of the last committed-but-unapplied entry it inherits: the new leader starts with reserve=0 and persisted usedBytes from the DB, so commits it admits before the in-flight-across-failover deltas apply can transiently exceed the limit, bounded by the in-flight count and self-healing as those entries replay. Steady-state admission is exact (I-quota-admission-exact)."
+statement: "Quota admission is exact in ALL cases — there is NO over-commit window. At failover the new leader starts with reserve=0 and persisted usedBytes from the DB; the applied-index catch-up gate (I-dedup-fence #4, retry §3.5) WITHHOLDS admission until its applied-index catches the committed-index observed at the term change, so every inherited committed-but-unapplied quota delta has applied into persisted usedBytes before the new leader admits any commit. The 'failover window' is therefore a bounded NO-ADMISSION PAUSE (a liveness/latency cost during catch-up, bounded by in-flight-entry-count x replay rate), not an over-commit. This CLOSES EXC-3. Steady-state admission is exact via the leader-local reservation (I-quota-admission-exact)."
 rationale: "The reserve is leader-local and rebuilt-from-DB on failover (I-quota-crash-safe, I-quota-reservation-lifecycle); it cannot see the old leader's in-flight reservations. Bounding admission until applied-index catches the committed-index observed at leadership acquisition makes the window provably bounded rather than incidentally bounded by replay speed (a requirement on the retry thread's applied-index machinery)."
-provenance: inferred  # demoted 2026-06-23 fresh-eyes review (RF-8): this bound CONTRADICTS the applied-index catch-up gate (retry §3.5 #4 / I-dedup-fence). If the gate withholds admission until the new leader's applied-index catches the committed-index at the term change, the inherited deltas are already applied before L2 admits anything -> the over-commit residual is ZERO (a no-admission PAUSE window, a liveness cost), not a soft over-commit. Reconcile (recommended: close EXC-3 fully) + add a crash-with-unapplied-deltas TLA action before re-stamping verified.
+provenance: inferred  # RF-8 resolved 2026-06-23: committed to the catch-up gate framing -> the over-commit window is ELIMINATED (the residual is a bounded no-admission PAUSE, a liveness cost, not a safety over-commit); EXC-3 CLOSED. Stays `inferred` (not `verified`) until a crash-with-committed-but-unapplied-deltas TLA action models the gate (owed, RF-8/RF-21).
 evidence:
   - "#7406 audit 2026-06-21 Q4: new leader registerQuotaResource(new QuotaResource(0,0)); persisted usedBytes is post-failover truth"
   - "leader-planned-execution.md D-OPEN-quota-enforcement (resolved exact), I-quota-admission-exact, I-quota-reservation-lifecycle"
-  - "RF-8 (review 2026-06-23): contradicts the catch-up gate; residual likely zero (see §30 register)"
+  - "RF-8 (resolved 2026-06-23): over-commit eliminated via the catch-up gate; residual = bounded no-admission pause (liveness); EXC-3 closed; crash-deltas TLA action owed"
 ```
 
 ---
@@ -6124,10 +6135,10 @@ evidence, and the mitigation or the gate that closes it. The `Q-n` items are the
 locking-design questions carried forward verbatim from the companion's §10 so they live in one
 ledger.
 
-### R-quota-enforcement — RESOLVED → exact admission (leader-local reservation); residual = failover window + reserve lifecycle
+### R-quota-enforcement — RESOLVED → exact admission in all cases (reservation + catch-up gate); residual = failover no-admission pause (liveness) + reserve lifecycle
 
 ```yaml
-- {id: R-quota-enforcement, statement: "Quota *limit* admission is RESOLVED to exact via a leader-local atomic reservation (D-OPEN-quota-enforcement, locked): concurrent same-bucket commits see each other's reservations (getUsedBytes = persisted + reserved) so none over-admits; the DB Merge stays the durable truth and the usedBytes *counter* is always exact (D-7). RESIDUAL standing risk: (1) over-commit in the bounded failover window (B-quota-failover-window); (2) the reserve lifecycle (I-quota-reservation-lifecycle) must be implemented correctly — the #7406 prototype used static maps without the role-transition reset (the killed ALT-quota-reserved-static shape), so the failover audit found permanent phantom usedBytes on leader flap.", rationale: "Commits take only S(bucket) and usedBytes is a commutative Merge, not an X(bucket) read-modify-write, so without the reserve N in-flight commits over-commit (the EXC-3 over-commit); the lockless reserve closes the steady-state gate. The residual is the failover window and the reserve's crash-recovery/reset lifecycle (#3 term-fencing, #4 applied-index window-gating depend on the retry thread).", provenance: verified, evidence: ["D-OPEN-quota-enforcement (locked, exact)", "I-quota-admission-exact, I-quota-reservation-lifecycle, B-quota-failover-window", "#7406 failover audit 2026-06-21", "TLC QuotaOvercommit.cfg vs ObsAbstractExact — captured verdict pending (formal thread)"]}
+- {id: R-quota-enforcement, statement: "Quota *limit* admission is RESOLVED to exact via a leader-local atomic reservation (D-OPEN-quota-enforcement, locked): concurrent same-bucket commits see each other's reservations (getUsedBytes = persisted + reserved) so none over-admits; the DB Merge stays the durable truth and the usedBytes *counter* is always exact (D-7). RESIDUAL standing risk: (1) a bounded no-admission PAUSE at failover (B-quota-failover-window) — a liveness cost, NOT an over-commit (EXC-3 closed via the catch-up gate); (2) the reserve lifecycle (I-quota-reservation-lifecycle) must be implemented correctly — the #7406 prototype used static maps without the role-transition reset (the killed ALT-quota-reserved-static shape), so the failover audit found permanent phantom usedBytes on leader flap.", rationale: "Commits take only S(bucket) and usedBytes is a commutative Merge, not an X(bucket) read-modify-write, so without the reserve N in-flight commits over-commit (the EXC-3 over-commit); the lockless reserve closes the steady-state gate. The residual is the failover window and the reserve's crash-recovery/reset lifecycle (#3 term-fencing, #4 applied-index window-gating depend on the retry thread).", provenance: verified, evidence: ["D-OPEN-quota-enforcement (locked, exact)", "I-quota-admission-exact, I-quota-reservation-lifecycle, B-quota-failover-window", "#7406 failover audit 2026-06-21", "TLC QuotaOvercommit.cfg vs ObsAbstractExact — captured verdict pending (formal thread)"]}
 ```
 
 This risk is now **resolved at the decision level** (exact admission, D-OPEN-quota-enforcement
@@ -6256,7 +6267,7 @@ Status column below (each `resolved` row names the invariant/test/section that c
 | RF-5 | MAJOR | SAFETY | §17.1 claims ACL authz is uniformly in `preExecute` (leader-only, unchanged). False for key/bucket/prefix ACL ops + bucket-delete, whose `checkAcls` runs in `validateAndUpdateCache` (every node today: `OMKeyAclRequest.java:92`, `OMBucketAclRequest.java:92`, `OMPrefixAclRequest.java:81`, `OMBucketDeleteRequest.java:106`). A P-6 migrator could ship an op whose authz silently never runs. **Rec:** correct §17.1; add a migration invariant "if `checkAcls` is in `validateAndUpdateCache` today, the migrated plan step MUST carry it; dropped authz = fail-closed defect." | open |
 | RF-6 | MAJOR | DESIGN-GAP | A follower fail-stop on apply leaves only opaque `(cf,key,value)` bytes — inner Batch is domain-agnostic (§10:473), audit is leader-only (§17.3/§18.3): no cmdType/clientId/user/local-audit to diagnose the one failure the feature exists to surface. **Rec:** carry cmdType + clientId#callId on the OUTER envelope; log a structured record before `terminate()`; add `T-apply-failure-forensics`. | open |
 | RF-7 | MAJOR | SAFETY/EVIDENCE | `I-quota-admission-exact` (P-1's core) was stamped `provenance: verified` but is modeled by NO TLA artifact (ObsImpl is still soft; gate-oracle RED, reproduced used=2); 40k measured the rejected static-map shape. **Provenance demoted to `inferred` in this commit.** **Rec:** extend ObsImpl with a `reserved` var + atomic reserve-then-check-then-rollback, refine ObsAbstractExact green; re-measure on the instance-scoped shape; demote test-plan `T-quota-concurrent` too. | **partial** — provenance demoted (register commit) + reserve-before-check/consistent-fold ordering pinned (RF-25) + `T-quota-concurrent` scoped (verified for counter / inferred for the gate). STILL OWED (not a spec edit): the ObsImpl-with-`reserved` TLA artifact refining ObsAbstractExact green, and the instance-scoped throughput re-measure |
-| RF-8 | MAJOR | SAFETY/CONSISTENCY | `B-quota-failover-window` (stamped verified, **demoted `inferred` in this commit**) contradicts the applied-index catch-up gate (retry §3.5 #4): under the gate the over-commit residual is ZERO (a no-admission pause), not soft. **Rec:** commit to the gate framing, rewrite the bound as a liveness pause, **close EXC-3 fully**; add a crash-with-unapplied-deltas TLA action. | open |
+| RF-8 | MAJOR | SAFETY/CONSISTENCY | `B-quota-failover-window` (stamped verified, **demoted `inferred` in this commit**) contradicts the applied-index catch-up gate (retry §3.5 #4): under the gate the over-commit residual is ZERO (a no-admission pause), not soft. **Rec:** commit to the gate framing, rewrite the bound as a liveness pause, **close EXC-3 fully**; add a crash-with-unapplied-deltas TLA action. | **resolved** — committed to the catch-up gate: EXC-3 CLOSED (over-commit eliminated), `B-quota-failover-window` reframed as a bounded no-admission pause (liveness); swept ~18 sites across master + locking. TLA crash-deltas action still owed (RF-21) |
 | RF-9 | MAJOR | SAFETY | In-flight registry (retry §3.3) has no removal on any pre-commit failure path (SCM throw S2, lock-interrupt S4, reval S5, submit/term-loss S6); `I-dedup-handoff` binds removal to durable-apply only → leaks the entry + hands attached retries a stale transient error as terminal. The sibling quota-reserve releases "on every terminal outcome"; the registry doesn't. **Rec:** add `I-dedup-inflight-lifecycle` (remove on EVERY terminal outcome; failed pre-commit → remove + re-drive waiters); reconcile the §5 anti-pattern. | **resolved** — retry §3.3 + `I-dedup-inflight-lifecycle` + reconciled §5 anti-pattern; `T-retry-inflight-failure-cleanup` |
 | RF-10 | MAJOR | SAFETY | Recursive `rm -rf` (C7) is mis-marked "idempotent on re-exec" (phasing:328); code throws `KEY_NOT_FOUND` on the re-tombstone (`OMKeyDeleteRequestWithFSO.java:115-117`) → N4 by the audit's own taxonomy, yet absent from the audit. P-2 (owns C7) lacks the D-OPEN-retry gate P-1 carries. **Rec:** reclassify C7 N4; add recursive delete to audit Tier-A; record the completion record at the root-tombstone step; gate P-2 on D-OPEN-retry. | open |
 | RF-11 | MAJOR | CONSISTENCY/SAFETY | Phasing idempotency column marks CreateSnapshot/GetDelegationToken/GetS3Secret/TenantAssignUserAccessId `idempotent=yes` (phasing:330,380,383,388); the audit classifies all four Tier-A non-idempotent (re-mint random secret/token/snapshotId). Master honestly carries them open (§6:6114); phasing silently closes them. **Rec:** correct the 4 cells; add a lint cross-check phasing-column == audit-verdict. | open |

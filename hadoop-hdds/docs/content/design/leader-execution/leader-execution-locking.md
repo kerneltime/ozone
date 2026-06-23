@@ -442,16 +442,19 @@ and subtree reclamation are **eventually consistent** and the checker treats the
   enhancement.
 - **EXC-2 (eventual subtree purge).** Recursive-delete subtree reclamation is async; the
   namespace root disappears synchronously (I-5) but descendants are reclaimed over time.
-- **EXC-3 (soft quota over-commit — NARROWED to the failover window; steady-state admission is
-  EXACT).** Because key commits take only a **shared** bucket lock (so commits to different keys run
-  in parallel — the core throughput goal), and bucket `usedBytes` is updated by a commutative merge
-  operator (D-PARENT-2) rather than read-modify-written under an exclusive lock, the *limit gate* is
-  not automatically exact: absent a reservation, N in-flight commits can each pass the check against
-  the same pre-increment `usedBytes` and all apply, over-committing by up to the in-flight count.
-  **This is now closed in steady state** by a leader-local atomic reservation (master
-  `D-OPEN-quota-enforcement`, resolved exact; `I-quota-admission-exact`): concurrent commits see each
-  other's reservations so none over-admits. Over-commit remains possible **only in the bounded
-  failover window** (master `B-quota-failover-window`), self-healing as in-flight entries replay.
+- **EXC-3 (soft quota over-commit — CLOSED).** Because key commits take only a **shared** bucket lock
+  (so commits to different keys run in parallel — the core throughput goal), and bucket `usedBytes` is
+  updated by a commutative merge operator (D-PARENT-2) rather than read-modify-written under an exclusive
+  lock, the *limit gate* would not be automatically exact: absent a reservation, N in-flight commits
+  could each pass the check against the same pre-increment `usedBytes` and all apply, over-committing by
+  up to the in-flight count. **This is closed in ALL cases**: in steady state by a leader-local atomic
+  reservation (master `D-OPEN-quota-enforcement`, resolved exact; `I-quota-admission-exact`,
+  reserve-before-check + consistent-fold), and at failover by the applied-index catch-up gate (retry §3.5
+  / `I-dedup-fence` #4), which withholds admission on a newly acquired leader until its applied-index
+  catches the committed-index at the term change — so every inherited committed-but-unapplied delta is
+  applied into persisted `usedBytes` BEFORE the new leader admits any commit. There is therefore **no
+  over-commit window**; the former failover window is a bounded **no-admission PAUSE** (a liveness/latency
+  cost, master `B-quota-failover-window`), not an over-commit.
   - **What is still guaranteed unconditionally:** the `usedBytes` counter never loses an update — it
     always equals the true committed size (no double-count, no lost decrement). Formally
     `UsedConsistent` holds.
@@ -484,7 +487,7 @@ These exceptions are stated so a reviewer reads them as deliberate, not as gaps.
 | I-13 acquire failure-atomic | T-acquire-failure-atomic (mid-loop throw releases K-1 held permits in reverse; no orphaned permit; caller's finally sees no handle) |
 | B-1 stripe sizing | T-7 (throughput under hot parent) |
 | EXC-1/EXC-2 | linearizability checker treats quota/purge as eventually-consistent |
-| EXC-3 soft quota (narrowed: failover window only) | `UsedConsistent` holds (counter exact); steady-state admission exact via reservation (`I-quota-admission-exact`); `QuotaOvercommit.cfg` vs `ObsAbstractExact` now expected green once `ObsImpl` models the reservation (captured TLC verdict pending, TLA effort) |
+| EXC-3 soft quota (CLOSED — exact in all cases) | `UsedConsistent` holds (counter exact); admission exact in steady state via the reservation (`I-quota-admission-exact`) and at failover via the applied-index catch-up gate (`I-dedup-fence` #4) — no over-commit window, only a bounded no-admission pause (`B-quota-failover-window`); `QuotaOvercommit.cfg` vs `ObsAbstractExact` expected green once `ObsImpl` models the reservation (captured TLC verdict pending, TLA effort) |
 
 ---
 
