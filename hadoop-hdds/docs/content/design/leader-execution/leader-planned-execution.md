@@ -5069,9 +5069,9 @@ tests: [T-snapshot-consistency]
 
 ---
 
-### I-mixed-shared-lock — a migrated and a legacy command on the same key/bucket serialize through one shared lock manager
+### I-mixed-shared-lock — a migrated and a legacy command (and a legacy read) on the same key/bucket serialize through one shared lock manager
 
-During mixed mode both paths acquire the SAME lock authority — the new lean lock manager — at the same granularity; the legacy path adopts the new granular locks (the original #7583 integration-point-3 direction) rather than the migrated path reaching down to the thread-affine legacy bucket lock (D-17).
+During mixed mode both paths acquire the SAME lock authority — the new lean lock manager — at the same granularity; the legacy path (its WRITE commands AND its READ paths on migrated tables) adopts the new granular locks (the original #7583 integration-point-3 direction) rather than the migrated path reaching down to the thread-affine legacy bucket lock (D-17). Bringing legacy READS into the adoption is what makes the read-coherence rendezvous real, not merely a side effect of the cache's internal synchronization.
 
 ```yaml
 id: I-mixed-shared-lock
@@ -5080,7 +5080,14 @@ statement: >
   one shared lock authority: both paths acquire the new lean lock manager's granular key/slot locks
   (C-lock-manager), so a cross-model same-key pair takes the same lock object. The thread-affine
   OzoneManagerLock is NOT the cross-model rendezvous (it cannot release on the continuation thread, D-4/I-9,
-  and is released before the durable write). The shared manager retires to sole-native at P-7.
+  and is released before the durable write). This adoption covers BOTH legacy WRITE commands AND legacy READ
+  paths on migrated tables (KeyManagerImpl.lookupKey / getFileStatus / listStatus / InfoBucket — the ~10
+  acquireReadLock(BUCKET_LOCK) sites, e.g. KeyManagerImpl.java:594): during mixed mode each acquires the new
+  manager's S(bucket)/S(key), so a legacy reader and a migrated writer on the same key rendezvous on one lock
+  object. Combined with the lock-spanning hinge (the migrated path holds its key lock through durable commit
+  and the apply-time cache update), a legacy reader that acquires S(key) observes the migrated write in the
+  cache — so read coherence (I-mixed-mode-cache-coherent) is ENFORCED by the lock rendezvous, not left to the
+  cache's internal synchronization. The shared manager retires to sole-native at P-7.
 rationale: >
   Lock-object unification at the fine grain, old-adopts-new (restores #7583 integration-point-3). The
   superseded inverse — the migrated path additionally taking the legacy bucket lock — was both unimplementable
@@ -5110,7 +5117,10 @@ rationale: >
   The cache is the shared live read view between the two write machineries: legacy's decided write lives in
   the cache before its drain flush, and migrated's write is installed in the cache at apply. Both directions
   rest on cache-first reads — which is why D-3's pure-RocksDB reads are SUSPENDED for the migrated path during
-  mixed mode and restored at P-7 when the cache is removed.
+  mixed mode and restored at P-7 when the cache is removed. The read-coherence rendezvous is ENFORCED by the
+  shared lock manager: legacy reads on migrated tables adopt the new manager's S(bucket)/S(key)
+  (I-mixed-shared-lock), so a legacy read and a migrated apply on the same key serialize on one lock object —
+  the coherence does not rest on the cache's internal synchronization alone.
 tests: [T-mixed-mode-stale-read]
 provenance: verified
 evidence: ["TypedTable.get cache-first (#7406 read path)", "FullTableCache.java:200-213", "PartialTableCache.java:158-169", "OmMetadataManagerImpl.java:494-495", "D-3 (suspended in mixed mode)", "D-17"]
@@ -5549,7 +5559,7 @@ it directly.
 | I-determinism-followers-pure | T-apply-failure-resync, T-determinism-follower-byte-identical, T-observability-leader-only-metrics, T-security-leader-only-authz-audit |
 | I-inner-domain-agnostic | T-determinism-follower-byte-identical, T-mpu-lifecycle, T-proto-roundtrip, T-rolling-upgrade-mixed-binary |
 | I-managed-index-monotonic | T-flag-routing-both-paths, T-managed-index-monotonic, T-managed-index-restart-continuity, T-mixed-mode-no-collision, T-objectid-disjoint, T-rolling-upgrade-mixed-binary |
-| I-mixed-shared-lock | T-mixed-mode-cross-model-race |
+| I-mixed-shared-lock | T-mixed-mode-cross-model-race, T-mixed-mode-stale-read |
 | I-mixed-mode-cache-coherent | T-mixed-mode-stale-read |
 | I-mixed-write-order | T-mixed-write-reorder |
 | I-mixed-mode-safe | T-mixed-mode-no-collision, T-rolling-upgrade-mixed-binary |
@@ -6273,7 +6283,7 @@ Status column below (each `resolved` row names the invariant/test/section that c
 | RF-11 | MAJOR | CONSISTENCY/SAFETY | Phasing idempotency column marks CreateSnapshot/GetDelegationToken/GetS3Secret/TenantAssignUserAccessId `idempotent=yes` (phasing:330,380,383,388); the audit classifies all four Tier-A non-idempotent (re-mint random secret/token/snapshotId). Master honestly carries them open (§6:6114); phasing silently closes them. **Rec:** correct the 4 cells; add a lint cross-check phasing-column == audit-verdict. | open |
 | RF-12 | MAJOR | DESIGN-GAP | No liveness/progress invariant for the NO-LOCK-TIMEOUT design; TLA `Termination` is defined (`ObsImpl.tla:295`, `FsoImpl.tla:408`) but referenced by no cfg, and `Spec` carries no fairness conjunct. The "a hang is the signal" claim is formally unchecked. **Rec:** add `WF_vars` + wire `PROPERTY Termination`/leadsto into a fast cfg, OR add a named prose `I-progress-under-no-timeout` recording it as argued-not-modeled. | open |
 | RF-13 | MAJOR | EVIDENCE/DESIGN-GAP | The 40k validates the REJECTED lock shape (`KeyLock.java` Striped ReentrantReadWriteLock + 10-min tryLock timeout, contradicting I-8/I-9), and the I-9 async continuation-release lock the visibility hinge cites (#7406 `OMGateway.submitInternal`) shows the OPPOSITE (thread-affine, synchronous `f.get()`, same-thread release). The async model is unbuilt. **Rec:** stop citing #7406 for the I-9 hinge; mark the async model UNPROTOTYPED; make `T-cross-thread-release` a P-0 gate on the new `StripedSemaphoreLockManager`. | open |
-| RF-14 | MAJOR | DESIGN-GAP | D-17 axis-2 cache-coherence names legacy READ ops, but axis-1's shared lock (`I-mixed-shared-lock`, master:5032) covers WRITE commands only; legacy reads take `OzoneManagerLock.BUCKET_LOCK` (`KeyManagerImpl.java:594` + ~10 sites) while migrated apply mutates the cache holding no lock — no rendezvous. Coherence holds only by the caches' internal sync, not a specified mechanism. **Rec:** either require legacy reads on migrated tables to adopt the new lock during mixed mode, or re-scope `I-mixed-mode-cache-coherent` to "eventually-coherent, bounded by drain latency" and drop the absolute no-stale language. | open |
+| RF-14 | MAJOR | DESIGN-GAP | D-17 axis-2 cache-coherence names legacy READ ops, but axis-1's shared lock (`I-mixed-shared-lock`, master:5032) covers WRITE commands only; legacy reads take `OzoneManagerLock.BUCKET_LOCK` (`KeyManagerImpl.java:594` + ~10 sites) while migrated apply mutates the cache holding no lock — no rendezvous. Coherence holds only by the caches' internal sync, not a specified mechanism. **Rec:** either require legacy reads on migrated tables to adopt the new lock during mixed mode, or re-scope `I-mixed-mode-cache-coherent` to "eventually-coherent, bounded by drain latency" and drop the absolute no-stale language. | **resolved** (per your call: legacy reads adopt the new lock) — `I-mixed-shared-lock` extended to cover legacy READ paths on migrated tables (the ~10 `acquireReadLock(BUCKET_LOCK)` sites) so read↔write rendezvous on one lock object; `I-mixed-mode-cache-coherent` now cites the lock rendezvous as the enforcing mechanism; `T-mixed-mode-stale-read` asserts it with a no-adoption negative variant |
 | RF-15 | MAJOR | CONSISTENCY | Non-idempotent count is 27 by the audit's own enumeration (13+10+4) but asserted "~26" in 6 files — sizes the retry-protection set in the unsafe direction. **Rec:** recount to 27 (or justify excluding GetS3Secret to 26) + an auditable tally line. | open |
 | RF-16 | MAJOR | DESIGN-GAP | 4 dispatched write Types (SetTimes, PutObjectTagging, DeleteObjectTagging, EchoRPC) are absent from the audit, falsifying "every OM write op." **Rec:** classify all four (expected idempotent), reconcile audit op-set == phasing inventory. | open |
 | RF-17 | MAJOR | DESIGN-GAP | ObjectTagging Put/Delete mutate the key table (`S3PutObjectTaggingRequest.java:125`) but appear in no lock-placement coverage-map row. **Rec:** add a row mapping them to `S(bucket)+S(P)+X(P,name)`; fold into `Q-setacl-settimes-placement` before P-6. | open |

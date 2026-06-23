@@ -1005,8 +1005,13 @@ statement: >
   command's write decided but not yet drained, a migrated command on the same key reads cache-first and observes
   it. (b) Legacy reads migrated's write: migrate a quota-bearing command; after it commits (key + bucket
   usedBytes), issue a legacy read op (LookupKey, InfoBucket) and a legacy command on the same key/bucket; assert
-  both observe the fresh value (no stale FullTableCache bucket, no stale PartialTableCache key).
-covers: [I-mixed-mode-cache-coherent]
+  both observe the fresh value (no stale FullTableCache bucket, no stale PartialTableCache key). The legacy read
+  acquires the NEW lock manager's S(bucket)/S(key) during mixed mode (I-mixed-shared-lock), so it rendezvouses
+  with the migrated writer on one lock object. A negative variant in which the legacy read keeps ONLY the
+  thread-affine OzoneManagerLock BUCKET_LOCK (no new-lock adoption) MUST be able to observe a stale value under a
+  read-concurrent-with-apply interleaving, proving the lock adoption — not the cache's internal synchronization —
+  is what makes the read coherent.
+covers: [I-mixed-mode-cache-coherent, I-mixed-shared-lock]
 provenance: inferred
 evidence: ["D-17", "I-mixed-mode-cache-coherent", "TypedTable.get cache-first", "FullTableCache.java:200-213"]
 ```
@@ -1315,7 +1320,7 @@ authority `leader-execution-locking.md` §9) and **master invariants** (slugs) a
 | `I-managed-index-monotonic` | `T-flag-routing-both-paths`, `T-managed-index-monotonic`, `T-managed-index-restart-continuity`, `T-mixed-mode-no-collision`, `T-objectid-disjoint`, `T-rolling-upgrade-mixed-binary` | D-8/D-12; P-0 must_satisfy |
 | `I-objectid-disjoint` | `T-mixed-mode-no-collision`, `T-objectid-disjoint` | D-8/D-12 |
 | `I-mixed-mode-safe` | `T-mixed-mode-no-collision`, `T-rolling-upgrade-mixed-binary` | D-11/D-12 |
-| `I-mixed-shared-lock` | `T-mixed-mode-cross-model-race` | D-17 |
+| `I-mixed-shared-lock` | `T-mixed-mode-cross-model-race`, `T-mixed-mode-stale-read` | D-17 (incl. legacy-read lock adoption, RF-14) |
 | `I-mixed-mode-cache-coherent` | `T-mixed-mode-stale-read` | D-17 |
 | `I-mixed-write-order` | `T-mixed-write-reorder` | D-17 |
 | `I-ondisk-invariance-shield` | `T-rolling-upgrade-mixed-binary` | D-11/§19 |
