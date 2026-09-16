@@ -1,38 +1,32 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- *  with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
  *      http://www.apache.org/licenses/LICENSE-2.0
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
+
 package org.apache.hadoop.hdds.scm.pipeline;
 
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
-import org.apache.commons.collections.iterators.LoopingIterator;
-import org.apache.hadoop.hdds.HddsConfigKeys;
-import org.apache.hadoop.hdds.client.RatisReplicationConfig;
-import org.apache.hadoop.hdds.client.ReplicationConfig;
-import org.apache.hadoop.hdds.client.StandaloneReplicationConfig;
-import org.apache.hadoop.hdds.conf.ConfigurationSource;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationFactor;
-import org.apache.hadoop.hdds.scm.ScmConfigKeys;
-import org.apache.hadoop.hdds.scm.ha.SCMContext;
-import org.apache.hadoop.hdds.scm.ha.SCMService;
-import org.apache.hadoop.ozone.OzoneConfigKeys;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationType.EC;
+import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationType.RATIS;
+import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationType.STAND_ALONE;
+import static org.apache.hadoop.hdds.scm.ha.SCMService.Event.NEW_NODE_HANDLER_TRIGGERED;
+import static org.apache.hadoop.hdds.scm.ha.SCMService.Event.NODE_ADDRESS_UPDATE_HANDLER_TRIGGERED;
+import static org.apache.hadoop.hdds.scm.ha.SCMService.Event.PRE_CHECK_COMPLETED;
+import static org.apache.hadoop.hdds.scm.ha.SCMService.Event.UNHEALTHY_TO_HEALTHY_NODE_HANDLER_TRIGGERED;
 
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import java.io.IOException;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -41,13 +35,20 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
-
-import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationType.RATIS;
-import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationType.STAND_ALONE;
-import static org.apache.hadoop.hdds.scm.ha.SCMService.Event.NODE_ADDRESS_UPDATE_HANDLER_TRIGGERED;
-import static org.apache.hadoop.hdds.scm.ha.SCMService.Event.UNHEALTHY_TO_HEALTHY_NODE_HANDLER_TRIGGERED;
-import static org.apache.hadoop.hdds.scm.ha.SCMService.Event.NEW_NODE_HANDLER_TRIGGERED;
-import static org.apache.hadoop.hdds.scm.ha.SCMService.Event.PRE_CHECK_COMPLETED;
+import org.apache.commons.collections4.iterators.LoopingIterator;
+import org.apache.hadoop.hdds.HddsConfigKeys;
+import org.apache.hadoop.hdds.client.RatisReplicationConfig;
+import org.apache.hadoop.hdds.client.ReplicationConfig;
+import org.apache.hadoop.hdds.client.StandaloneReplicationConfig;
+import org.apache.hadoop.hdds.conf.ConfigurationSource;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ReplicationFactor;
+import org.apache.hadoop.hdds.scm.ScmConfigKeys;
+import org.apache.hadoop.hdds.scm.ScmUtils;
+import org.apache.hadoop.hdds.scm.ha.SCMContext;
+import org.apache.hadoop.hdds.scm.ha.SCMService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Implements api for running background pipeline creation jobs.
@@ -88,7 +89,7 @@ public class BackgroundPipelineCreator implements SCMService {
   private final AtomicBoolean running = new AtomicBoolean(false);
   private final long intervalInMillis;
   private final Clock clock;
-
+  private final boolean createRatisThreeForEcDefault;
 
   BackgroundPipelineCreator(PipelineManager pipelineManager,
       ConfigurationSource conf, SCMContext scmContext, Clock clock) {
@@ -110,6 +111,9 @@ public class BackgroundPipelineCreator implements SCMService {
         ScmConfigKeys.OZONE_SCM_PIPELINE_CREATION_INTERVAL,
         ScmConfigKeys.OZONE_SCM_PIPELINE_CREATION_INTERVAL_DEFAULT,
         TimeUnit.MILLISECONDS);
+    this.createRatisThreeForEcDefault = conf.getBoolean(
+        ScmConfigKeys.OZONE_SCM_PIPELINE_CREATE_RATIS_THREE,
+        ScmConfigKeys.OZONE_SCM_PIPELINE_CREATE_RATIS_THREE_DEFAULT);
 
     threadName = scmContext.threadNamePrefix() + THREAD_NAME;
   }
@@ -132,6 +136,8 @@ public class BackgroundPipelineCreator implements SCMService {
         .setUncaughtExceptionHandler((Thread t, Throwable ex) -> {
           String message = "Terminate SCM, encounter uncaught exception"
               + " in " + threadName;
+          LOG.error("BackgroundPipelineCreator thread encountered an error. "
+                  + "Thread: {}", t.toString(), ex);
           scmContext.getScm().shutDown(message);
         })
         .build()
@@ -143,6 +149,7 @@ public class BackgroundPipelineCreator implements SCMService {
   /**
    * Stop RatisPipelineUtilsThread.
    */
+  @Override
   public void stop() {
     if (!running.compareAndSet(true, false)) {
       LOG.warn("{} is not running, just ignore.", threadName);
@@ -202,34 +209,18 @@ public class BackgroundPipelineCreator implements SCMService {
   }
 
   private void createPipelines() throws RuntimeException {
-    // TODO: #CLUTIL Different replication factor may need to be supported
-    HddsProtos.ReplicationType type = HddsProtos.ReplicationType.valueOf(
-        conf.get(OzoneConfigKeys.OZONE_REPLICATION_TYPE,
-            OzoneConfigKeys.OZONE_REPLICATION_TYPE_DEFAULT));
-    boolean autoCreateFactorOne = conf.getBoolean(
-        ScmConfigKeys.OZONE_SCM_PIPELINE_AUTO_CREATE_FACTOR_ONE,
+    boolean autoCreateFactorOne = conf.getBoolean(ScmConfigKeys.OZONE_SCM_PIPELINE_AUTO_CREATE_FACTOR_ONE,
         ScmConfigKeys.OZONE_SCM_PIPELINE_AUTO_CREATE_FACTOR_ONE_DEFAULT);
 
-    List<ReplicationConfig> list =
-        new ArrayList<>();
-    for (HddsProtos.ReplicationFactor factor : HddsProtos.ReplicationFactor
-        .values()) {
-      if (factor == ReplicationFactor.ZERO) {
-        continue; // Ignore it.
-      }
-      final ReplicationConfig replicationConfig =
-          ReplicationConfig.fromProtoTypeAndFactor(type, factor);
-      if (skipCreation(replicationConfig, autoCreateFactorOne)) {
-        // Skip this iteration for creating pipeline
-        continue;
-      }
-      list.add(replicationConfig);
+    List<ReplicationConfig> list = getReplicationConfigs(autoCreateFactorOne);
+    if (list.isEmpty()) {
+      LOG.debug("No replication configs selected for background pipeline creation.");
+      return;
     }
 
     LoopingIterator it = new LoopingIterator(list);
     while (it.hasNext()) {
-      ReplicationConfig replicationConfig =
-          (ReplicationConfig) it.next();
+      ReplicationConfig replicationConfig = (ReplicationConfig) it.next();
 
       try {
         Pipeline pipeline = pipelineManager.createPipeline(replicationConfig);
@@ -243,6 +234,54 @@ public class BackgroundPipelineCreator implements SCMService {
     }
 
     LOG.debug("BackgroundPipelineCreator createPipelines finished.");
+  }
+
+  /**
+   * Returns replication configs eligible for background pipeline creation.
+   *
+   * <p>If the default replication config is invalid, this returns an empty
+   * list and skips pipeline creation to avoid guessing from raw config values.
+   * For EC-default clusters, this only returns RATIS/THREE when
+   * {@link ScmConfigKeys#OZONE_SCM_PIPELINE_CREATE_RATIS_THREE} is enabled.
+   */
+  @VisibleForTesting
+  List<ReplicationConfig> getReplicationConfigs(boolean autoCreateFactorOne) {
+    List<ReplicationConfig> list = new ArrayList<>();
+    ReplicationConfig defaultReplicationConfig = ScmUtils
+        .getDefaultReplicationConfig(conf, LOG,
+            BackgroundPipelineCreator.class.getSimpleName());
+    if (defaultReplicationConfig == null) {
+      LOG.warn("Skipping background pipeline creation: default replication "
+          + "config is invalid.");
+      return list;
+    }
+    // TODO: #CLUTIL Different replication factor may need to be supported
+    HddsProtos.ReplicationType type =
+        defaultReplicationConfig.getReplicationType();
+    if (type == EC && createRatisThreeForEcDefault) {
+      list.add(ReplicationConfig.fromProtoTypeAndFactor(RATIS,
+          ReplicationFactor.THREE));
+    }
+    if (type == EC) {
+      return list;
+    }
+
+    for (HddsProtos.ReplicationFactor factor
+        : HddsProtos.ReplicationFactor.values()) {
+      if (factor == ReplicationFactor.ZERO) {
+        continue; // Ignore it.
+      }
+      final ReplicationConfig replicationConfig =
+          ReplicationConfig.fromProtoTypeAndFactor(type, factor);
+      if (skipCreation(replicationConfig, autoCreateFactorOne)) {
+        // Skip this iteration for creating pipeline
+        continue;
+      }
+      if (!list.contains(replicationConfig)) {
+        list.add(replicationConfig);
+      }
+    }
+    return list;
   }
 
   @Override

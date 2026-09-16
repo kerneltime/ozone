@@ -26,20 +26,20 @@ OZONE-SITE.XML_ozone.om.nodes.omservice=om1,om2,om3
 OZONE-SITE.XML_ozone.om.address.omservice.om1=om1
 OZONE-SITE.XML_ozone.om.address.omservice.om2=om2
 OZONE-SITE.XML_ozone.om.address.omservice.om3=om3
-OZONE-SITE.XML_ozone.om.ratis.enable=true
 
 OZONE-SITE.XML_ozone.scm.service.ids=scmservice
 OZONE-SITE.XML_ozone.scm.nodes.scmservice=scm1,scm2,scm3
 OZONE-SITE.XML_ozone.scm.address.scmservice.scm1=scm1
 OZONE-SITE.XML_ozone.scm.address.scmservice.scm2=scm2
 OZONE-SITE.XML_ozone.scm.address.scmservice.scm3=scm3
-OZONE-SITE.XML_ozone.scm.ratis.enable=true
-OZONE-SITE.XML_ozone.scm.datanode.id.dir=/data
+OZONE-SITE.XML_ozone.scm.datanode.id.dir=/data/metadata
 OZONE-SITE.XML_ozone.scm.container.size=1GB
 OZONE-SITE.XML_ozone.scm.datanode.ratis.volume.free-space.min=10MB
+OZONE-SITE.XML_ozone.scm.ec.pipeline.minimum=1
 OZONE-SITE.XML_ozone.metadata.dirs=/data/metadata
 OZONE-SITE.XML_hdds.datanode.dir=/data/hdds
 OZONE-SITE.XML_hdds.datanode.volume.min.free.space=100MB
+OZONE-SITE.XML_hdds.datanode.volume.min.free.space.percent=0
 OZONE-SITE.XML_ozone.datanode.pipeline.limit=1
 OZONE-SITE.XML_hdds.scmclient.max.retry.timeout=30s
 OZONE-SITE.XML_ozone.scm.primordial.node.id=scm1
@@ -49,9 +49,36 @@ OZONE-SITE.XML_ozone.recon.db.dir=/data/metadata/recon
 OZONE-SITE.XML_ozone.recon.address=recon:9891
 OZONE-SITE.XML_ozone.recon.http-address=0.0.0.0:9888
 OZONE-SITE.XML_ozone.recon.https-address=0.0.0.0:9889
-OZONE-SITE.XML_dfs.container.ratis.datastream.enabled=true
+OZONE-SITE.XML_hdds.container.ratis.datastream.enabled=true
+OZONE-SITE.XML_ozone.http.basedir=/tmp/ozone_http
 
 OZONE_CONF_DIR=/etc/hadoop
 OZONE_LOG_DIR=/var/log/hadoop
 
 no_proxy=om1,om2,om3,scm,s3g,recon,kdc,localhost,127.0.0.1
+
+# Recon AI Chatbot — DISABLED by default.
+#
+# WARNING: The plaintext API key approach shown below is for LOCAL DOCKER
+# TESTING ONLY. It must NOT be used on production clusters because plaintext
+# keys are exposed via 'hadoop conf | grep api.key' and via Recon's /conf HTTP
+# endpoint. For production clusters, store the key in a Hadoop JCEKS credential
+# store instead (see ozone-site.xml.template for full setup instructions).
+#
+# To enable the chatbot locally for testing:
+#   1. Uncomment ONE block below (direct provider or gateway).
+#   2. Replace the placeholder key with a real key.
+#   3. Never commit a real key to git — rotate it immediately if you do.
+#
+# --- Direct provider (Gemini example; OpenAI and Anthropic are also supported) ---
+# OZONE-SITE.XML_ozone.recon.chatbot.enabled=true
+# OZONE-SITE.XML_ozone.recon.chatbot.provider=gemini
+# OZONE-SITE.XML_ozone.recon.chatbot.gemini.api.key=YOUR_GEMINI_API_KEY_HERE
+#
+# --- OpenAI-compatible gateway (LiteLLM etc.) — one door for all models ---
+# OZONE-SITE.XML_ozone.recon.chatbot.enabled=true
+# OZONE-SITE.XML_ozone.recon.chatbot.provider=gateway
+# OZONE-SITE.XML_ozone.recon.chatbot.gateway.base.url=https://your-gateway/v1
+# OZONE-SITE.XML_ozone.recon.chatbot.gateway.api.key=YOUR_GATEWAY_KEY_HERE
+# OZONE-SITE.XML_ozone.recon.chatbot.gateway.models=gpt-4.1,claude-sonnet,gemini-2.5-flash
+# OZONE-SITE.XML_ozone.recon.chatbot.default.model=claude-sonnet

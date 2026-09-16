@@ -18,26 +18,24 @@ Documentation       Keywords and other resources used by EC tests
 Library             OperatingSystem
 Resource            ../commonlib.robot
 Resource            ../ozone-lib/shell.robot
+Suite Setup         Get Security Enabled From Config
 
 *** Variables ***
 ${SCM}       scm
-${PREFIX}    ${EMPTY}
-${VOLUME}    vol${PREFIX}
 
 *** Keywords ***
+Count Datanodes In Service
+    ${actual} =    Execute    ozone admin datanode list --node-state HEALTHY --operational-state IN_SERVICE --json | jq -r 'length'
+    [return]       ${actual}
+
+Has Enough Datanodes
+    [arguments]    ${expected}
+    ${actual} =    Count Datanodes In Service
+    Should Be True    ${expected} <= ${actual}
+
 Prepare For Tests
     Execute             dd if=/dev/urandom of=/tmp/1mb bs=1048576 count=1
     Execute             dd if=/dev/urandom of=/tmp/2mb bs=1048576 count=2
     Execute             dd if=/dev/urandom of=/tmp/3mb bs=1048576 count=3
     Execute             dd if=/dev/urandom of=/tmp/100mb bs=1048576 count=100
     Run Keyword if      '${SECURITY_ENABLED}' == 'true'     Kinit test user    testuser    testuser.keytab
-
-# xcompat/test.sh creates unified test data files in /tmp for client containers
-Prepare Data For Xcompat Tests
-    Execute             ozone sh volume create /${VOLUME}
-    Execute             ozone sh bucket create /${VOLUME}/default
-    Execute             ozone sh bucket create --replication 3 --type RATIS /${VOLUME}/ratis
-    Execute             ozone sh bucket create --replication rs-3-2-1024k --type EC /${VOLUME}/ecbucket
-    Execute             ozone sh key put /${VOLUME}/default/3mb /tmp/3mb
-    Execute             ozone sh key put /${VOLUME}/ratis/3mb /tmp/3mb
-    Execute             ozone sh key put /${VOLUME}/ecbucket/3mb /tmp/3mb

@@ -1,35 +1,25 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with this
- * work for additional information regarding copyright ownership.  The ASF
- * licenses this file to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations under
- * the License.
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package org.apache.hadoop.hdds.scm.container.placement.algorithms;
 
-import com.google.common.annotations.VisibleForTesting;
-import org.apache.hadoop.hdds.conf.ConfigurationSource;
-import org.apache.hadoop.hdds.protocol.DatanodeDetails;
-import org.apache.hadoop.hdds.scm.ContainerPlacementStatus;
-import org.apache.hadoop.hdds.scm.SCMCommonPlacementPolicy;
-import org.apache.hadoop.hdds.scm.exceptions.SCMException;
-import org.apache.hadoop.hdds.scm.net.NetworkTopology;
-import org.apache.hadoop.hdds.scm.net.Node;
-import org.apache.hadoop.hdds.scm.node.NodeManager;
-import org.apache.hadoop.hdds.scm.pipeline.PipelineStateManager;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import static org.apache.hadoop.hdds.scm.exceptions.SCMException.ResultCodes.FAILED_TO_FIND_SUITABLE_NODE;
 
+import com.google.common.annotations.VisibleForTesting;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -39,8 +29,19 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-
-import static org.apache.hadoop.hdds.scm.exceptions.SCMException.ResultCodes.FAILED_TO_FIND_SUITABLE_NODE;
+import org.apache.hadoop.hdds.conf.ConfigurationSource;
+import org.apache.hadoop.hdds.protocol.DatanodeDetails;
+import org.apache.hadoop.hdds.scm.ContainerPlacementStatus;
+import org.apache.hadoop.hdds.scm.SCMCommonPlacementPolicy;
+import org.apache.hadoop.hdds.scm.ScmConfigKeys;
+import org.apache.hadoop.hdds.scm.container.placement.metrics.SCMNodeMetric;
+import org.apache.hadoop.hdds.scm.exceptions.SCMException;
+import org.apache.hadoop.hdds.scm.net.NetworkTopology;
+import org.apache.hadoop.hdds.scm.net.Node;
+import org.apache.hadoop.hdds.scm.node.NodeManager;
+import org.apache.hadoop.hdds.scm.pipeline.PipelineStateManager;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Container placement policy that scatter datanodes on different racks
@@ -56,7 +57,7 @@ import static org.apache.hadoop.hdds.scm.exceptions.SCMException.ResultCodes.FAI
 public final class SCMContainerPlacementRackScatter
     extends SCMCommonPlacementPolicy {
   @VisibleForTesting
-  public static final Logger LOG =
+  private static final Logger LOG =
       LoggerFactory.getLogger(SCMContainerPlacementRackScatter.class);
   private final NetworkTopology networkTopology;
   private static final int RACK_LEVEL = 1;
@@ -65,6 +66,7 @@ public final class SCMContainerPlacementRackScatter
   // INNER_LOOP is to choose node in each rack
   private static final int INNER_LOOP_MAX_RETRY = 5;
   private final SCMContainerPlacementMetrics metrics;
+  private final boolean capacityAwareNodeSelectionEnabled;
 
   /**
    * Constructs a Container Placement with rack awareness.
@@ -78,6 +80,9 @@ public final class SCMContainerPlacementRackScatter
     super(nodeManager, conf);
     this.networkTopology = networkTopology;
     this.metrics = metrics;
+    this.capacityAwareNodeSelectionEnabled = conf.getBoolean(
+        ScmConfigKeys.OZONE_SCM_CONTAINER_PLACEMENT_RACK_SCATTER_CAPACITY_AWARE_ENABLED,
+        ScmConfigKeys.OZONE_SCM_CONTAINER_PLACEMENT_RACK_SCATTER_CAPACITY_AWARE_ENABLED_DEFAULT);
   }
 
   /**
@@ -91,6 +96,9 @@ public final class SCMContainerPlacementRackScatter
     super(nodeManager, conf);
     this.networkTopology = nodeManager.getClusterNetworkTopologyMap();
     this.metrics = null;
+    this.capacityAwareNodeSelectionEnabled = conf.getBoolean(
+        ScmConfigKeys.OZONE_SCM_CONTAINER_PLACEMENT_RACK_SCATTER_CAPACITY_AWARE_ENABLED,
+        ScmConfigKeys.OZONE_SCM_CONTAINER_PLACEMENT_RACK_SCATTER_CAPACITY_AWARE_ENABLED_DEFAULT);
   }
 
   @SuppressWarnings("checkstyle:parameternumber")
@@ -127,7 +135,7 @@ public final class SCMContainerPlacementRackScatter
         skippedRacks.clear();
       }
 
-      if (mutableFavoredNodes.size() > 0) {
+      if (!mutableFavoredNodes.isEmpty()) {
         List<DatanodeDetails> chosenFavoredNodesInForLoop = new ArrayList<>();
         for (DatanodeDetails favoredNode : mutableFavoredNodes) {
           Node curRack = getRackOfDatanodeDetails(favoredNode);
@@ -446,7 +454,9 @@ public final class SCMContainerPlacementRackScatter
       }
       Node node = null;
       try {
-        node = networkTopology.chooseRandom(scope, excludedNodes);
+        node = capacityAwareNodeSelectionEnabled
+            ? chooseLessUtilizedNode(scope, excludedNodes)
+            : networkTopology.chooseRandom(scope, excludedNodes);
       } catch (Exception e) {
         if (LOG.isDebugEnabled()) {
           LOG.debug("Error while choosing Node: Scope: {}, Excluded Nodes: " +
@@ -474,12 +484,48 @@ public final class SCMContainerPlacementRackScatter
       if (maxRetry == 0) {
         // avoid the infinite loop
         LOG.info("No satisfied datanode to meet the constraints. "
-            + "Metadatadata size required: {} Data size required: {}, scope "
+            + "Metadata size required: {} Data size required: {}, scope "
             + "{}, excluded nodes {}",
             metadataSizeRequired, dataSizeRequired, scope, excludedNodes);
         return null;
       }
     }
+  }
+
+  /**
+   * Pick two distinct candidate nodes within the rack and return the one with
+   * lower space utilization, so a nearly-full datanode is not chosen as often
+   * as an emptier peer in the same rack.
+   *
+   * @param scope - the rack we are searching nodes under
+   * @param excludedNodes - list of the datanodes to exclude. Can be null.
+   * @return the chosen datanode, or null if none is available.
+   */
+  private Node chooseLessUtilizedNode(String scope, List<Node> excludedNodes) {
+    Node first = networkTopology.chooseRandom(scope, excludedNodes);
+    if (first == null) {
+      return null;
+    }
+    // Exclude the first pick so the second candidate is a distinct node.
+    // Otherwise a small rack often draws the same node twice and the capacity
+    // comparison below is skipped.
+    List<Node> secondExcludedNodes = excludedNodes == null
+        ? new ArrayList<>() : new ArrayList<>(excludedNodes);
+    secondExcludedNodes.add(first);
+    Node second = networkTopology.chooseRandom(scope, secondExcludedNodes);
+    if (second == null) {
+      LOG.debug("Unable to select a second datanode in rack {} for capacity-aware selection", scope);
+      return first;
+    }
+    SCMNodeMetric firstMetric =
+        getNodeManager().getNodeStat((DatanodeDetails) first);
+    SCMNodeMetric secondMetric =
+        getNodeManager().getNodeStat((DatanodeDetails) second);
+    if (firstMetric == null || secondMetric == null) {
+      LOG.debug("Missing node metric for capacity-aware selection between {} and {}", first, second);
+      return first;
+    }
+    return firstMetric.isGreater(secondMetric.get()) ? second : first;
   }
 
   /**

@@ -1,14 +1,13 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,32 +17,51 @@
 
 package org.apache.hadoop.hdds.scm.container.balancer;
 
+import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeOperationalState.IN_SERVICE;
+import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeState.HEALTHY;
+
 import com.google.common.annotations.VisibleForTesting;
+import java.io.IOException;
+import java.time.Duration;
+import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.conf.StorageUnit;
 import org.apache.hadoop.hdds.fs.DUFactory;
+import org.apache.hadoop.hdds.protocol.DatanodeDetails;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ContainerBalancerConfigurationProto;
 import org.apache.hadoop.hdds.scm.ScmConfigKeys;
+import org.apache.hadoop.hdds.scm.container.ContainerID;
+import org.apache.hadoop.hdds.scm.container.ContainerManager;
+import org.apache.hadoop.hdds.scm.container.ContainerNotFoundException;
 import org.apache.hadoop.hdds.scm.ha.SCMContext;
 import org.apache.hadoop.hdds.scm.ha.StatefulService;
+import org.apache.hadoop.hdds.scm.ha.StatefulServiceDefinition;
+import org.apache.hadoop.hdds.scm.node.DatanodeInfo;
 import org.apache.hadoop.hdds.scm.server.StorageContainerManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.IOException;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Container balancer is a service in SCM to move containers between over- and
  * under-utilized datanodes.
  */
-public class ContainerBalancer extends StatefulService {
+public class ContainerBalancer extends StatefulService<ContainerBalancerConfigurationProto> {
 
   private static final AtomicInteger ID = new AtomicInteger();
 
-  public static final Logger LOG =
+  private static final Logger LOG =
       LoggerFactory.getLogger(ContainerBalancer.class);
+
+  private static final String SERVICE_NAME = ContainerBalancer.class.getSimpleName();
+
+  public static final StatefulServiceDefinition<ContainerBalancerConfigurationProto> SERVICE_DEFINITION =
+      new StatefulServiceDefinition<>(SERVICE_NAME, ContainerBalancerConfigurationProto.parser());
 
   private StorageContainerManager scm;
   private final SCMContext scmContext;
@@ -53,6 +71,7 @@ public class ContainerBalancer extends StatefulService {
   private volatile Thread currentBalancingThread;
   private volatile ContainerBalancerTask task = null;
   private ReentrantLock lock;
+  private OffsetDateTime startedAt;
 
   /**
    * Constructs ContainerBalancer with the specified arguments. Initializes
@@ -62,7 +81,7 @@ public class ContainerBalancer extends StatefulService {
    * @param scm the storage container manager
    */
   public ContainerBalancer(StorageContainerManager scm) {
-    super(scm.getStatefulServiceStateManager());
+    super(scm.getStatefulServiceStateManager(), SERVICE_DEFINITION);
     this.scm = scm;
     this.ozoneConfiguration = scm.getConfiguration();
     this.config = ozoneConfiguration.getObject(
@@ -128,8 +147,7 @@ public class ContainerBalancer extends StatefulService {
   @Override
   public boolean shouldRun() {
     try {
-      ContainerBalancerConfigurationProto proto =
-          readConfiguration(ContainerBalancerConfigurationProto.class);
+      final ContainerBalancerConfigurationProto proto = readConfiguration();
       if (proto == null) {
         LOG.warn("Could not find persisted configuration for {} when checking" +
             " if ContainerBalancer should run. ContainerBalancer should not " +
@@ -176,20 +194,48 @@ public class ContainerBalancer extends StatefulService {
   }
 
   /**
+   * Get balancer status info.
+   *
+   * @return balancer status info if balancer started
+   */
+  public ContainerBalancerStatusInfo getBalancerStatusInfo() throws IOException {
+    lock.lock();
+    try {
+      if (task == null) {
+        return null;
+      }
+      ContainerBalancerTask.Status status = task.getBalancerStatus();
+      if (status == ContainerBalancerTask.Status.RUNNING
+          || status == ContainerBalancerTask.Status.STOPPING) {
+        return new ContainerBalancerStatusInfo(
+            this.startedAt,
+            config.toProtobufBuilder().setShouldRun(true).build(),
+            task.getCurrentIterationsStatistic()
+        );
+      }
+      if (status == ContainerBalancerTask.Status.STOPPED) {
+        return new ContainerBalancerStatusInfo(
+            this.startedAt,
+            config.toProtobufBuilder().setShouldRun(false).build(),
+            task.getCurrentIterationsStatistic(),
+            task.getStoppedAt(),
+            task.getStopReason(),
+            task.getStopMessage()
+        );
+      }
+      return null;
+    } finally {
+      lock.unlock();
+    }
+  }
+
+  /**
    * Checks if ContainerBalancer is in valid state to call stop.
    *
    * @return true if balancer can be stopped, otherwise false
    */
   private boolean canBalancerStop() {
     return isBalancerRunning();
-  }
-
-  /**
-   * @return Name of this service.
-   */
-  @Override
-  public String getServiceName() {
-    return ContainerBalancer.class.getSimpleName();
   }
 
   /**
@@ -204,13 +250,14 @@ public class ContainerBalancer extends StatefulService {
   @Override
   public void start() throws IllegalContainerBalancerStateException,
       InvalidContainerBalancerConfigurationException {
+    startedAt = OffsetDateTime.now();
     lock.lock();
     try {
       // should be leader-ready, out of safe mode, and not running already
       validateState(false);
-      ContainerBalancerConfigurationProto proto;
+      final ContainerBalancerConfigurationProto proto;
       try {
-        proto = readConfiguration(ContainerBalancerConfigurationProto.class);
+        proto = readConfiguration();
       } catch (IOException e) {
         throw new InvalidContainerBalancerConfigurationException("Could not " +
             "retrieve persisted configuration while starting " +
@@ -251,6 +298,7 @@ public class ContainerBalancer extends StatefulService {
   public void startBalancer(ContainerBalancerConfiguration configuration)
       throws IllegalContainerBalancerStateException,
       InvalidContainerBalancerConfigurationException, IOException {
+    startedAt = OffsetDateTime.now();
     lock.lock();
     try {
       // validates state, config, and then saves config
@@ -283,16 +331,13 @@ public class ContainerBalancer extends StatefulService {
   }
 
   /**
-   * Validates balancer's state based on the specified expectedRunning.
+   * Validates balancer's eligibility based on SCM state.
    * Confirms SCM is leader-ready and out of safe mode.
    *
-   * @param expectedRunning true if ContainerBalancer is expected to be
-   *                        running, else false
    * @throws IllegalContainerBalancerStateException if SCM is not
-   * leader-ready, is in safe mode, or state does not match the specified
-   * expected state
+   * leader-ready or is in safe mode
    */
-  private void validateState(boolean expectedRunning)
+  private void validateEligibility()
       throws IllegalContainerBalancerStateException {
     if (!scmContext.isLeaderReady()) {
       LOG.warn("SCM is not leader ready");
@@ -303,6 +348,19 @@ public class ContainerBalancer extends StatefulService {
       LOG.warn("SCM is in safe mode");
       throw new IllegalContainerBalancerStateException("SCM is in safe mode");
     }
+  }
+
+  /**
+   * Validates balancer's state based on the specified expectedRunning.
+   *
+   * @param expectedRunning true if ContainerBalancer is expected to be
+   *                        running, else false
+   * @throws IllegalContainerBalancerStateException if state does not
+   * match the specified expected state
+   */
+  private void validateState(boolean expectedRunning)
+      throws IllegalContainerBalancerStateException {
+    validateEligibility();
     if (!expectedRunning && !canBalancerStart()) {
       throw new IllegalContainerBalancerStateException(
           "Expect ContainerBalancer as not running state" +
@@ -329,6 +387,7 @@ public class ContainerBalancer extends StatefulService {
         return;
       }
       LOG.info("Trying to stop ContainerBalancer in this SCM.");
+      task.recordStopReason(ContainerBalancerStopReason.SCM_STATE_CHANGE);
       task.stop();
       balancingThread = currentBalancingThread;
     } finally {
@@ -342,10 +401,13 @@ public class ContainerBalancer extends StatefulService {
     // NOTE: join should be called outside the lock in hierarchy
     // to avoid locking others waiting
     // wait for balancingThread to die with interrupt
-    balancingThread.interrupt();
     LOG.info("Container Balancer waiting for {} to stop", balancingThread);
     try {
-      balancingThread.join();
+      while (balancingThread.isAlive()) {
+        // retry interrupt every 5ms to avoid waiting when thread is sleeping
+        balancingThread.interrupt();
+        balancingThread.join(5);
+      }
     } catch (InterruptedException exception) {
       Thread.currentThread().interrupt();
     }
@@ -359,18 +421,23 @@ public class ContainerBalancer extends StatefulService {
    */
   public void stopBalancer()
       throws IOException, IllegalContainerBalancerStateException {
-    Thread balancingThread;
+    Thread balancingThread = null;
     lock.lock();
     try {
-      validateState(true);
+      validateEligibility();
       saveConfiguration(config, false, 0);
-      LOG.info("Trying to stop ContainerBalancer service.");
-      task.stop();
-      balancingThread = currentBalancingThread;
+      if (isBalancerRunning()) {
+        LOG.info("Trying to stop ContainerBalancer service.");
+        task.recordStopReason(ContainerBalancerStopReason.USER_REQUESTED);
+        task.stop();
+        balancingThread = currentBalancingThread;
+      }
     } finally {
       lock.unlock();
     }
-    blockTillTaskStop(balancingThread);
+    if (balancingThread != null) {
+      blockTillTaskStop(balancingThread);
+    }
   }
 
   public void saveConfiguration(ContainerBalancerConfiguration configuration,
@@ -381,6 +448,11 @@ public class ContainerBalancer extends StatefulService {
         .setShouldRun(shouldRun)
         .setNextIterationIndex(index)
         .build());
+  }
+
+  @VisibleForTesting
+  public ContainerBalancerConfiguration getConfig() {
+    return this.config;
   }
 
   private void validateConfiguration(ContainerBalancerConfiguration conf)
@@ -408,6 +480,27 @@ public class ContainerBalancer extends StatefulService {
               " than ozone.scm.container.size");
     }
 
+    if (conf.getMaxSizeEnteringTarget() > conf.getMaxSizeToMovePerIteration()) {
+      LOG.warn("hdds.container.balancer.size.entering.target.max {} should be "
+              + "less than or equal to hdds.container.balancer.size.moved.max"
+              + ".per.iteration {}",
+          conf.getMaxSizeEnteringTarget(), conf.getMaxSizeToMovePerIteration());
+      throw new InvalidContainerBalancerConfigurationException(
+          "hdds.container.balancer.size.entering.target.max should be less "
+              + "than or equal to hdds.container.balancer.size.moved.max.per"
+              + ".iteration");
+    }
+    if (conf.getMaxSizeLeavingSource() > conf.getMaxSizeToMovePerIteration()) {
+      LOG.warn("hdds.container.balancer.size.leaving.source.max {} should be "
+              + "less than or equal to hdds.container.balancer.size.moved.max"
+              + ".per.iteration {}",
+          conf.getMaxSizeLeavingSource(), conf.getMaxSizeToMovePerIteration());
+      throw new InvalidContainerBalancerConfigurationException(
+          "hdds.container.balancer.size.leaving.source.max should be less "
+              + "than or equal to hdds.container.balancer.size.moved.max.per"
+              + ".iteration");
+    }
+
     // balancing interval should be greater than DUFactory refresh period
     DUFactory.Conf duConf = ozoneConfiguration.getObject(DUFactory.Conf.class);
     long refreshPeriod = duConf.getRefreshPeriod().toMillis();
@@ -428,6 +521,153 @@ public class ContainerBalancer extends StatefulService {
           "hdds.container.balancer.move.replication.timeout should " +
           "be less than hdds.container.balancer.move.timeout.");
     }
+
+    // (move.timeout - move.replication.timeout - event.timeout.datanode.offset)
+    // should be greater than or equal to 9 minutes
+    long datanodeOffset = ozoneConfiguration.getTimeDuration("hdds.scm.replication.event.timeout.datanode.offset",
+        Duration.ofMinutes(6).toMillis(), TimeUnit.MILLISECONDS);
+    if ((conf.getMoveTimeout().toMillis() - conf.getMoveReplicationTimeout().toMillis() - datanodeOffset)
+        < Duration.ofMinutes(9).toMillis()) {
+      String msg = String.format("(hdds.container.balancer.move.timeout (%sms) - " +
+              "hdds.container.balancer.move.replication.timeout (%sms) - " +
+              "hdds.scm.replication.event.timeout.datanode.offset (%sms)) " +
+              "should be greater than or equal to 540000ms or 9 minutes.",
+          conf.getMoveTimeout().toMillis(),
+          conf.getMoveReplicationTimeout().toMillis(),
+          Duration.ofMillis(datanodeOffset).toMillis());
+      LOG.warn(msg);
+      throw new InvalidContainerBalancerConfigurationException(msg);
+    }
+
+    validateNodeList(conf.getIncludeNodes(), "included");
+    validateNodeList(conf.getExcludeNodes(), "excluded");
+    validateIncludeExcludeLists(conf);
+    validateIncludeContainersExist(conf);
+    validateEligibleDatanodePool(conf);
+  }
+
+  /**
+   * Rejects include lists that are fully covered by the corresponding exclude
+   * lists, which would leave no datanodes or containers to balance.
+   */
+  private void validateIncludeExcludeLists(ContainerBalancerConfiguration conf)
+      throws InvalidContainerBalancerConfigurationException {
+    Set<String> includeNodes = conf.getIncludeNodes();
+    Set<String> excludeNodes = conf.getExcludeNodes();
+    if (!includeNodes.isEmpty() && !excludeNodes.isEmpty()) {
+      boolean allIncludedNodesExcluded = true;
+      for (String includedNode : includeNodes) {
+        if (!isIncludedNodeExcluded(includedNode, excludeNodes)) {
+          allIncludedNodesExcluded = false;
+          break;
+        }
+      }
+      if (allIncludedNodesExcluded) {
+        throw new InvalidContainerBalancerConfigurationException(
+            "include-datanodes is a subset of exclude-datanodes, no datanode can participate in balancing.");
+      }
+    }
+
+    Set<ContainerID> includeContainers = conf.getIncludeContainers();
+    Set<ContainerID> excludeContainers = conf.getExcludeContainers();
+    if (!includeContainers.isEmpty() && excludeContainers.containsAll(includeContainers)) {
+      throw new InvalidContainerBalancerConfigurationException(
+          "include-containers is a subset of exclude-containers, no container can be selected for balancing.");
+    }
+  }
+
+  private boolean isIncludedNodeExcluded(String includedNode, Set<String> excludeNodes) {
+    if (excludeNodes.contains(includedNode)) {
+      return true;
+    }
+    for (DatanodeDetails dn : scm.getScmNodeManager().getNodesByAddress(includedNode)) {
+      if (excludeNodes.contains(dn.getHostName()) || excludeNodes.contains(dn.getIpAddress())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Rejects non-empty include-containers lists when any listed container ID
+   * does not exist in SCM.
+   */
+  private void validateIncludeContainersExist(ContainerBalancerConfiguration conf)
+      throws InvalidContainerBalancerConfigurationException {
+    Set<ContainerID> includeContainers = conf.getIncludeContainers();
+    if (includeContainers.isEmpty()) {
+      return;
+    }
+
+    ContainerManager containerManager = scm.getContainerManager();
+    List<ContainerID> missingContainers = new ArrayList<>();
+    for (ContainerID containerID : includeContainers) {
+      try {
+        containerManager.getContainer(containerID);
+      } catch (ContainerNotFoundException e) {
+        missingContainers.add(containerID);
+      }
+    }
+
+    if (!missingContainers.isEmpty()) {
+      throw new InvalidContainerBalancerConfigurationException(
+          "Container Balancer cannot start: included container ID(s) " + missingContainers
+              + " do not exist in SCM.");
+    }
+  }
+
+  /**
+   * Validates that enough healthy, in-service datanodes are eligible and that
+   * {@link ContainerBalancerConfiguration#getMaxDatanodesRatioToInvolvePerIteration()}
+   * allows at least one source and one target datanode per iteration.
+   */
+  private void validateEligibleDatanodePool(ContainerBalancerConfiguration conf)
+      throws InvalidContainerBalancerConfigurationException {
+    int eligibleCount = countEligibleDatanodes(conf);
+    if (eligibleCount < 2) {
+      throw new InvalidContainerBalancerConfigurationException(String.format(
+          "Container Balancer found %d eligible datanode(s) but requires at least 2.",
+          eligibleCount));
+    }
+    int maxDatanodesToInvolve = conf.computeMaxDatanodesToInvolvePerIteration(eligibleCount);
+    if (maxDatanodesToInvolve < 2) {
+      throw new InvalidContainerBalancerConfigurationException(String.format(
+          "max-datanodes-percentage-to-involve-per-iteration=%d allows at most "
+              + "%d datanode(s) per iteration with %d eligible datanode(s), "
+              + "but at least 2 are required for a source and target datanode "
+              + "pair.",
+          conf.getMaxDatanodesPercentageToInvolvePerIteration(),
+          maxDatanodesToInvolve, eligibleCount));
+    }
+  }
+
+  /**
+   * Counts healthy, in-service datanodes that can participate in balancing after
+   * applying include/exclude datanode configuration.
+   */
+  private int countEligibleDatanodes(ContainerBalancerConfiguration conf) {
+    Set<String> excludeNodes = conf.getExcludeNodes();
+    Set<String> includeNodes = conf.getIncludeNodes();
+    List<DatanodeInfo> healthyNodes = scm.getScmNodeManager().getNodes(IN_SERVICE, HEALTHY);
+    int eligibleCount = 0;
+    for (DatanodeDetails datanode : healthyNodes) {
+      if (!shouldExcludeDatanode(datanode, excludeNodes, includeNodes)) {
+        eligibleCount++;
+      }
+    }
+    return eligibleCount;
+  }
+
+  static boolean shouldExcludeDatanode(DatanodeDetails datanode,
+      Set<String> excludeNodes, Set<String> includeNodes) {
+    if (excludeNodes.contains(datanode.getHostName()) ||
+        excludeNodes.contains(datanode.getIpAddress())) {
+      return true;
+    } else if (!includeNodes.isEmpty()) {
+      return !includeNodes.contains(datanode.getHostName()) &&
+          !includeNodes.contains(datanode.getIpAddress());
+    }
+    return false;
   }
 
   public ContainerBalancerMetrics getMetrics() {
@@ -445,5 +685,30 @@ public class ContainerBalancer extends StatefulService {
         "%-30s %s%n" +
         "%-30s %b%n", "Key", "Value", "Running", isBalancerRunning());
     return status + config.toString();
+  }
+
+  /**
+   * Validates if the provided datanodes are known by SCM.
+   *
+   * @param nodes set of datanode hostnames or IP addresses
+   * @param type context label for the error message
+   * @throws InvalidContainerBalancerConfigurationException if a node is unknown
+   */
+  private void validateNodeList(Set<String> nodes, String type)
+      throws InvalidContainerBalancerConfigurationException {
+    if (nodes == null || nodes.isEmpty()) {
+      return;
+    }
+
+    for (String node : nodes) {
+      // Check if SCM knows about this node by hostname or IP
+      if (scm.getScmNodeManager().getNodesByAddress(node).isEmpty()) {
+        String errorMessage = String.format("Invalid configuration: The %s datanode '%s' " +
+                "does not exist or is not registered with SCM. Please check the hostname/IP.",
+            type, node);
+        LOG.warn(errorMessage);
+        throw new InvalidContainerBalancerConfigurationException(errorMessage);
+      }
+    }
   }
 }

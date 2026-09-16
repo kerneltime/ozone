@@ -1,23 +1,31 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.hadoop.hdds.scm.container;
 
+import java.io.IOException;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
+import org.apache.hadoop.hdds.protocol.DatanodeID;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeOperationalState;
 import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos;
@@ -26,6 +34,7 @@ import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolPro
 import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.NodeReportProto;
 import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.PipelineReportsProto;
 import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.SCMCommandProto;
+import org.apache.hadoop.hdds.scm.HddsTestUtils;
 import org.apache.hadoop.hdds.scm.container.placement.metrics.SCMNodeMetric;
 import org.apache.hadoop.hdds.scm.container.placement.metrics.SCMNodeStat;
 import org.apache.hadoop.hdds.scm.net.NetworkTopology;
@@ -33,6 +42,7 @@ import org.apache.hadoop.hdds.scm.node.DatanodeInfo;
 import org.apache.hadoop.hdds.scm.node.DatanodeUsageInfo;
 import org.apache.hadoop.hdds.scm.node.NodeManager;
 import org.apache.hadoop.hdds.scm.node.NodeStatus;
+import org.apache.hadoop.hdds.scm.node.PendingContainerTracker;
 import org.apache.hadoop.hdds.scm.node.states.NodeNotFoundException;
 import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
 import org.apache.hadoop.hdds.scm.pipeline.PipelineID;
@@ -42,15 +52,6 @@ import org.apache.hadoop.ozone.protocol.commands.CommandForDatanode;
 import org.apache.hadoop.ozone.protocol.commands.RegisteredCommand;
 import org.apache.hadoop.ozone.protocol.commands.SCMCommand;
 
-import java.io.IOException;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-
 /**
  * Basic implementation of the NodeManager interface which can be used in tests.
  *
@@ -59,20 +60,21 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class SimpleMockNodeManager implements NodeManager {
 
-  private Map<UUID, DatanodeInfo> nodeMap = new ConcurrentHashMap<>();
-  private Map<UUID, Set<PipelineID>> pipelineMap = new ConcurrentHashMap<>();
-  private Map<UUID, Set<ContainerID>> containerMap = new ConcurrentHashMap<>();
+  private Map<DatanodeID, DatanodeInfo> nodeMap = new ConcurrentHashMap<>();
+  private Map<DatanodeID, Set<PipelineID>> pipelineMap = new ConcurrentHashMap<>();
+  private Map<DatanodeID, Set<ContainerID>> containerMap = new ConcurrentHashMap<>();
+  private PendingContainerTracker pendingContainerTracker;
 
   public void register(DatanodeDetails dd, NodeStatus status) {
     dd.setPersistedOpState(status.getOperationalState());
     dd.setPersistedOpStateExpiryEpochSec(status.getOpStateExpiryEpochSeconds());
-    nodeMap.put(dd.getUuid(), new DatanodeInfo(dd, status, null));
+    nodeMap.put(dd.getID(), new DatanodeInfo(dd, status, null, HddsTestUtils.ROLL_INTERVAL_MS_DEFAULT));
   }
 
   public void setNodeStatus(DatanodeDetails dd, NodeStatus status) {
     dd.setPersistedOpState(status.getOperationalState());
     dd.setPersistedOpStateExpiryEpochSec(status.getOpStateExpiryEpochSeconds());
-    DatanodeInfo dni = nodeMap.get(dd.getUuid());
+    DatanodeInfo dni = nodeMap.get(dd.getID());
     dni.setNodeStatus(status);
   }
 
@@ -92,7 +94,7 @@ public class SimpleMockNodeManager implements NodeManager {
     for (int i = 0; i < count; i++) {
       pipelines.add(PipelineID.randomId());
     }
-    pipelineMap.put(dd.getUuid(), pipelines);
+    pipelineMap.put(dd.getID(), pipelines);
   }
 
   /**
@@ -106,7 +108,7 @@ public class SimpleMockNodeManager implements NodeManager {
   @Override
   public NodeStatus getNodeStatus(DatanodeDetails datanodeDetails)
       throws NodeNotFoundException {
-    DatanodeInfo dni = nodeMap.get(datanodeDetails.getUuid());
+    DatanodeInfo dni = nodeMap.get(datanodeDetails.getID());
     if (dni != null) {
       return dni.getNodeStatus();
     } else {
@@ -126,12 +128,12 @@ public class SimpleMockNodeManager implements NodeManager {
                                       NodeOperationalState newState,
                                       long opStateExpiryEpocSec)
       throws NodeNotFoundException {
-    DatanodeInfo dni = nodeMap.get(dn.getUuid());
+    DatanodeInfo dni = nodeMap.get(dn.getID());
     if (dni == null) {
-      throw new NodeNotFoundException();
+      throw new NodeNotFoundException(dn.getID());
     }
     dni.setNodeStatus(
-        new NodeStatus(
+        NodeStatus.valueOf(
             newState, dni.getNodeStatus().getHealth(), opStateExpiryEpocSec));
   }
 
@@ -146,8 +148,8 @@ public class SimpleMockNodeManager implements NodeManager {
    */
   @Override
   public Set<PipelineID> getPipelines(DatanodeDetails datanodeDetails) {
-    Set<PipelineID> p = pipelineMap.get(datanodeDetails.getUuid());
-    if (p == null || p.size() == 0) {
+    Set<PipelineID> p = pipelineMap.get(datanodeDetails.getID());
+    if (p == null || p.isEmpty()) {
       return null;
     } else {
       return p;
@@ -159,11 +161,8 @@ public class SimpleMockNodeManager implements NodeManager {
     return 0;
   }
 
-  @Override
-  public void setContainers(DatanodeDetails dn,
-                            Set<ContainerID> containerIds)
-      throws NodeNotFoundException {
-    containerMap.put(dn.getUuid(), containerIds);
+  public void setContainers(DatanodeDetails dn, Set<ContainerID> containerIds) {
+    containerMap.put(dn.getID(), containerIds);
   }
 
   /**
@@ -181,7 +180,7 @@ public class SimpleMockNodeManager implements NodeManager {
     // The concrete implementation of this method in SCMNodeManager will return
     // an empty set if there are no containers, and will never return null.
     return containerMap
-        .computeIfAbsent(dn.getUuid(), key -> new HashSet<>());
+        .computeIfAbsent(dn.getID(), key -> new HashSet<>());
   }
 
   /**
@@ -195,7 +194,7 @@ public class SimpleMockNodeManager implements NodeManager {
   }
 
   @Override
-  public List<DatanodeDetails> getNodes(
+  public List<DatanodeInfo> getNodes(
       NodeOperationalState opState, HddsProtos.NodeState health) {
     return null;
   }
@@ -212,8 +211,8 @@ public class SimpleMockNodeManager implements NodeManager {
   }
 
   @Override
-  public List<DatanodeDetails> getAllNodes() {
-    return null;
+  public List<DatanodeInfo> getAllNodes() {
+    return Collections.emptyList();
   }
 
   @Override
@@ -246,6 +245,24 @@ public class SimpleMockNodeManager implements NodeManager {
   }
 
   @Override
+  public boolean checkSpaceAndRecordAllocation(DatanodeInfo datanodeInfo, ContainerID containerID) {
+    return true;
+  }
+
+  @Override
+  public void recordAllocationForDatanode(DatanodeInfo datanodeInfo, ContainerID containerID) {
+  }
+  
+  @Override
+  public boolean hasAvailableSpace(DatanodeInfo datanodeInfo) {
+    return true;
+  }
+
+  @Override
+  public void removePendingAllocationForDatanode(DatanodeInfo datanodeInfo, ContainerID containerID) {
+  }
+
+  @Override
   public SCMNodeMetric getNodeStat(DatanodeDetails datanodeDetails) {
     return null;
   }
@@ -270,7 +287,7 @@ public class SimpleMockNodeManager implements NodeManager {
   }
 
   @Override
-  public void addDatanodeCommand(UUID dnId, SCMCommand command) {
+  public void addDatanodeCommand(DatanodeID datanodeID, SCMCommand<?> command) {
   }
 
   /**
@@ -313,7 +330,7 @@ public class SimpleMockNodeManager implements NodeManager {
    * @return The count of commands queued, or zero if none.
    */
   @Override
-  public int getCommandQueueCount(UUID dnID, SCMCommandProto.Type cmdType) {
+  public int getCommandQueueCount(DatanodeID dnID, SCMCommandProto.Type cmdType) {
     return 0;
   }
 
@@ -342,12 +359,12 @@ public class SimpleMockNodeManager implements NodeManager {
   }
 
   @Override
-  public List<SCMCommand> getCommandQueue(UUID dnID) {
+  public List<SCMCommand<?>> getCommandQueue(DatanodeID dnID) {
     return null;
   }
 
   @Override
-  public DatanodeDetails getNodeByUuid(String uuid) {
+  public DatanodeInfo getNode(DatanodeID id) {
     return null;
   }
 
@@ -362,11 +379,6 @@ public class SimpleMockNodeManager implements NodeManager {
   }
 
   @Override
-  public int minHealthyVolumeNum(List<DatanodeDetails> dnList) {
-    return 0;
-  }
-
-  @Override
   public int totalHealthyVolumeCount() {
     return 0;
   }
@@ -377,8 +389,8 @@ public class SimpleMockNodeManager implements NodeManager {
   }
 
   @Override
-  public int minPipelineLimit(List<DatanodeDetails> dn) {
-    return 0;
+  public int openContainerLimit(List<DatanodeDetails> datanodes) {
+    return 9;
   }
 
   @Override
@@ -427,8 +439,7 @@ public class SimpleMockNodeManager implements NodeManager {
   }
 
   @Override
-  public List<SCMCommand> processHeartbeat(DatanodeDetails datanodeDetails,
-      LayoutVersionProto layoutInfo,
+  public List<SCMCommand<?>> processHeartbeat(DatanodeDetails datanodeDetails,
       CommandQueueReportProto commandQueueReportProto) {
     return null;
   }
@@ -438,4 +449,12 @@ public class SimpleMockNodeManager implements NodeManager {
     return false;
   }
 
+  @Override
+  public PendingContainerTracker getPendingContainerTracker() {
+    int rollIntervalMs = 5 * 60 * 1000;
+    if (pendingContainerTracker == null) {
+      pendingContainerTracker = new PendingContainerTracker(5L * 1024 * 1024 * 1024, rollIntervalMs, null);
+    }
+    return pendingContainerTracker;
+  }
 }

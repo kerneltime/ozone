@@ -1,11 +1,10 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
  *      http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -14,11 +13,20 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- *
  */
 
 package org.apache.hadoop.hdds.security.x509;
 
+import java.math.BigInteger;
+import java.security.KeyPair;
+import java.security.NoSuchAlgorithmException;
+import java.security.NoSuchProviderException;
+import java.security.cert.X509Certificate;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Collections;
+import java.util.Date;
+import java.util.List;
 import org.apache.hadoop.hdds.conf.ConfigurationSource;
 import org.apache.hadoop.hdds.security.SecurityConfig;
 import org.apache.hadoop.hdds.security.x509.keys.HDDSKeyGenerator;
@@ -28,6 +36,8 @@ import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
 import org.bouncycastle.asn1.x509.AuthorityKeyIdentifier;
 import org.bouncycastle.asn1.x509.BasicConstraints;
 import org.bouncycastle.asn1.x509.Extension;
+import org.bouncycastle.asn1.x509.GeneralName;
+import org.bouncycastle.asn1.x509.GeneralNames;
 import org.bouncycastle.asn1.x509.SubjectKeyIdentifier;
 import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
 import org.bouncycastle.cert.X509ExtensionUtils;
@@ -41,22 +51,13 @@ import org.bouncycastle.operator.OperatorCreationException;
 import org.bouncycastle.operator.bc.BcDigestCalculatorProvider;
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 
-import java.math.BigInteger;
-import java.security.KeyPair;
-import java.security.NoSuchAlgorithmException;
-import java.security.NoSuchProviderException;
-import java.security.cert.X509Certificate;
-import java.time.Duration;
-import java.time.Instant;
-import java.util.Date;
-
 /**
  * Test utilities to create simple certificates/keys for testing.
  */
 public final class CertificateTestUtils {
-  private CertificateTestUtils() { }
-
   private static final String HASH_ALGO = "SHA256WithRSA";
+
+  private CertificateTestUtils() { }
 
   /**
    * Generates a keypair using the HDDSKeyGenerator with the given config.
@@ -127,6 +128,58 @@ public final class CertificateTestUtils {
   public static X509Certificate createSelfSignedCert(KeyPair keys,
       String commonName, Duration expiresIn, BigInteger certId)
       throws Exception {
+    return createSelfSignedCert(keys, commonName, expiresIn, certId,
+        Collections.emptyList());
+  }
+
+  /**
+   * Creates a self-signed certificate and returns it as an X509Certificate.
+   * The given keys, common name and subject alternative names are being
+   * used in the certificate. The certificate will have its serial id
+   * generated based on the hashcode of the public key, and will expire
+   * after 1 day.
+   *
+   * <p>Hostname verifiers (e.g. Netty's, since 4.1.135) match the peer
+   * host against the certificate's subject alternative names, not its
+   * common name -- a certificate without a matching SAN entry will fail
+   * verification even if the common name matches.
+   *
+   * @param keys       the keypair to use for the certificate
+   * @param commonName the common name used in the certificate
+   * @param subjectAlternativeNames DNS names to add as subject alternative
+   *                                names, e.g. the hostname a test connects
+   *                                to
+   * @return the X509Certificate representing a self-signed certificate
+   * @throws Exception in case any error occurs during the certificate creation
+   */
+  public static X509Certificate createSelfSignedCert(KeyPair keys,
+      String commonName, List<String> subjectAlternativeNames)
+      throws Exception {
+    return createSelfSignedCert(keys, commonName, Duration.ofDays(1),
+        BigInteger.valueOf(keys.getPublic().hashCode()),
+        subjectAlternativeNames);
+  }
+
+  /**
+   * Creates a self-signed certificate and returns it as an X509Certificate.
+   * The given keys, common name and subject alternative names are being
+   * used in the certificate. The certificate will expire after the
+   * specified duration and its id will be the specified id.
+   *
+   * @param keys       the keypair to use for the certificate
+   * @param commonName the common name used in the certificate
+   * @param expiresIn  the lifespan of the certificate
+   * @param certId     the id of the generated certificate
+   * @param subjectAlternativeNames DNS names to add as subject alternative
+   *                                names, e.g. the hostname a test connects
+   *                                to
+   * @return the X509Certificate representing a self-signed certificate
+   * @throws Exception in case any error occurs during the certificate creation
+   */
+  public static X509Certificate createSelfSignedCert(KeyPair keys,
+      String commonName, Duration expiresIn, BigInteger certId,
+      List<String> subjectAlternativeNames)
+      throws Exception {
     final Instant now = Instant.now();
     final Date notBefore = Date.from(now);
     final Date notAfter = Date.from(now.plus(expiresIn));
@@ -152,6 +205,15 @@ public final class CertificateTestUtils {
         .addExtension(Extension.authorityKeyIdentifier, false, authorityKeyId)
         .addExtension(Extension.basicConstraints, true, constraints);
 
+    if (!subjectAlternativeNames.isEmpty()) {
+      GeneralName[] names = subjectAlternativeNames.stream()
+          .map(san -> new GeneralName(GeneralName.dNSName, san))
+          .toArray(GeneralName[]::new);
+      certificateBuilder.addExtension(Extension.subjectAlternativeName,
+          false, new GeneralNames(names));
+    }
+
+    //TODO: as part of HDDS-10743 ensure that converter is instantiated only once
     return new JcaX509CertificateConverter()
         .setProvider(new BouncyCastleProvider())
         .getCertificate(certificateBuilder.build(contentSigner));

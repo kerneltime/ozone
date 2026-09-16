@@ -1,14 +1,13 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,18 +17,18 @@
 
 package org.apache.hadoop.ozone.s3.signature;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.ZonedDateTime;
 import java.util.HashMap;
 import java.util.Map;
-
-import org.apache.kerby.util.Hex;
 import org.apache.hadoop.ozone.s3.signature.AWSSignatureProcessor.LowerCaseKeyStringMap;
+import org.apache.kerby.util.Hex;
 import org.junit.jupiter.api.Test;
-
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Tests for {@link AuthorizationV4QueryParser}.
@@ -77,8 +76,11 @@ public class TestAuthorizationV4QueryParser {
     parameters.put("X-Amz-SignedHeaders", "host");
     parameters.put("X-Amz-Signature",
         "aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404");
-    assertThrows(MalformedResourceException.class,
+    // A genuinely malformed request (missing date) stays a 400, not 403.
+    MalformedResourceException missingDate = assertThrows(
+        MalformedResourceException.class,
         () -> new AuthorizationV4QueryParser(parameters).parseSignature());
+    assertFalse(missingDate instanceof AccessDeniedResourceException);
 
     // Empty date
     parameters.put("X-Amz-Date", "");
@@ -101,18 +103,18 @@ public class TestAuthorizationV4QueryParser {
     assertThrows(MalformedResourceException.class,
         () -> new AuthorizationV4QueryParser(parameters).parseSignature());
 
-    // Invalid expires
+    // Out-of-range expires -> 403 (AccessDenied), not 400.
     parameters.put("X-Amz-Expires", "0");
-    assertThrows(MalformedResourceException.class,
+    assertThrows(AccessDeniedResourceException.class,
         () -> new AuthorizationV4QueryParser(parameters).parseSignature());
     parameters.put("X-Amz-Expires", "604801");
-    assertThrows(MalformedResourceException.class,
+    assertThrows(AccessDeniedResourceException.class,
         () -> new AuthorizationV4QueryParser(parameters).parseSignature());
 
-    // Expired request
+    // Expired request -> 403 (AccessDenied), not 400.
     parameters.put("X-Amz-Date", "20160801T083241Z");
     parameters.put("X-Amz-Expires", "10000");
-    assertThrows(MalformedResourceException.class,
+    assertThrows(AccessDeniedResourceException.class,
         () -> new AuthorizationV4QueryParser(parameters).parseSignature());
 
   }

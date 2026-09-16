@@ -1,21 +1,52 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with this
- * work for additional information regarding copyright ownership.  The ASF
- * licenses this file to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations under
- * the License.
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
+
 package org.apache.hadoop.hdds.scm.container.placement.algorithms;
 
+import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeOperationalState.DECOMMISSIONED;
+import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeState.HEALTHY;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_DATANODE_RATIS_VOLUME_FREE_SPACE_MIN;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_CONTAINER_PLACEMENT_RACK_SCATTER_CAPACITY_AWARE_ENABLED;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_PIPELINE_PLACEMENT_IMPL_KEY;
+import static org.apache.hadoop.hdds.scm.exceptions.SCMException.ResultCodes.FAILED_TO_FIND_HEALTHY_NODES;
+import static org.apache.hadoop.hdds.scm.net.NetConstants.LEAF_SCHEMA;
+import static org.apache.hadoop.hdds.scm.net.NetConstants.RACK_SCHEMA;
+import static org.apache.hadoop.hdds.scm.net.NetConstants.ROOT_SCHEMA;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.conf.StorageUnit;
@@ -26,6 +57,7 @@ import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolPro
 import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.StorageReportProto;
 import org.apache.hadoop.hdds.scm.ContainerPlacementStatus;
 import org.apache.hadoop.hdds.scm.HddsTestUtils;
+import org.apache.hadoop.hdds.scm.container.placement.metrics.SCMNodeMetric;
 import org.apache.hadoop.hdds.scm.exceptions.SCMException;
 import org.apache.hadoop.hdds.scm.net.NetConstants;
 import org.apache.hadoop.hdds.scm.net.NetworkTopology;
@@ -44,36 +76,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
-
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
-import java.util.stream.Collectors;
-import java.util.stream.IntStream;
-import java.util.stream.Stream;
-
-import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeOperationalState.DECOMMISSIONED;
-import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeState.HEALTHY;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_DATANODE_RATIS_VOLUME_FREE_SPACE_MIN;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_PIPELINE_PLACEMENT_IMPL_KEY;
-import static org.apache.hadoop.hdds.scm.exceptions.SCMException.ResultCodes.FAILED_TO_FIND_HEALTHY_NODES;
-import static org.apache.hadoop.hdds.scm.net.NetConstants.LEAF_SCHEMA;
-import static org.apache.hadoop.hdds.scm.net.NetConstants.RACK_SCHEMA;
-import static org.apache.hadoop.hdds.scm.net.NetConstants.ROOT_SCHEMA;
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /**
  * Test for the scm container rack aware placement.
@@ -98,8 +100,8 @@ public class TestSCMContainerPlacementRackScatter {
 
   private void updateStorageInDatanode(int dnIndex, long used, long remaining) {
     StorageReportProto storage = HddsTestUtils.createStorageReport(
-            dnInfos.get(dnIndex).getUuid(),
-            "/data1-" + dnInfos.get(dnIndex).getUuidString(),
+            dnInfos.get(dnIndex).getID(),
+            "/data1-" + dnInfos.get(dnIndex).getID(),
             STORAGE_CAPACITY, used, remaining, null);
     dnInfos.get(dnIndex).updateStorageReports(
             new ArrayList<>(Arrays.asList(storage)));
@@ -181,14 +183,15 @@ public class TestSCMContainerPlacementRackScatter {
     cluster.add(datanodeDetails);
     DatanodeInfo datanodeInfo = new DatanodeInfo(
         datanodeDetails, NodeStatus.inServiceHealthy(),
-        UpgradeUtils.defaultLayoutVersionProto());
+        UpgradeUtils.defaultLayoutVersionProto(),
+        HddsTestUtils.ROLL_INTERVAL_MS_DEFAULT);
 
     StorageReportProto storage1 = HddsTestUtils.createStorageReport(
-        datanodeInfo.getUuid(), "/data1-" + datanodeInfo.getUuidString(),
+        datanodeInfo.getID(), "/data1-" + datanodeInfo.getID(),
         STORAGE_CAPACITY, 0, 100L, null);
     MetadataStorageReportProto metaStorage1 =
         HddsTestUtils.createMetadataStorageReport(
-            "/metadata1-" + datanodeInfo.getUuidString(),
+            "/metadata1-" + datanodeInfo.getID(),
             STORAGE_CAPACITY, 0, 100L, null);
     datanodeInfo.updateStorageReports(
         new ArrayList<>(Collections.singletonList(storage1)));
@@ -200,40 +203,40 @@ public class TestSCMContainerPlacementRackScatter {
   private void createMocksAndUpdateStorageReports(int datanodeCount) {
     if (datanodeCount > 4) {
       StorageReportProto storage2 = HddsTestUtils.createStorageReport(
-          dnInfos.get(2).getUuid(),
-          "/data1-" + datanodes.get(2).getUuidString(),
+          dnInfos.get(2).getID(),
+          "/data1-" + datanodes.get(2).getID(),
           STORAGE_CAPACITY, 90L, 10L, null);
       dnInfos.get(2).updateStorageReports(
           new ArrayList<>(Arrays.asList(storage2)));
       StorageReportProto storage3 = HddsTestUtils.createStorageReport(
-          dnInfos.get(3).getUuid(),
-          "/data1-" + dnInfos.get(3).getUuidString(),
+          dnInfos.get(3).getID(),
+          "/data1-" + dnInfos.get(3).getID(),
           STORAGE_CAPACITY, 80L, 20L, null);
       dnInfos.get(3).updateStorageReports(
           new ArrayList<>(Arrays.asList(storage3)));
       StorageReportProto storage4 = HddsTestUtils.createStorageReport(
-          dnInfos.get(4).getUuid(),
-          "/data1-" + dnInfos.get(4).getUuidString(),
+          dnInfos.get(4).getID(),
+          "/data1-" + dnInfos.get(4).getID(),
           STORAGE_CAPACITY, 70L, 30L, null);
       dnInfos.get(4).updateStorageReports(
           new ArrayList<>(Arrays.asList(storage4)));
     } else if (datanodeCount > 3) {
       StorageReportProto storage2 = HddsTestUtils.createStorageReport(
-          dnInfos.get(2).getUuid(),
-          "/data1-" + dnInfos.get(2).getUuidString(),
+          dnInfos.get(2).getID(),
+          "/data1-" + dnInfos.get(2).getID(),
           STORAGE_CAPACITY, 90L, 10L, null);
       dnInfos.get(2).updateStorageReports(
           new ArrayList<>(Arrays.asList(storage2)));
       StorageReportProto storage3 = HddsTestUtils.createStorageReport(
-          dnInfos.get(3).getUuid(),
-          "/data1-" + dnInfos.get(3).getUuidString(),
+          dnInfos.get(3).getID(),
+          "/data1-" + dnInfos.get(3).getID(),
           STORAGE_CAPACITY, 80L, 20L, null);
       dnInfos.get(3).updateStorageReports(
           new ArrayList<>(Arrays.asList(storage3)));
     } else if (datanodeCount > 2) {
       StorageReportProto storage2 = HddsTestUtils.createStorageReport(
-          dnInfos.get(2).getUuid(),
-          "/data1-" + dnInfos.get(2).getUuidString(),
+          dnInfos.get(2).getID(),
+          "/data1-" + dnInfos.get(2).getID(),
           STORAGE_CAPACITY, 84L, 16L, null);
       dnInfos.get(2).updateStorageReports(
           new ArrayList<>(Arrays.asList(storage2)));
@@ -244,11 +247,31 @@ public class TestSCMContainerPlacementRackScatter {
     when(nodeManager.getNodes(NodeStatus.inServiceHealthy()))
         .thenReturn(new ArrayList<>(datanodes));
     for (DatanodeInfo dn: dnInfos) {
-      when(nodeManager.getNodeByUuid(dn.getUuid()))
+      when(nodeManager.getNode(dn.getID()))
           .thenReturn(dn);
     }
     when(nodeManager.getClusterNetworkTopologyMap())
         .thenReturn(cluster);
+    when(nodeManager.hasAvailableSpace(any(DatanodeInfo.class))).thenAnswer(invocation -> {
+      DatanodeInfo di = invocation.getArgument(0);
+      return di.getStorageReports().stream().anyMatch(r -> r.getRemaining() > 1L);
+    });
+    when(nodeManager.getNodeStat(any(DatanodeDetails.class))).thenAnswer(invocation -> {
+      DatanodeDetails dd = invocation.getArgument(0);
+      DatanodeInfo di = dnInfos.stream()
+          .filter(d -> d.getID().equals(dd.getID()))
+          .findFirst().orElse(null);
+      if (di == null) {
+        return null;
+      }
+      long capacity = di.getStorageReports().stream()
+          .mapToLong(StorageReportProto::getCapacity).sum();
+      long used = di.getStorageReports().stream()
+          .mapToLong(StorageReportProto::getScmUsed).sum();
+      long remaining = di.getStorageReports().stream()
+          .mapToLong(StorageReportProto::getRemaining).sum();
+      return new SCMNodeMetric(capacity, used, remaining, 0, remaining, 0);
+    });
 
     // create placement policy instances
     policy = new SCMContainerPlacementRackScatter(
@@ -456,14 +479,12 @@ public class TestSCMContainerPlacementRackScatter {
   public void testNoInfiniteLoop(int datanodeCount) {
     setup(datanodeCount);
     int nodeNum = 1;
-
-    try {
-      // request storage space larger than node capability
-      policy.chooseDatanodes(null, null, nodeNum, STORAGE_CAPACITY + 0, 15);
-      fail("Storage requested exceeds capacity, this call should fail");
-    } catch (Exception e) {
-      assertEquals("SCMException", e.getClass().getSimpleName());
-    }
+    // request storage space larger than node capability
+    Exception e =
+        assertThrows(Exception.class,
+            () -> policy.chooseDatanodes(null, null, nodeNum, STORAGE_CAPACITY + 0, 15),
+            "Storage requested exceeds capacity, this call should fail");
+    assertEquals("SCMException", e.getClass().getSimpleName());
 
     // get metrics
     long totalRequest = metrics.getDatanodeRequestCount();
@@ -493,14 +514,15 @@ public class TestSCMContainerPlacementRackScatter {
           hostname + i, null);
       DatanodeInfo dnInfo = new DatanodeInfo(
           dn, NodeStatus.inServiceHealthy(),
-          UpgradeUtils.defaultLayoutVersionProto());
+          UpgradeUtils.defaultLayoutVersionProto(),
+          HddsTestUtils.ROLL_INTERVAL_MS_DEFAULT);
 
       StorageReportProto storage1 = HddsTestUtils.createStorageReport(
-          dnInfo.getUuid(), "/data1-" + dnInfo.getUuidString(),
+          dnInfo.getID(), "/data1-" + dnInfo.getID(),
           STORAGE_CAPACITY, 0, 100L, null);
       MetadataStorageReportProto metaStorage1 =
           HddsTestUtils.createMetadataStorageReport(
-          "/metadata1-" + dnInfo.getUuidString(),
+          "/metadata1-" + dnInfo.getID(),
           STORAGE_CAPACITY, 0, 100L, null);
       dnInfo.updateStorageReports(
           new ArrayList<>(Arrays.asList(storage1)));
@@ -514,7 +536,7 @@ public class TestSCMContainerPlacementRackScatter {
     assertEquals(dataList.size(), StringUtils.countMatches(
         clusterMap.toString(), NetConstants.DEFAULT_RACK));
     for (DatanodeInfo dn: dnInfoList) {
-      when(nodeManager.getNodeByUuid(dn.getUuid()))
+      when(nodeManager.getNode(dn.getID()))
           .thenReturn(dn);
     }
 
@@ -829,7 +851,7 @@ public class TestSCMContainerPlacementRackScatter {
     setup(datanodeCount);
 
     // DN 5 is out of service
-    dnInfos.get(5).setNodeStatus(new NodeStatus(DECOMMISSIONED, HEALTHY));
+    dnInfos.get(5).setNodeStatus(NodeStatus.valueOf(DECOMMISSIONED, HEALTHY));
 
     // SCM should have detected that DN 5 is dead
     cluster.remove(datanodes.get(5));
@@ -896,6 +918,21 @@ public class TestSCMContainerPlacementRackScatter {
     assertEquals(1, chosenNodes.size());
   }
 
+  @Test
+  public void chooseNodeWithinRackPrefersLessUtilizedWhenEnabled() throws SCMException {
+    setup(2, 2);
+    conf.setBoolean(OZONE_SCM_CONTAINER_PLACEMENT_RACK_SCATTER_CAPACITY_AWARE_ENABLED, true);
+    policy = new SCMContainerPlacementRackScatter(nodeManager, conf, cluster, true, metrics);
+    when(nodeManager.getNodeStat(datanodes.get(0)))
+        .thenReturn(new SCMNodeMetric(100L, 10L, 90L, 0L, 0L, 0L));
+    when(nodeManager.getNodeStat(datanodes.get(1)))
+        .thenReturn(new SCMNodeMetric(100L, 90L, 10L, 0L, 0L, 0L));
+
+    List<DatanodeDetails> chosen = policy.chooseDatanodes(
+        new ArrayList<>(), new ArrayList<>(), null, 1, 0, 0);
+
+    assertEquals(Collections.singletonList(datanodes.get(0)), chosen);
+  }
 
   private int getRackSize(List<DatanodeDetails>... datanodeDetails) {
     Set<Node> racks = new HashSet<>();

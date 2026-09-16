@@ -2,16 +2,7 @@
 
 ## Supported Versions
 
-The first stable release of Apache Ozone is 1.0, the previous alpha and beta releases are not supported by the community.
-
-| Version       | Supported          |
-| ------------- | ------------------ |
-| 0.3.0 (alpha) | :x:                |
-| 0.4.0 (alpha) | :x:                |
-| 0.4.1 (alpha) | :x:                |
-| 0.5.0 (beta)  | :x:                |
-| 1.0           | :white_check_mark: |
-| 1.1           | :white_check_mark: |
+Please check the Apache Ozone [website](https://ozone.apache.org/download/) for the list of versions currently supported.
 
 ## Reporting a Vulnerability
 
@@ -22,3 +13,13 @@ This email address is a private mailing list for discussion of potential securit
 This mailing list is **NOT** for end-user questions and discussion on security. Please use the dev@ozone.apache.org list for such issues.
 
 In order to post to the list, it is **NOT** necessary to first subscribe to it.
+
+## Threat Model
+
+A threat model for Apache Ozone is maintained in [THREAT_MODEL.md](THREAT_MODEL.md).
+It describes the multi-service trust boundaries (S3 Gateway, OM, SCM/CA,
+Datanodes/Ratis), the load-bearing role of **secure mode**
+(`ozone.security.enabled`), the properties Ozone provides versus those left to
+the operator (Kerberos KDC, Ranger policy correctness, SCM CA key, KMS, network
+isolation), and the recurring non-findings. Triagers of scanner, fuzzer, or
+AI-generated findings should route them through `THREAT_MODEL.md` section 13.

@@ -1,11 +1,10 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- *  with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
  *      http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -14,17 +13,11 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- *
  */
+
 package org.apache.hadoop.hdds.utils.db;
 
-import org.apache.hadoop.hdds.StringUtils;
-import org.apache.ratis.util.Preconditions;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import javax.annotation.Nonnull;
-import java.io.IOException;
+import jakarta.annotation.Nonnull;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.Charset;
@@ -34,6 +27,10 @@ import java.nio.charset.CoderResult;
 import java.nio.charset.CodingErrorAction;
 import java.util.Objects;
 import java.util.function.Function;
+import org.apache.hadoop.hdds.StringUtils;
+import org.apache.ratis.util.Preconditions;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * An abstract {@link Codec} to serialize/deserialize {@link String}
@@ -45,6 +42,9 @@ abstract class StringCodecBase implements Codec<String> {
   private final Charset charset;
   private final boolean fixedLength;
   private final int maxBytesPerChar;
+  // CharsetEncoder/CharsetDecoder are stateful and not thread-safe: reuse one per thread.
+  private final ThreadLocal<CharsetEncoder> threadLocalEncoder = ThreadLocal.withInitial(this::newEncoder);
+  private final ThreadLocal<CharsetDecoder> threadLocalDecoder = ThreadLocal.withInitial(this::newDecoder);
 
   StringCodecBase(Charset charset) {
     this.charset = charset;
@@ -57,6 +57,11 @@ abstract class StringCodecBase implements Codec<String> {
           + ": maxBytesPerChar = " + max + " is not an integer.");
     }
     this.fixedLength = max == encoder.averageBytesPerChar();
+  }
+
+  @Override
+  public final Class<String> getTypeClass() {
+    return String.class;
   }
 
   CharsetEncoder newEncoder() {
@@ -76,7 +81,7 @@ abstract class StringCodecBase implements Codec<String> {
    * <p>
    * For a fixed-length {@link Codec},
    * each character is encoded to the same number of bytes and
-   * {@link #getSerializedSizeUpperBound(String)} equals to the serialized size.
+   * {@code getSerializedSizeUpperBound(String)} equals to the serialized size.
    */
   public boolean isFixedLength() {
     return fixedLength;
@@ -88,15 +93,14 @@ abstract class StringCodecBase implements Codec<String> {
    *         When {@link #isFixedLength()} is true,
    *         the upper bound equals to the serialized size.
    */
-  @Override
-  public int getSerializedSizeUpperBound(String s) {
+  private int getSerializedSizeUpperBound(String s) {
     return maxBytesPerChar * s.length();
   }
 
   private <E extends Exception> PutToByteBuffer<E> encode(
       String string, Integer serializedSize, Function<String, E> newE) {
     return buffer -> {
-      final CoderResult result = newEncoder().encode(
+      final CoderResult result = threadLocalEncoder.get().reset().encode(
           CharBuffer.wrap(string), buffer, true);
       if (result.isError()) {
         throw newE.apply("Failed to encode with " + charset + ": " + result
@@ -111,20 +115,29 @@ abstract class StringCodecBase implements Codec<String> {
     };
   }
 
-  String decode(ByteBuffer buffer) {
+  String decodeNoFallback(ByteBuffer buffer) throws CodecException {
+    try {
+      return threadLocalDecoder.get().decode(buffer.asReadOnlyBuffer()).toString();
+    } catch (Exception e) {
+      throw new CodecException("Failed to decode " + buffer, e);
+    }
+  }
+
+  String decodeWithFallback(ByteBuffer buffer) {
     Runnable error = null;
     try {
-      return newDecoder().decode(buffer.asReadOnlyBuffer()).toString();
+      return threadLocalDecoder.get().decode(buffer.asReadOnlyBuffer()).toString();
     } catch (Exception e) {
-      error = () -> LOG.warn("Failed to decode buffer with " + charset
-          + ", buffer = (hex) " + StringUtils.bytes2Hex(buffer), e);
+      error = () -> LOG.warn("Failed to decode buffer with {}, buffer = (hex) {}",
+          charset, StringUtils.bytes2Hex(buffer, 20), e);
 
       // For compatibility, try decoding using StringUtils.
       final String decoded = StringUtils.bytes2String(buffer, charset);
       // Decoded successfully, update error message.
-      error = () -> LOG.warn("Decode (hex) " + StringUtils.bytes2Hex(buffer, 20)
-          + "\n  Attempt failed : " + charset + " (see exception below)"
-          + "\n  Retry succeeded: decoded to " + decoded, e);
+      error = () -> LOG.warn("Decode (hex) {}" +
+              "\n  Attempt failed : {} (see exception below)" +
+              "\n  Retry succeeded: decoded to {}",
+          StringUtils.bytes2Hex(buffer, 20), charset, decoded, e);
       return decoded;
     } finally {
       if (error != null) {
@@ -167,33 +180,47 @@ abstract class StringCodecBase implements Codec<String> {
   }
 
   @Override
-  public CodecBuffer toCodecBuffer(@Nonnull String object,
-      CodecBuffer.Allocator allocator) throws IOException {
+  public CodecBuffer toCodecBuffer(@Nonnull String object, CodecBuffer.Allocator allocator) throws CodecException {
     // allocate a larger buffer to avoid encoding twice.
     final int upperBound = getSerializedSizeUpperBound(object);
     final CodecBuffer buffer = allocator.apply(upperBound);
-    buffer.putFromSource(encode(object, null, IOException::new));
+    buffer.putFromSource(encode(object, null, CodecException::new));
     return buffer;
   }
 
   @Override
-  public String fromCodecBuffer(@Nonnull CodecBuffer buffer)
-      throws IOException {
-    return decode(buffer.asReadOnlyByteBuffer());
+  public String fromCodecBuffer(@Nonnull CodecBuffer buffer) throws CodecException {
+    return decodeNoFallback(buffer.asReadOnlyByteBuffer());
   }
 
   @Override
-  public byte[] toPersistedFormat(String object) throws IOException {
-    return string2Bytes(object, IOException::new);
+  public byte[] toPersistedFormat(String object) throws CodecException {
+    return string2Bytes(object, CodecException::new);
   }
 
   @Override
-  public String fromPersistedFormat(byte[] bytes) {
-    return decode(ByteBuffer.wrap(bytes));
+  public String fromPersistedFormat(byte[] bytes) throws CodecException {
+    return decodeNoFallback(ByteBuffer.wrap(bytes));
   }
 
   @Override
   public String copyObject(String object) {
     return object;
+  }
+
+  static class WithFallback extends StringCodecBase {
+    WithFallback(Charset charset) {
+      super(charset);
+    }
+
+    @Override
+    public String fromCodecBuffer(@Nonnull CodecBuffer buffer) {
+      return decodeWithFallback(buffer.asReadOnlyByteBuffer());
+    }
+
+    @Override
+    public String fromPersistedFormat(byte[] bytes) {
+      return decodeWithFallback(ByteBuffer.wrap(bytes));
+    }
   }
 }

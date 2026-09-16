@@ -1,45 +1,43 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- *  with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
  *      http://www.apache.org/licenses/LICENSE-2.0
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
+
 package org.apache.hadoop.ozone.client.io;
 
+import static java.util.stream.Collectors.groupingBy;
+
+import com.google.common.annotations.VisibleForTesting;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
-import java.util.stream.Collectors;
-
 import org.apache.hadoop.hdds.client.BlockID;
+import org.apache.hadoop.hdds.scm.OzoneClientConfig;
 import org.apache.hadoop.hdds.scm.XceiverClientFactory;
 import org.apache.hadoop.hdds.scm.storage.BlockExtendedInputStream;
 import org.apache.hadoop.hdds.scm.storage.BlockLocationInfo;
 import org.apache.hadoop.hdds.scm.storage.ByteReaderStrategy;
 import org.apache.hadoop.hdds.scm.storage.MultipartInputStream;
 import org.apache.hadoop.hdds.scm.storage.PartInputStream;
+import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfo;
-
-import com.google.common.annotations.VisibleForTesting;
-import org.apache.commons.collections.CollectionUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import static java.util.stream.Collectors.groupingBy;
 
 /**
  * Maintaining a list of BlockInputStream. Read based on offset.
@@ -58,11 +56,13 @@ public class KeyInputStream extends MultipartInputStream {
       OmKeyInfo keyInfo,
       List<OmKeyLocationInfo> blockInfos,
       XceiverClientFactory xceiverClientFactory,
-      boolean verifyChecksum,
       Function<OmKeyInfo, OmKeyInfo> retryFunction,
-      BlockInputStreamFactory blockStreamFactory) {
+      BlockInputStreamFactory blockStreamFactory,
+      OzoneClientConfig config) throws IOException {
+    boolean isHsyncFile = keyInfo.getMetadata().containsKey(OzoneConsts.HSYNC_CLIENT_ID);
     List<BlockExtendedInputStream> partStreams = new ArrayList<>();
-    for (OmKeyLocationInfo omKeyLocationInfo : blockInfos) {
+    for (int i = 0; i < blockInfos.size(); i++) {
+      OmKeyLocationInfo omKeyLocationInfo = blockInfos.get(i);
       if (LOG.isDebugEnabled()) {
         LOG.debug("Adding stream for accessing {}. The stream will be " +
             "initialized later.", omKeyLocationInfo);
@@ -85,15 +85,20 @@ public class KeyInputStream extends MultipartInputStream {
         retry = null;
       }
 
+      if (i == (blockInfos.size() - 1) && isHsyncFile) {
+        // block is under construction
+        omKeyLocationInfo.setUnderConstruction(true);
+      }
+
       BlockExtendedInputStream stream =
           blockStreamFactory.create(
               keyInfo.getReplicationConfig(),
               omKeyLocationInfo,
               omKeyLocationInfo.getPipeline(),
               omKeyLocationInfo.getToken(),
-              verifyChecksum,
               xceiverClientFactory,
-              retry);
+              retry,
+              config);
       partStreams.add(stream);
     }
     return partStreams;
@@ -101,29 +106,27 @@ public class KeyInputStream extends MultipartInputStream {
 
   private static BlockLocationInfo getBlockLocationInfo(OmKeyInfo newKeyInfo,
       BlockID blockID) {
-    List<OmKeyLocationInfo> collect =
-        newKeyInfo.getLatestVersionLocations()
-            .getLocationList()
-            .stream()
-            .filter(l -> l.getBlockID().equals(blockID))
-            .collect(Collectors.toList());
-    if (CollectionUtils.isNotEmpty(collect)) {
-      return collect.get(0);
-    } else {
-      return null;
+    for (List<OmKeyLocationInfo> locationList
+        : newKeyInfo.getLatestVersionLocations().getLocationLists()) {
+      for (OmKeyLocationInfo location : locationList) {
+        if (location.getBlockID().equals(blockID)) {
+          return location;
+        }
+      }
     }
+    return null;
   }
 
   private static LengthInputStream getFromOmKeyInfo(
       OmKeyInfo keyInfo,
       XceiverClientFactory xceiverClientFactory,
-      boolean verifyChecksum,
       Function<OmKeyInfo, OmKeyInfo> retryFunction,
       BlockInputStreamFactory blockStreamFactory,
-      List<OmKeyLocationInfo> locationInfos) {
+      List<OmKeyLocationInfo> locationInfos,
+      OzoneClientConfig config) throws IOException {
     List<BlockExtendedInputStream> streams = createStreams(keyInfo,
-        locationInfos, xceiverClientFactory, verifyChecksum, retryFunction,
-        blockStreamFactory);
+        locationInfos, xceiverClientFactory, retryFunction,
+        blockStreamFactory, config);
     KeyInputStream keyInputStream =
         new KeyInputStream(keyInfo.getKeyName(), streams);
     return new LengthInputStream(keyInputStream, keyInputStream.getLength());
@@ -134,20 +137,22 @@ public class KeyInputStream extends MultipartInputStream {
    */
   public static LengthInputStream getFromOmKeyInfo(OmKeyInfo keyInfo,
       XceiverClientFactory xceiverClientFactory,
-      boolean verifyChecksum,  Function<OmKeyInfo, OmKeyInfo> retryFunction,
-      BlockInputStreamFactory blockStreamFactory) {
+      Function<OmKeyInfo, OmKeyInfo> retryFunction,
+      BlockInputStreamFactory blockStreamFactory,
+      OzoneClientConfig config) throws IOException {
 
     List<OmKeyLocationInfo> keyLocationInfos = keyInfo
         .getLatestVersionLocations().getBlocksLatestVersionOnly();
 
-    return getFromOmKeyInfo(keyInfo, xceiverClientFactory, verifyChecksum,
-        retryFunction, blockStreamFactory, keyLocationInfos);
+    return getFromOmKeyInfo(keyInfo, xceiverClientFactory,
+        retryFunction, blockStreamFactory, keyLocationInfos, config);
   }
 
   public static List<LengthInputStream> getStreamsFromKeyInfo(OmKeyInfo keyInfo,
-      XceiverClientFactory xceiverClientFactory, boolean verifyChecksum,
+      XceiverClientFactory xceiverClientFactory,
       Function<OmKeyInfo, OmKeyInfo> retryFunction,
-      BlockInputStreamFactory blockStreamFactory) {
+      BlockInputStreamFactory blockStreamFactory,
+      OzoneClientConfig config) throws IOException {
 
     List<OmKeyLocationInfo> keyLocationInfos = keyInfo
         .getLatestVersionLocations().getBlocksLatestVersionOnly();
@@ -162,7 +167,8 @@ public class KeyInputStream extends MultipartInputStream {
     // Create a KeyInputStream for each part.
     for (List<OmKeyLocationInfo> locationInfo : partsToBlocksMap.values()) {
       lengthInputStreams.add(getFromOmKeyInfo(keyInfo, xceiverClientFactory,
-          verifyChecksum, retryFunction, blockStreamFactory, locationInfo));
+          retryFunction, blockStreamFactory, locationInfo,
+          config));
     }
     return lengthInputStreams;
   }

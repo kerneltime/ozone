@@ -1,69 +1,121 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with this
- * work for additional information regarding copyright ownership.  The ASF
- * licenses this file to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations under
- * the License.
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package org.apache.hadoop.hdds.utils;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.io.OutputStream;
-import java.net.InetSocketAddress;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
-import java.util.Optional;
-import java.util.OptionalInt;
-import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
+import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_HEARTBEAT_INTERVAL;
+import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_HEARTBEAT_INTERVAL_DEFAULT;
+import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_INITIAL_HEARTBEAT_INTERVAL;
+import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_INITIAL_HEARTBEAT_INTERVAL_DEFAULT;
+import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_RECON_HEARTBEAT_INTERVAL;
+import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_RECON_HEARTBEAT_INTERVAL_DEFAULT;
+import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_RECON_INITIAL_HEARTBEAT_INTERVAL;
+import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_RECON_INITIAL_HEARTBEAT_INTERVAL_DEFAULT;
+import static org.apache.hadoop.hdds.HddsUtils.getHostName;
+import static org.apache.hadoop.hdds.HddsUtils.getHostNameFromConfigKeys;
+import static org.apache.hadoop.hdds.HddsUtils.getHostPort;
+import static org.apache.hadoop.hdds.HddsUtils.getPortNumberFromConfigKeys;
+import static org.apache.hadoop.hdds.HddsUtils.getScmServiceId;
+import static org.apache.hadoop.hdds.recon.ReconConfigKeys.OZONE_RECON_ADDRESS_KEY;
+import static org.apache.hadoop.hdds.recon.ReconConfigKeys.OZONE_RECON_DATANODE_PORT_DEFAULT;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.HDDS_DATANODE_DIR_KEY;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_ADDRESS_KEY;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_DATANODE_ADDRESS_KEY;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_DATANODE_PORT_DEFAULT;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_DATANODE_PORT_KEY;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_DEADNODE_INTERVAL;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_DEADNODE_INTERVAL_DEFAULT;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HEARTBEAT_LOG_WARN_DEFAULT;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HEARTBEAT_LOG_WARN_INTERVAL_COUNT;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HEARTBEAT_PROCESS_INTERVAL;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HEARTBEAT_RPC_RETRY_COUNT;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HEARTBEAT_RPC_RETRY_COUNT_DEFAULT;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HEARTBEAT_RPC_RETRY_INTERVAL;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HEARTBEAT_RPC_RETRY_INTERVAL_DEFAULT;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HEARTBEAT_RPC_TIMEOUT;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HEARTBEAT_RPC_TIMEOUT_DEFAULT;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_NAMES;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_STALENODE_INTERVAL;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_STALENODE_INTERVAL_DEFAULT;
+import static org.apache.hadoop.hdds.server.ServerUtils.sanitizeUserArgs;
+import static org.apache.hadoop.hdds.utils.Archiver.includeFile;
+import static org.apache.hadoop.hdds.utils.Archiver.tar;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.HDDS_DATANODE_CONTAINER_DB_DIR;
 
 import com.google.common.base.Strings;
 import com.google.protobuf.BlockingService;
-import org.apache.commons.compress.archivers.ArchiveEntry;
+import java.io.File;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.Inet6Address;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Enumeration;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.Set;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import org.apache.commons.compress.archivers.ArchiveOutputStream;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
-import org.apache.commons.compress.utils.IOUtils;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.SystemUtils;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hdds.DFSConfigKeysLegacy;
+import org.apache.hadoop.hdds.HddsConfigKeys;
+import org.apache.hadoop.hdds.HddsUtils;
 import org.apache.hadoop.hdds.conf.ConfigurationSource;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.protocol.SCMSecurityProtocol;
 import org.apache.hadoop.hdds.protocol.SecretKeyProtocolScm;
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeType;
+import org.apache.hadoop.hdds.protocolPB.SCMSecurityProtocolClientSideTranslatorPB;
 import org.apache.hadoop.hdds.protocolPB.SecretKeyProtocolClientSideTranslatorPB;
 import org.apache.hadoop.hdds.protocolPB.SecretKeyProtocolDatanodePB;
 import org.apache.hadoop.hdds.protocolPB.SecretKeyProtocolOmPB;
-import org.apache.hadoop.hdds.protocolPB.SCMSecurityProtocolClientSideTranslatorPB;
 import org.apache.hadoop.hdds.protocolPB.SecretKeyProtocolScmPB;
 import org.apache.hadoop.hdds.ratis.ServerNotLeaderException;
 import org.apache.hadoop.hdds.recon.ReconConfigKeys;
 import org.apache.hadoop.hdds.scm.ScmConfigKeys;
+import org.apache.hadoop.hdds.scm.ha.SCMNodeInfo;
+import org.apache.hadoop.hdds.scm.net.HostAndPort;
 import org.apache.hadoop.hdds.scm.protocol.ScmBlockLocationProtocol;
 import org.apache.hadoop.hdds.scm.proxy.SCMClientConfig;
-import org.apache.hadoop.hdds.scm.proxy.SecretKeyProtocolFailoverProxyProvider;
 import org.apache.hadoop.hdds.scm.proxy.SCMSecurityProtocolFailoverProxyProvider;
+import org.apache.hadoop.hdds.scm.proxy.SecretKeyProtocolFailoverProxyProvider;
 import org.apache.hadoop.hdds.scm.proxy.SingleSecretKeyProtocolProxyProvider;
+import org.apache.hadoop.hdds.security.SecurityConfig;
 import org.apache.hadoop.hdds.server.ServerUtils;
 import org.apache.hadoop.hdds.tracing.TracingUtil;
 import org.apache.hadoop.hdds.utils.db.DBCheckpoint;
-import org.apache.hadoop.ipc.ProtobufRpcEngine;
-import org.apache.hadoop.ipc.RPC;
-import org.apache.hadoop.ipc.Server;
+import org.apache.hadoop.ipc_.ProtobufRpcEngine;
+import org.apache.hadoop.ipc_.RPC;
+import org.apache.hadoop.ipc_.Server;
 import org.apache.hadoop.metrics2.MetricsException;
 import org.apache.hadoop.metrics2.MetricsSystem;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
@@ -71,34 +123,10 @@ import org.apache.hadoop.metrics2.source.JvmMetrics;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.ozone.OzoneConfigKeys;
 import org.apache.hadoop.ozone.OzoneConsts;
+import org.apache.hadoop.ozone.ha.ConfUtils;
 import org.apache.hadoop.security.UserGroupInformation;
-
-import static org.apache.hadoop.hdds.DFSConfigKeysLegacy.DFS_DATANODE_DATA_DIR_KEY;
-import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_HEARTBEAT_INTERVAL;
-import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_HEARTBEAT_INTERVAL_DEFAULT;
-import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_RECON_HEARTBEAT_INTERVAL;
-import static org.apache.hadoop.hdds.HddsConfigKeys.HDDS_RECON_HEARTBEAT_INTERVAL_DEFAULT;
-import static org.apache.hadoop.hdds.HddsUtils.getHostNameFromConfigKeys;
-import static org.apache.hadoop.hdds.HddsUtils.getPortNumberFromConfigKeys;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.HDDS_DATANODE_DIR_KEY;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_DATANODE_PORT_KEY;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_DEADNODE_INTERVAL;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_DEADNODE_INTERVAL_DEFAULT;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HEARTBEAT_LOG_WARN_DEFAULT;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HEARTBEAT_LOG_WARN_INTERVAL_COUNT;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HEARTBEAT_PROCESS_INTERVAL;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HEARTBEAT_RPC_TIMEOUT;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HEARTBEAT_RPC_TIMEOUT_DEFAULT;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HEARTBEAT_RPC_RETRY_COUNT;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HEARTBEAT_RPC_RETRY_COUNT_DEFAULT;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HEARTBEAT_RPC_RETRY_INTERVAL;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HEARTBEAT_RPC_RETRY_INTERVAL_DEFAULT;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_STALENODE_INTERVAL;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_STALENODE_INTERVAL_DEFAULT;
-import static org.apache.hadoop.hdds.server.ServerUtils.sanitizeUserArgs;
-import static org.apache.hadoop.ozone.OzoneConfigKeys.HDDS_DATANODE_CONTAINER_DB_DIR;
-
-import org.rocksdb.RocksDBException;
+import org.apache.hadoop.util.ShutdownHookManager;
+import org.apache.ratis.util.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -107,26 +135,119 @@ import org.slf4j.LoggerFactory;
  */
 public final class HddsServerUtil {
 
-  private HddsServerUtil() {
-  }
+  private static final Logger LOG = LoggerFactory.getLogger(HddsServerUtil.class);
+
+  private static final int SHUTDOWN_HOOK_PRIORITY = 0;
 
   public static final String OZONE_RATIS_SNAPSHOT_COMPLETE_FLAG_NAME =
       "OZONE_RATIS_SNAPSHOT_COMPLETE";
 
-  private static final Logger LOG = LoggerFactory.getLogger(
-      HddsServerUtil.class);
+  private HddsServerUtil() {
+  }
 
   /**
-   * Add protobuf-based protocol to the {@link RPC.Server}.
+   * Add protobuf-based protocol to the {@link org.apache.hadoop.ipc_.RPC.Server}.
    * @param conf configuration
    * @param protocol Protocol interface
    * @param service service that implements the protocol
-   * @param server RPC server to which the protocol & implementation is added to
+   * @param server RPC server to which the protocol and implementation is added to
    */
   public static void addPBProtocol(Configuration conf, Class<?> protocol,
-      BlockingService service, RPC.Server server) throws IOException {
+      BlockingService service, RPC.Server server) {
     RPC.setProtocolEngine(conf, protocol, ProtobufRpcEngine.class);
     server.addProtocol(RPC.RpcKind.RPC_PROTOCOL_BUFFER, protocol, service);
+  }
+
+  /**
+   * Iterates through network interfaces and returns all IP addresses that are valid to
+   * add to a certificate's SAN extension, as determined by
+   * {@link #isValidInetForCsr(InetAddress)}.
+   *
+   * @return List<InetAddress>
+   * @throws IOException if no network interface are found or if an error
+   * occurs.
+   */
+  public static List<InetAddress> getValidInetsForCurrentHost()
+      throws IOException {
+    List<InetAddress> hostIps = new ArrayList<>();
+
+    Enumeration<NetworkInterface> enumNI =
+        NetworkInterface.getNetworkInterfaces();
+    if (enumNI == null) {
+      throw new IOException("Unable to get network interfaces.");
+    }
+
+    while (enumNI.hasMoreElements()) {
+      NetworkInterface ifc = enumNI.nextElement();
+      if (ifc.isUp()) {
+        Enumeration<InetAddress> enumAdds = ifc.getInetAddresses();
+        while (enumAdds.hasMoreElements()) {
+          InetAddress addr = enumAdds.nextElement();
+
+          if (isValidInetForCsr(addr)) {
+            LOG.info("Adding ip:{},host:{}", addr.getHostAddress(), addr.getHostName());
+            hostIps.add(addr);
+          } else {
+            LOG.info("ip:{} not returned.", addr.getHostAddress());
+          }
+        }
+      }
+    }
+
+    return hostIps;
+  }
+
+  /**
+   * Determines whether the supplied address is valid to add to a certificate's
+   * SAN extension. Wildcard/unspecified (0.0.0.0, ::) and loopback
+   * (127.0.0.0/8, ::1) addresses are excluded for both IPv4 and IPv6, along
+   * with scoped or masked IPv6 addresses (see
+   * {@link #isScopedOrMaskingIPv6Address(InetAddress)}). Using the
+   * {@link InetAddress} predicates rather than a fixed set of address strings
+   * ensures the IPv6 forms are excluded, not just their IPv4 equivalents.
+   *
+   * @param addr the InetAddress to check
+   * @return true if the address should be added to the CSR
+   */
+  public static boolean isValidInetForCsr(InetAddress addr) {
+    return !addr.isAnyLocalAddress()
+        && !addr.isLoopbackAddress()
+        && !isScopedOrMaskingIPv6Address(addr);
+  }
+
+  /**
+   * Determines if the supplied address is an IPv6 address, with a defined scope-id and/or with a defined prefix length.
+   * <p>
+   * This method became necessary after Commons Validator was upgraded from 1.6 version to 1.10. In 1.10 version the
+   * IPv6 addresses with a scope-id and/or with a prefix specifier became valid IPv6 addresses, but as these features
+   * are changing the string representation to do not represent only the 16 octet that specifies the address, the
+   * string representation can not be used as it is as a SAN extension in X.509 anymore as in RFC-5280 this type of
+   * Subject Alternative Name is exactly 4 octets in case of an IPv4 address, and 16 octets in case of an IPv6 address.
+   * BouncyCastle does not have support to deal with these in an IPAddress typed GeneralName, so we need to keep the
+   * previous behaviour, and skip IPv6 addresses with a prefix length and/or a scope-id.
+   * <p>
+   * According to RFC-4007 and the InetAddress contract the scope-id is at the end of the address' strin
+   * representation, separated by a '%' character from the address.
+   * According to RFC-4632 there is a possibility to specify a prefix length at the end of the address to specify
+   * routing related information. RFC-4007 specifies the prefix length to come after the scope-id.
+   * <p>
+   *
+   * @param addr the InetAddress to check
+   * @return if the InetAddress is an IPv6 address and if so it contains a scope-id and/or a prefix length.
+   * @see <a href="https://datatracker.ietf.org/doc/html/rfc4007">RFC-4007 - Scoped IPv6 Addresses</a>
+   * @see <a href="https://datatracker.ietf.org/doc/html/rfc4632#section-5.1">RFC-4632 - CIDR addressing strategy -
+   *        prefix length</a>
+   * @see <a href="https://datatracker.ietf.org/doc/html/rfc5280#section-4.2.1.6">RFC-5280 - SAN description</a>
+   * @see <a href="https://issues.apache.org/jira/browse/VALIDATOR-445">VALIDATOR-445 - Commons Validator change</a>
+   * @see <a href="https://github.com/bcgit/bc-java/issues/2024">BouncyCastle issue discussion about scoped IPv6
+   *        addresses</a>
+   */
+  public static boolean isScopedOrMaskingIPv6Address(InetAddress addr) {
+    if (addr instanceof Inet6Address) {
+      String hostAddress = addr.getHostAddress();
+      return hostAddress.contains("/") || hostAddress.contains("%");
+    }
+    return false;
   }
 
   /**
@@ -216,7 +337,6 @@ public final class HddsServerUtil {
                 ScmConfigKeys.OZONE_SCM_DATANODE_PORT_DEFAULT)));
   }
 
-
   /**
    * Retrieve the socket address that should be used by DataNodes to connect
    * to Recon.
@@ -263,6 +383,18 @@ public final class HddsServerUtil {
   }
 
   /**
+   * Heartbeat Interval - Defines the initial heartbeat frequency from a datanode to
+   * SCM.
+   *
+   * @param conf - Ozone Config
+   * @return - HB interval in milli seconds.
+   */
+  public static long getScmInitialHeartbeatInterval(ConfigurationSource conf) {
+    return conf.getTimeDuration(HDDS_INITIAL_HEARTBEAT_INTERVAL,
+        HDDS_INITIAL_HEARTBEAT_INTERVAL_DEFAULT, TimeUnit.MILLISECONDS);
+  }
+
+  /**
    * Heartbeat Interval - Defines the heartbeat frequency from a datanode to
    * Recon.
    *
@@ -272,6 +404,18 @@ public final class HddsServerUtil {
   public static long getReconHeartbeatInterval(ConfigurationSource conf) {
     return conf.getTimeDuration(HDDS_RECON_HEARTBEAT_INTERVAL,
         HDDS_RECON_HEARTBEAT_INTERVAL_DEFAULT, TimeUnit.MILLISECONDS);
+  }
+
+  /**
+   * Heartbeat Interval - Defines the initial heartbeat frequency from a datanode to
+   * Recon.
+   *
+   * @param conf - Ozone Config
+   * @return - HB interval in milli seconds.
+   */
+  public static long getInitialReconHeartbeatInterval(ConfigurationSource conf) {
+    return conf.getTimeDuration(HDDS_RECON_INITIAL_HEARTBEAT_INTERVAL,
+        HDDS_RECON_INITIAL_HEARTBEAT_INTERVAL_DEFAULT, TimeUnit.MILLISECONDS);
   }
 
   /**
@@ -382,32 +526,31 @@ public final class HddsServerUtil {
    * @return port number.
    */
   public static int getContainerPort(ConfigurationSource conf) {
-    return conf.getInt(OzoneConfigKeys.DFS_CONTAINER_IPC_PORT,
-        OzoneConfigKeys.DFS_CONTAINER_IPC_PORT_DEFAULT);
+    return conf.getInt(OzoneConfigKeys.HDDS_CONTAINER_IPC_PORT,
+        OzoneConfigKeys.HDDS_CONTAINER_IPC_PORT_DEFAULT);
   }
 
   public static Collection<String> getOzoneDatanodeRatisDirectory(
       ConfigurationSource conf) {
     Collection<String> rawLocations = conf.getTrimmedStringCollection(
-            OzoneConfigKeys.DFS_CONTAINER_RATIS_DATANODE_STORAGE_DIR);
+            OzoneConfigKeys.HDDS_CONTAINER_RATIS_DATANODE_STORAGE_DIR);
 
     if (rawLocations.isEmpty()) {
       rawLocations = new ArrayList<>(1);
-      rawLocations.add(ServerUtils.getDefaultRatisDirectory(conf));
+      rawLocations.add(ServerUtils.getDefaultRatisDirectory(conf, NodeType.DATANODE));
     }
     return rawLocations;
   }
 
-  public static Collection<String> getDatanodeStorageDirs(
-      ConfigurationSource conf) {
-    Collection<String> rawLocations = conf.getTrimmedStringCollection(
-        HDDS_DATANODE_DIR_KEY);
+  public static long requiredReplicationSpace(long defaultContainerSize) {
+    // During container import it requires double the container size to hold container in tmp and dest directory
+    return 2 * defaultContainerSize;
+  }
+
+  public static Collection<String> getDatanodeStorageDirs(ConfigurationSource conf) {
+    Collection<String> rawLocations = conf.getTrimmedStringCollection(HDDS_DATANODE_DIR_KEY);
     if (rawLocations.isEmpty()) {
-      rawLocations = conf.getTrimmedStringCollection(DFS_DATANODE_DATA_DIR_KEY);
-    }
-    if (rawLocations.isEmpty()) {
-      throw new IllegalArgumentException("No location configured in either "
-          + HDDS_DATANODE_DIR_KEY + " or " + DFS_DATANODE_DATA_DIR_KEY);
+      throw new IllegalArgumentException("No location configured in " + HDDS_DATANODE_DIR_KEY);
     }
     return rawLocations;
   }
@@ -451,6 +594,7 @@ public final class HddsServerUtil {
    */
   public static SCMSecurityProtocolClientSideTranslatorPB getScmSecurityClient(
       ConfigurationSource conf) throws IOException {
+    SecurityConfig.initSecurityProvider(conf);
     return new SCMSecurityProtocolClientSideTranslatorPB(
         new SCMSecurityProtocolFailoverProxyProvider(conf,
             UserGroupInformation.getCurrentUser()));
@@ -463,6 +607,7 @@ public final class HddsServerUtil {
     // for ever. In this way DN start up is resilient to SCM service running
     // status.
     OzoneConfiguration configuration = new OzoneConfiguration(conf);
+    SecurityConfig.initSecurityProvider(configuration);
     SCMClientConfig scmClientConfig =
         conf.getObject(SCMClientConfig.class);
     int retryCount = Integer.MAX_VALUE;
@@ -482,6 +627,7 @@ public final class HddsServerUtil {
    */
   public static SCMSecurityProtocolClientSideTranslatorPB getScmSecurityClient(
       OzoneConfiguration conf, UserGroupInformation ugi) throws IOException {
+    SecurityConfig.initSecurityProvider(conf);
     SCMSecurityProtocolClientSideTranslatorPB scmSecurityClient =
         new SCMSecurityProtocolClientSideTranslatorPB(
             new SCMSecurityProtocolFailoverProxyProvider(conf, ugi));
@@ -571,7 +717,7 @@ public final class HddsServerUtil {
     MetricsSystem metricsSystem = DefaultMetricsSystem.initialize(serverName);
     try {
       JvmMetrics.create(serverName,
-          configuration.get(DFSConfigKeysLegacy.DFS_METRICS_SESSION_ID_KEY),
+          configuration.get(HddsConfigKeys.HDDS_METRICS_SESSION_ID_KEY),
           DefaultMetricsSystem.instance());
       CpuMetrics.create();
     } catch (MetricsException e) {
@@ -586,21 +732,16 @@ public final class HddsServerUtil {
    * @param checkpoint    checkpoint file
    * @param destination   destination output stream.
    * @param toExcludeList the files to be excluded
-   * @param excludedList  the files excluded
    * @throws IOException
    */
   public static void writeDBCheckpointToStream(
       DBCheckpoint checkpoint,
       OutputStream destination,
-      List<String> toExcludeList,
-      List<String> excludedList)
+      Set<String> toExcludeList)
       throws IOException {
-    try (TarArchiveOutputStream archiveOutputStream =
-            new TarArchiveOutputStream(destination);
+    try (ArchiveOutputStream<TarArchiveEntry> archiveOutputStream = tar(destination);
         Stream<Path> files =
             Files.list(checkpoint.getCheckpointLocation())) {
-      archiveOutputStream.setBigNumberMode(
-          TarArchiveOutputStream.BIGNUMBER_POSIX);
       for (Path path : files.collect(Collectors.toList())) {
         if (path != null) {
           Path fileNamePath = path.getFileName();
@@ -608,8 +749,6 @@ public final class HddsServerUtil {
             String fileName = fileNamePath.toString();
             if (!toExcludeList.contains(fileName)) {
               includeFile(path.toFile(), fileName, archiveOutputStream);
-            } else {
-              excludedList.add(fileName);
             }
           }
         }
@@ -618,25 +757,12 @@ public final class HddsServerUtil {
     }
   }
 
-  public static void includeFile(File file, String entryName,
-                                 ArchiveOutputStream archiveOutputStream)
-      throws IOException {
-    ArchiveEntry archiveEntry =
-        archiveOutputStream.createArchiveEntry(file, entryName);
-    archiveOutputStream.putArchiveEntry(archiveEntry);
-    try (FileInputStream fis = new FileInputStream(file)) {
-      IOUtils.copy(fis, archiveOutputStream);
-    }
-    archiveOutputStream.closeArchiveEntry();
-  }
-
   // Mark tarball completed.
   public static void includeRatisSnapshotCompleteFlag(
-      ArchiveOutputStream archiveOutput) throws IOException {
+      ArchiveOutputStream<TarArchiveEntry> archiveOutput) throws IOException {
     File file = File.createTempFile(
         OZONE_RATIS_SNAPSHOT_COMPLETE_FLAG_NAME, "");
-    String entryName = OZONE_RATIS_SNAPSHOT_COMPLETE_FLAG_NAME;
-    includeFile(file, entryName, archiveOutput);
+    includeFile(file, OZONE_RATIS_SNAPSHOT_COMPLETE_FLAG_NAME, archiveOutput);
   }
 
   static boolean ratisSnapshotComplete(Path dir) {
@@ -652,26 +778,193 @@ public final class HddsServerUtil {
   }
 
   /**
-   * Converts RocksDB exception to IOE.
-   * @param msg  - Message to add to exception.
-   * @param e - Original Exception.
-   * @return  IOE.
-   */
-  public static IOException toIOException(String msg, RocksDBException e) {
-    String statusCode = e.getStatus() == null ? "N/A" :
-        e.getStatus().getCodeString();
-    String errMessage = e.getMessage() == null ? "Unknown error" :
-        e.getMessage();
-    String output = msg + "; status : " + statusCode
-        + "; message : " + errMessage;
-    return new IOException(output, e);
-  }
-
-  /**
    * Add exception classes which server won't log at all.
    * @param server
    */
   public static void addSuppressedLoggingExceptions(RPC.Server server) {
     server.addSuppressedLoggingExceptions(ServerNotLeaderException.class);
+  }
+
+  public static void startupShutdownMessage(VersionInfo versionInfo,
+      Class<?> clazz, String[] args, Logger log, OzoneConfiguration conf) {
+    final String hostname = NetUtils.getHostname();
+    final String className = clazz.getSimpleName();
+
+    if (log.isInfoEnabled()) {
+      log.info(createStartupMessage(versionInfo, className, hostname,
+          args, HddsUtils.processForLogging(conf)));
+    }
+
+    if (SystemUtils.IS_OS_UNIX) {
+      try {
+        SignalLogger.INSTANCE.register(log);
+      } catch (Throwable t) {
+        log.warn("failed to register any UNIX signal loggers: ", t);
+      }
+    }
+    ShutdownHookManager.get().addShutdownHook(
+        () -> log.info(toStartupShutdownString("SHUTDOWN_MSG: ",
+            "Shutting down " + className + " at " + hostname)),
+        SHUTDOWN_HOOK_PRIORITY);
+  }
+
+  /**
+   * Return a message for logging.
+   * @param prefix prefix keyword for the message
+   * @param msg content of the message
+   * @return a message for logging
+   */
+  public static String toStartupShutdownString(String prefix, String... msg) {
+    StringBuilder b = new StringBuilder(prefix);
+    b.append("\n/************************************************************");
+    for (String s : msg) {
+      b.append('\n').append(prefix).append(s);
+    }
+    b.append("\n************************************************************/");
+    return b.toString();
+  }
+
+  /**
+   * Generate the text for the startup/shutdown message of processes.
+   * @param className short name of the class
+   * @param hostname hostname
+   * @param args Command arguments
+   * @return a string to log.
+   */
+  private static String createStartupMessage(VersionInfo versionInfo,
+      String className, String hostname, String[] args,
+      Map<String, String> conf) {
+    return toStartupShutdownString("STARTUP_MSG: ",
+        "Starting " + className,
+        "       host = " + hostname,
+        "    version = " + versionInfo.getVersion(),
+        "      build = " + versionInfo.getUrl() + "/" + versionInfo.getRevision(),
+        "       java = " + System.getProperty("java.version"),
+        "       args = " + (args != null ? Arrays.asList(args) : new ArrayList<>()),
+        "  classpath = " + System.getProperty("java.class.path"),
+        "       conf = " + conf);
+  }
+
+  public static void setPoolSize(ThreadPoolExecutor executor, int size, Logger logger) {
+    Preconditions.assertTrue(size > 0, () -> "Pool size must be positive: " + size);
+
+    int currentCorePoolSize = executor.getCorePoolSize();
+
+    // In ThreadPoolExecutor, maximumPoolSize must always be greater than or
+    // equal to the corePoolSize. We must make sure this invariant holds when
+    // changing the pool size. Therefore, we take into account whether the
+    // new size is greater or smaller than the current core pool size.
+    String change = "unchanged";
+    if (size > currentCorePoolSize) {
+      change = "increased";
+      executor.setMaximumPoolSize(size);
+      executor.setCorePoolSize(size);
+    } else if (size < currentCorePoolSize) {
+      change = "decreased";
+      executor.setCorePoolSize(size);
+      executor.setMaximumPoolSize(size);
+    }
+    if (logger != null) {
+      logger.info("pool size {} from {} to {}", change, currentCorePoolSize, size);
+    }
+  }
+
+  /**
+   * Retrieve the socket addresses of all storage container managers.
+   *
+   * @return A collection of SCM addresses
+   * @throws IllegalArgumentException If the configuration is invalid
+   */
+  public static Collection<HostAndPort> getSCMAddressForDatanodes(ConfigurationSource conf) {
+    // First check HA style config, if not defined fall back to OZONE_SCM_NAMES
+
+    if (getScmServiceId(conf) != null) {
+      List<SCMNodeInfo> scmNodeInfoList = SCMNodeInfo.buildNodeInfo(conf);
+      final Collection<HostAndPort> scmAddressList = new HashSet<>(scmNodeInfoList.size());
+      for (SCMNodeInfo scmNodeInfo : scmNodeInfoList) {
+        scmAddressList.add(scmNodeInfo.getScmDatanodeHostPortAddress());
+      }
+      return scmAddressList;
+    } else {
+      // fall back to OZONE_SCM_NAMES.
+      Collection<String> names =
+          conf.getTrimmedStringCollection(ScmConfigKeys.OZONE_SCM_NAMES);
+      if (names.isEmpty()) {
+        throw new IllegalArgumentException(ScmConfigKeys.OZONE_SCM_NAMES
+            + " need to be a set of valid DNS names or IP addresses."
+            + " Empty address list found.");
+      }
+
+      final Collection<HostAndPort> addresses = new HashSet<>(names.size());
+      for (String address : names) {
+        Optional<String> hostname = getHostName(address);
+        if (!hostname.isPresent()) {
+          throw new IllegalArgumentException("Invalid hostname for SCM: "
+              + address);
+        }
+        int port = getHostPort(address)
+            .orElse(conf.getInt(OZONE_SCM_DATANODE_PORT_KEY,
+                OZONE_SCM_DATANODE_PORT_DEFAULT));
+        addresses.add(new HostAndPort(hostname.get(), port));
+      }
+
+      if (addresses.size() > 1) {
+        LOG.warn("When SCM HA is configured, configure {} appended with " +
+                "serviceId and nodeId. {} is deprecated.", OZONE_SCM_ADDRESS_KEY,
+            OZONE_SCM_NAMES);
+      }
+      return addresses;
+    }
+  }
+
+  /**
+   * Returns the SCM address for datanodes based on the service ID and the SCM addresses.
+   * @param conf Configuration
+   * @param scmServiceId SCM service ID
+   * @param scmNodeIds Requested SCM node IDs
+   * @return A collection with addresses of the request SCM node IDs.
+   * Null if there is any wrongly configured SCM address. Note that the returned collection
+   * might not be ordered the same way as the requested SCM node IDs
+   */
+  public static Collection<Pair<String, HostAndPort>> getSCMAddressForDatanodes(
+      ConfigurationSource conf, String scmServiceId, Set<String> scmNodeIds) {
+    Collection<Pair<String, HostAndPort>> scmNodeAddress = new HashSet<>(scmNodeIds.size());
+    for (String scmNodeId : scmNodeIds) {
+      String addressKey = ConfUtils.addKeySuffixes(
+          OZONE_SCM_ADDRESS_KEY, scmServiceId, scmNodeId);
+      String scmAddress = conf.get(addressKey);
+      if (scmAddress == null) {
+        LOG.warn("The SCM address configuration {} is not defined, return nothing", addressKey);
+        return null;
+      }
+
+      int scmDatanodePort = SCMNodeInfo.getPort(conf, scmServiceId, scmNodeId,
+          OZONE_SCM_DATANODE_ADDRESS_KEY, OZONE_SCM_DATANODE_PORT_KEY,
+          OZONE_SCM_DATANODE_PORT_DEFAULT);
+
+      scmNodeAddress.add(Pair.of(scmNodeId, new HostAndPort(scmAddress, scmDatanodePort)));
+    }
+    return scmNodeAddress;
+  }
+
+  /**
+   * Retrieve the socket addresses of recon.
+   *
+   * @return Recon address
+   * @throws IllegalArgumentException If the configuration is invalid
+   */
+  public static HostAndPort getReconAddressForDatanodes(
+      ConfigurationSource conf) {
+    String name = conf.get(OZONE_RECON_ADDRESS_KEY);
+    if (StringUtils.isEmpty(name)) {
+      return null;
+    }
+    Optional<String> hostname = getHostName(name);
+    if (!hostname.isPresent()) {
+      throw new IllegalArgumentException("Invalid hostname for Recon: "
+          + name);
+    }
+    int port = getHostPort(name).orElse(OZONE_RECON_DATANODE_PORT_DEFAULT);
+    return new HostAndPort(hostname.get(), port);
   }
 }

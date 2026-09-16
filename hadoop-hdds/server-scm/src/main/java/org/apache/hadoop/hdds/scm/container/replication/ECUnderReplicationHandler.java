@@ -1,13 +1,12 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,10 +14,23 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.hadoop.hdds.scm.container.replication;
 
-import com.google.common.collect.ImmutableList;
+import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeOperationalState.IN_SERVICE;
+
 import com.google.common.collect.ImmutableSet;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.UnsafeByteOperations;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.hadoop.hdds.client.ECReplicationConfig;
 import org.apache.hadoop.hdds.conf.ConfigurationSource;
@@ -37,22 +49,9 @@ import org.apache.hadoop.hdds.scm.node.NodeStatus;
 import org.apache.hadoop.hdds.scm.node.states.NodeNotFoundException;
 import org.apache.hadoop.hdds.scm.pipeline.InsufficientDatanodesException;
 import org.apache.hadoop.ozone.protocol.commands.ReconstructECContainersCommand;
-import org.apache.hadoop.ozone.protocol.commands.ReplicateContainerCommand;
 import org.apache.ratis.protocol.exceptions.NotLeaderException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.stream.Collectors;
-
-import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeOperationalState.IN_SERVICE;
 
 /**
  * Handles the EC Under replication processing and forming the respective SCM
@@ -60,7 +59,7 @@ import static org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeOperationalSt
  */
 public class ECUnderReplicationHandler implements UnhealthyReplicationHandler {
 
-  public static final Logger LOG =
+  private static final Logger LOG =
       LoggerFactory.getLogger(ECUnderReplicationHandler.class);
   private final PlacementPolicy containerPlacement;
   private final long currentContainerSize;
@@ -365,7 +364,7 @@ public class ECUnderReplicationHandler implements UnhealthyReplicationHandler {
         final ReconstructECContainersCommand reconstructionCommand =
             new ReconstructECContainersCommand(container.getContainerID(),
                 sourceDatanodesWithIndex, selectedDatanodes,
-                int2byte(missingIndexes),
+                integers2ByteString(missingIndexes),
                 repConfig);
         // This can throw a CommandTargetOverloadedException, but there is no
         // point in retrying here. The sources we picked already have the
@@ -429,7 +428,7 @@ public class ECUnderReplicationHandler implements UnhealthyReplicationHandler {
     ContainerInfo container = replicaCount.getContainer();
     Set<Integer> decomIndexes = replicaCount.decommissioningOnlyIndexes(true);
     int commandsSent = 0;
-    if (decomIndexes.size() > 0) {
+    if (!decomIndexes.isEmpty()) {
       LOG.debug("Processing decommissioning indexes {} for container {}.",
           decomIndexes, container.containerID());
       final List<DatanodeDetails> selectedDatanodes = getTargetDatanodes(
@@ -594,42 +593,30 @@ public class ECUnderReplicationHandler implements UnhealthyReplicationHandler {
       ContainerInfo container, Iterator<DatanodeDetails> iterator,
       ContainerReplica replica, ECContainerReplicaCount replicaCount)
       throws CommandTargetOverloadedException, NotLeaderException {
-    final boolean push = replicationManager.getConfig().isPush();
     DatanodeDetails source = replica.getDatanodeDetails();
     DatanodeDetails target = iterator.next();
-    final long containerID = container.getContainerID();
-
-    if (push) {
-      replicationManager.sendThrottledReplicationCommand(
-          container, Collections.singletonList(source), target,
-          replica.getReplicaIndex());
-    } else {
-      ReplicateContainerCommand replicateCommand =
-          ReplicateContainerCommand.fromSources(containerID,
-          ImmutableList.of(source));
-      // For EC containers, we need to track the replica index which is
-      // to be replicated, so add it to the command.
-      replicateCommand.setReplicaIndex(replica.getReplicaIndex());
-      replicationManager.sendDatanodeCommand(replicateCommand, container,
-          target);
-    }
+    replicationManager.sendThrottledReplicationCommand(
+        container, Collections.singletonList(source), target,
+        replica.getReplicaIndex());
     adjustPendingOps(replicaCount, target, replica.getReplicaIndex());
   }
 
   private void adjustPendingOps(ECContainerReplicaCount replicaCount,
                                 DatanodeDetails target, int replicaIndex) {
     replicaCount.addPendingOp(new ContainerReplicaOp(
-        ContainerReplicaOp.PendingOpType.ADD, target, replicaIndex,
-        Long.MAX_VALUE));
+        ContainerReplicaOp.PendingOpType.ADD, target, replicaIndex, null,
+        Long.MAX_VALUE, 0));
   }
 
-  private static byte[] int2byte(List<Integer> src) {
+  static ByteString integers2ByteString(List<Integer> src) {
     byte[] dst = new byte[src.size()];
 
     for (int i = 0; i < src.size(); i++) {
       dst[i] = src.get(i).byteValue();
     }
-    return dst;
+
+    return dst.length > 0 ? UnsafeByteOperations.unsafeWrap(dst)
+        : ByteString.EMPTY;
   }
 
   /**

@@ -1,36 +1,36 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.hadoop.ozone.container.replication;
 
-import java.util.List;
 import java.util.Objects;
-
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
 import org.apache.hadoop.ozone.protocol.commands.ReplicateContainerCommand;
 
 /**
- * The task to download a container from the sources.
+ * Task to push a container to a target datanode.
  */
 public class ReplicationTask extends AbstractReplicationTask {
 
   private final ReplicateContainerCommand cmd;
   private final ContainerReplicator replicator;
   private final String debugString;
+  public static final String METRIC_NAME = "ContainerReplications";
+  public static final String METRIC_DESCRIPTION_SEGMENT = "container replications";
 
   /**
    * Counter for the transferred bytes.
@@ -43,26 +43,17 @@ public class ReplicationTask extends AbstractReplicationTask {
     setPriority(cmd.getPriority());
     this.cmd = cmd;
     this.replicator = replicator;
-    if (cmd.getTargetDatanode() != null) {
-      // Only push replication will have a target datanode set, and it must be
-      // sent to the source datanode to be executed. It is possible the source
-      // is out of service, so we need to set the flag to allow the command to
-      // run.
-      setShouldOnlyRunOnInServiceDatanodes(false);
-    }
     debugString = cmd.toString();
   }
 
-  /**
-   * Intended to only be used in tests.
-   */
-  protected ReplicationTask(
-      long containerId,
-      List<DatanodeDetails> sources,
-      ContainerReplicator replicator
-  ) {
-    this(ReplicateContainerCommand.fromSources(containerId, sources),
-        replicator);
+  @Override
+  public String getMetricName() {
+    return METRIC_NAME;
+  }
+
+  @Override
+  public String getMetricDescriptionSegment() {
+    return METRIC_DESCRIPTION_SEGMENT;
   }
 
   @Override
@@ -83,12 +74,9 @@ public class ReplicationTask extends AbstractReplicationTask {
     return Objects.hash(getContainerId(), getTarget());
   }
 
+  @Override
   public long getContainerId() {
     return cmd.getContainerID();
-  }
-
-  public List<DatanodeDetails> getSources() {
-    return cmd.getSourceDatanodes();
   }
 
   @Override

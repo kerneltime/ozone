@@ -1,13 +1,12 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,53 +17,53 @@
 
 package org.apache.hadoop.ozone.container.common.volume;
 
-import java.io.IOException;
-import org.apache.commons.io.FileUtils;
-import org.junit.jupiter.api.Timeout;
-import org.slf4j.LoggerFactory;
-import org.apache.hadoop.fs.FileUtil;
-import org.apache.hadoop.hdds.DFSConfigKeysLegacy;
-import org.apache.hadoop.hdds.HddsConfigKeys;
-import org.apache.hadoop.hdds.conf.OzoneConfiguration;
-import org.apache.hadoop.hdfs.MiniDFSCluster;
-import org.apache.hadoop.ozone.OzoneConfigKeys;
-import org.apache.hadoop.ozone.container.common.utils.HddsVolumeUtil;
-import org.apache.ozone.test.GenericTestUtils;
-import org.apache.ozone.test.GenericTestUtils.LogCapturer;
-
 import static org.apache.hadoop.hdds.scm.ScmConfigKeys.HDDS_DATANODE_DIR_KEY;
-import static org.apache.hadoop.ozone.container.common.volume.HddsVolume
-    .HDDS_VOLUME_DIR;
+import static org.apache.hadoop.ozone.container.common.volume.HddsVolume.HDDS_VOLUME_DIR;
+import static org.apache.ozone.test.MetricsAsserts.assertGauge;
+import static org.apache.ozone.test.MetricsAsserts.getMetrics;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-
 import java.io.File;
+import java.io.IOException;
 import java.lang.reflect.Method;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import org.apache.commons.io.FileUtils;
+import org.apache.hadoop.hdds.HddsConfigKeys;
+import org.apache.hadoop.hdds.conf.OzoneConfiguration;
+import org.apache.hadoop.hdds.scm.ScmConfigKeys;
+import org.apache.hadoop.metrics2.MetricsRecordBuilder;
+import org.apache.hadoop.ozone.OzoneConfigKeys;
+import org.apache.hadoop.ozone.container.common.utils.HddsVolumeUtil;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Tests {@link MutableVolumeSet} operations.
  */
-@Timeout(300)
 public class TestVolumeSet {
 
   private OzoneConfiguration conf;
   private MutableVolumeSet volumeSet;
-  private final String baseDir = MiniDFSCluster.getBaseDirectory();
-  private final String volume1 = baseDir + "disk1";
-  private final String volume2 = baseDir + "disk2";
-  private final List<String> volumes = new ArrayList<>();
 
-  private static final String DUMMY_IP_ADDR = "0.0.0.0";
+  @TempDir
+  private Path baseDir;
+
+  private String volume1;
+  private String volume2;
+  private final List<String> volumes = new ArrayList<>();
 
   private void initializeVolumeSet() throws Exception {
     volumeSet = new MutableVolumeSet(UUID.randomUUID().toString(), conf,
@@ -74,18 +73,20 @@ public class TestVolumeSet {
   @BeforeEach
   public void setup() throws Exception {
     conf = new OzoneConfiguration();
-    String dataDirKey = volume1 + "," + volume2;
+    volume1 = baseDir.resolve("disk1").toString();
+    volume2 = baseDir.resolve("disk2").toString();
+
+    String dataDirValue = volume1 + "," + volume2;
     volumes.add(volume1);
     volumes.add(volume2);
-    conf.set(DFSConfigKeysLegacy.DFS_DATANODE_DATA_DIR_KEY, dataDirKey);
-    conf.set(OzoneConfigKeys.DFS_CONTAINER_RATIS_DATANODE_STORAGE_DIR,
-        dataDirKey);
+    conf.set(HDDS_DATANODE_DIR_KEY, dataDirValue);
+    conf.set(OzoneConfigKeys.HDDS_CONTAINER_RATIS_DATANODE_STORAGE_DIR,
+        dataDirValue);
     initializeVolumeSet();
   }
 
   @AfterEach
   public void shutdown() throws IOException {
-    // Delete the volume root dir
     List<StorageVolume> vols = new ArrayList<>();
     vols.addAll(volumeSet.getVolumesList());
     vols.addAll(volumeSet.getFailedVolumesList());
@@ -94,8 +95,6 @@ public class TestVolumeSet {
       FileUtils.deleteDirectory(volume.getStorageDir());
     }
     volumeSet.shutdown();
-
-    FileUtil.fullyDelete(new File(baseDir));
   }
 
   private boolean checkVolumeExistsInVolumeSet(String volumeRoot) {
@@ -108,146 +107,118 @@ public class TestVolumeSet {
     return false;
   }
 
+  static void assertNumVolumes(MutableVolumeSet volumeSet, int expectedHealthyVolumes, int expectedFailedVolumes) {
+    MetricsRecordBuilder metricsRecords = getMetrics(volumeSet.getVolumeHealthMetrics());
+    assertGauge("TotalVolumes", expectedHealthyVolumes + expectedFailedVolumes, metricsRecords);
+    assertGauge("NumHealthyVolumes", expectedHealthyVolumes, metricsRecords);
+    assertGauge("NumFailedVolumes", expectedFailedVolumes, metricsRecords);
+  }
+
   @Test
   public void testVolumeSetInitialization() throws Exception {
 
     List<StorageVolume> volumesList = volumeSet.getVolumesList();
 
-    // VolumeSet initialization should add volume1 and volume2 to VolumeSet
-    assertEquals(volumesList.size(), volumes.size(),
-        "VolumeSet intialization is incorrect");
-    assertTrue(checkVolumeExistsInVolumeSet(volume1),
-        "VolumeSet not initailized correctly");
-    assertTrue(checkVolumeExistsInVolumeSet(volume2),
-        "VolumeSet not initailized correctly");
-  }
+    // VolumeSet initialization should load volume1 and volume2.
+    assertEquals(volumesList.size(), volumes.size());
+    assertTrue(checkVolumeExistsInVolumeSet(volume1));
+    assertTrue(checkVolumeExistsInVolumeSet(volume2));
 
-  @Test
-  public void testAddVolume() {
-
-    assertEquals(2, volumeSet.getVolumesList().size());
-
-    // Add a volume to VolumeSet
-    String volume3 = baseDir + "disk3";
-    boolean success = volumeSet.addVolume(volume3);
-
-    assertTrue(success);
-    assertEquals(3, volumeSet.getVolumesList().size());
-    assertTrue(checkVolumeExistsInVolumeSet(volume3),
-        "AddVolume did not add requested volume to VolumeSet");
+    assertNumVolumes(volumeSet, 2, 0);
   }
 
   @Test
   public void testFailVolume() throws Exception {
+    assertNumVolumes(volumeSet, 2, 0);
 
-    //Fail a volume
     volumeSet.failVolume(HddsVolumeUtil.getHddsRoot(volume1));
 
-    // Failed volume should not show up in the volumeList
     assertEquals(1, volumeSet.getVolumesList().size());
 
-    // Failed volume should be added to FailedVolumeList
-    assertEquals(1, volumeSet.getFailedVolumesList().size(),
-        "Failed volume not present in FailedVolumeMap");
+    assertEquals(1, volumeSet.getFailedVolumesList().size());
     assertEquals(HddsVolumeUtil.getHddsRoot(volume1),
-        volumeSet.getFailedVolumesList().get(0).getStorageDir().getPath(),
-        "Failed Volume list did not match");
+        volumeSet.getFailedVolumesList().get(0).getStorageDir().getPath());
 
-    // Failed volume should not exist in VolumeMap
     assertThat(volumeSet.getVolumeMap()).doesNotContainKey(volume1);
-  }
 
-  @Test
-  public void testRemoveVolume() throws Exception {
-
-    assertEquals(2, volumeSet.getVolumesList().size());
-
-    // Remove a volume from VolumeSet
-    volumeSet.removeVolume(HddsVolumeUtil.getHddsRoot(volume1));
-    assertEquals(1, volumeSet.getVolumesList().size());
-
-    // Attempting to remove a volume which does not exist in VolumeSet should
-    // log a warning.
-    LogCapturer logs = LogCapturer.captureLogs(
-        LoggerFactory.getLogger(MutableVolumeSet.class));
-    volumeSet.removeVolume(HddsVolumeUtil.getHddsRoot(volume1));
-    assertEquals(1, volumeSet.getVolumesList().size());
-    String expectedLogMessage = "Volume : " +
-        HddsVolumeUtil.getHddsRoot(volume1) + " does not exist in VolumeSet";
-    assertThat(logs.getOutput()).contains(expectedLogMessage);
+    assertNumVolumes(volumeSet, 1, 1);
   }
 
   @Test
   public void testVolumeInInconsistentState() throws Exception {
+    assertNumVolumes(volumeSet, 2, 0);
     assertEquals(2, volumeSet.getVolumesList().size());
 
-    // Add a volume to VolumeSet
-    String volume3 = baseDir + "disk3";
+    String volume3 = baseDir.resolve("disk3").toString();
 
-    // Create the root volume dir and create a sub-directory within it.
     File newVolume = new File(volume3, HDDS_VOLUME_DIR);
-    System.out.println("new volume root: " + newVolume);
-    newVolume.mkdirs();
-    assertTrue(newVolume.exists(), "Failed to create new volume root");
+    assertTrue(newVolume.mkdirs());
     File dataDir = new File(newVolume, "chunks");
-    dataDir.mkdirs();
-    assertTrue(dataDir.exists());
+    assertTrue(dataDir.mkdirs());
 
-    // The new volume is in an inconsistent state as the root dir is
-    // non-empty but the version file does not exist. Add Volume should
-    // return false.
-    boolean success = volumeSet.addVolume(volume3);
+    // Root dir is non-empty but version file is missing, so the volume should not be loaded.
+    conf.set(ScmConfigKeys.HDDS_DATANODE_DIR_KEY, conf.get(ScmConfigKeys.HDDS_DATANODE_DIR_KEY) + "," + volume3);
+    volumeSet.shutdown();
+    initializeVolumeSet();
 
-    assertFalse(success);
     assertEquals(2, volumeSet.getVolumesList().size());
-    assertFalse(checkVolumeExistsInVolumeSet(volume3), "AddVolume should fail" +
-        " for an inconsistent volume");
+    assertFalse(checkVolumeExistsInVolumeSet(volume3));
 
-    // Delete volume3
-    File volume = new File(volume3);
-    FileUtils.deleteDirectory(volume);
+    assertNumVolumes(volumeSet, 2, 1);
+    FileUtils.deleteDirectory(new File(volume3));
   }
 
   @Test
   public void testShutdown() throws Exception {
+    assertNumVolumes(volumeSet, 2, 0);
     List<StorageVolume> volumesList = volumeSet.getVolumesList();
 
     volumeSet.shutdown();
 
-    // Verify that volume usage can be queried during shutdown.
     for (StorageVolume volume : volumesList) {
-      assertNotNull(volume.getVolumeInfo().get()
-              .getUsageForTesting());
-      volume.getAvailable();
+      assertThat(volume.getVolumeUsage()).isNotNull();
+      volume.getCurrentUsage();
     }
   }
 
   @Test
-  public void testFailVolumes() throws  Exception {
-    MutableVolumeSet volSet = null;
-    File readOnlyVolumePath = new File(baseDir);
-    //Set to readonly, so that this volume will be failed
-    readOnlyVolumePath.setReadOnly();
-    File volumePath = GenericTestUtils.getRandomizedTestDir();
+  void testFailVolumes(@TempDir File readOnlyVolumePath, @TempDir File volumePath) throws Exception {
+    assumeThat(readOnlyVolumePath.setReadOnly()).isTrue();
     OzoneConfiguration ozoneConfig = new OzoneConfiguration();
     ozoneConfig.set(HDDS_DATANODE_DIR_KEY, readOnlyVolumePath.getAbsolutePath()
         + "," + volumePath.getAbsolutePath());
     ozoneConfig.set(HddsConfigKeys.OZONE_METADATA_DIRS,
         volumePath.getAbsolutePath());
-    volSet = new MutableVolumeSet(UUID.randomUUID().toString(), ozoneConfig,
+    MutableVolumeSet volSet = new MutableVolumeSet(UUID.randomUUID().toString(), ozoneConfig,
         null, StorageVolume.VolumeType.DATA_VOLUME, null);
     assertEquals(1, volSet.getFailedVolumesList().size());
     assertEquals(readOnlyVolumePath, volSet.getFailedVolumesList().get(0)
         .getStorageDir());
+    assertNumVolumes(volSet, 1, 1);
+    volSet.shutdown();
+  }
 
-    //Set back to writable
+  @Test
+  public void testStorageReportSnapshotDoesNotBlockOnWriteLock() throws Exception {
+    // Regression test: DatanodeStorageMetrics.getMetrics() samples the volume
+    // set while the DefaultMetricsSystem monitor is held. It must not block on
+    // the volume-set lock, otherwise it deadlocks with a volume-failure handler
+    // that holds the write lock while unregistering volume metrics.
+    volumeSet.writeLock();
     try {
-      readOnlyVolumePath.setWritable(true);
-      volSet.shutdown();
-    } finally {
-      FileUtil.fullyDelete(volumePath);
-    }
+      CompletableFuture<Integer> snapshot = CompletableFuture.supplyAsync(
+          () -> volumeSet.getStorageReportSnapshot().length);
+      // The snapshot must return without waiting for the write lock.
+      assertEquals(2, snapshot.get(10, TimeUnit.SECONDS));
 
+      // Sanity check that the lock is genuinely held: the locking variant does
+      // block behind the write lock (it must time out here).
+      CompletableFuture<Integer> locked = CompletableFuture.supplyAsync(
+          () -> volumeSet.getStorageReport().length);
+      assertThrows(TimeoutException.class, () -> locked.get(2, TimeUnit.SECONDS));
+    } finally {
+      volumeSet.writeUnlock();
+    }
   }
 
   @Test

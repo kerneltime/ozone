@@ -1,14 +1,13 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -16,28 +15,37 @@
  * limitations under the License.
  */
 
+package org.apache.hadoop.ozone.s3.endpoint;
+
+import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes;
+import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.INVALID_ARGUMENT;
+import static org.apache.hadoop.ozone.s3.util.S3Consts.CUSTOM_METADATA_HEADER_PREFIX;
+import static org.apache.hadoop.ozone.s3.util.S3Consts.RESERVED_USER_METADATA_KEY_PREFIX;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Locale;
+import java.util.Map;
+import java.util.stream.Stream;
+import javax.ws.rs.core.MultivaluedHashMap;
+import javax.ws.rs.core.MultivaluedMap;
+import org.apache.hadoop.ozone.OzoneConsts;
+import org.apache.hadoop.ozone.client.OzoneVolume;
+import org.apache.hadoop.ozone.om.exceptions.OMException;
+import org.apache.hadoop.ozone.s3.exception.OS3Exception;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
 /**
  * Tests the s3 EndpointBase class methods.
- */
-package org.apache.hadoop.ozone.s3.endpoint;
-
-import org.apache.hadoop.ozone.OzoneConsts;
-import org.apache.hadoop.ozone.s3.exception.OS3Exception;
-
-import javax.ws.rs.core.MultivaluedHashMap;
-import javax.ws.rs.core.MultivaluedMap;
-
-import java.nio.charset.StandardCharsets;
-import java.util.Map;
-import org.junit.jupiter.api.Test;
-
-import static org.apache.hadoop.ozone.s3.util.S3Consts.CUSTOM_METADATA_HEADER_PREFIX;
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-
-/**
  * Test methods of the EndpointBase.
  */
 public class TestEndpointBase {
@@ -60,8 +68,6 @@ public class TestEndpointBase {
             CUSTOM_METADATA_HEADER_PREFIX + OzoneConsts.GDPR_FLAG, "true");
 
     EndpointBase endpointBase = new EndpointBase() {
-      @Override
-      public void init() { }
     };
 
     Map<String, String> filteredCustomMetadata =
@@ -91,8 +97,6 @@ public class TestEndpointBase {
             new String(new byte[3000], StandardCharsets.UTF_8));
 
     EndpointBase endpointBase = new EndpointBase() {
-      @Override
-      public void init() { }
     };
 
     OS3Exception e = assertThrows(OS3Exception.class, () -> endpointBase
@@ -100,6 +104,109 @@ public class TestEndpointBase {
         "getCustomMetadataFromHeaders should fail." +
             " Expected OS3Exception not thrown");
     assertThat(e.getCode()).contains("MetadataTooLarge");
+  }
+
+  @Test
+  public void testCustomMetadataHeadersWithUpperCaseHeaders() throws OS3Exception {
+    MultivaluedMap<String, String> s3requestHeaders = new MultivaluedHashMap<>();
+    String key = "CUSTOM-KEY";
+    String value = "custom-value1";
+    s3requestHeaders.add(CUSTOM_METADATA_HEADER_PREFIX.toUpperCase(Locale.ROOT) + key, value);
+
+    EndpointBase endpointBase = new EndpointBase() {
+    };
+
+    Map<String, String> customMetadata = endpointBase.getCustomMetadataFromHeaders(s3requestHeaders);
+
+    assertEquals(value, customMetadata.get(key));
+  }
+
+  @Test
+  public void testAccessDeniedResultCodes() {
+    final EndpointBase endpointBase = new EndpointBase() {
+      @Override
+      public void init() { }
+    };
+
+    assertTrue(endpointBase.isAccessDenied(new OMException(ResultCodes.PERMISSION_DENIED)));
+    assertTrue(endpointBase.isAccessDenied(new OMException(ResultCodes.INVALID_TOKEN)));
+    assertTrue(endpointBase.isAccessDenied(new OMException(ResultCodes.REVOKED_TOKEN)));
+    assertFalse(endpointBase.isAccessDenied(new OMException(ResultCodes.INTERNAL_ERROR)));
+    assertFalse(endpointBase.isAccessDenied(new OMException(ResultCodes.BUCKET_NOT_FOUND)));
+  }
+
+  @Test
+  public void testExpiredTokenResultCode() {
+    final EndpointBase endpointBase = new EndpointBase() {
+      @Override
+      public void init() { }
+    };
+
+    assertTrue(endpointBase.isExpiredToken(new OMException(ResultCodes.TOKEN_EXPIRED)));
+    assertFalse(endpointBase.isExpiredToken(new OMException(ResultCodes.INVALID_TOKEN)));
+  }
+
+  @Test
+  public void testListS3BucketsHandlesRuntimeExceptionWrappingOMException() throws Exception {
+    final EndpointBase endpointBase = new EndpointBase() {
+      @Override
+      public void init() { }
+
+      @Override
+      protected OzoneVolume getVolume() {
+        final OzoneVolume volume = mock(OzoneVolume.class);
+        when(volume.listBuckets(anyString())).thenThrow(
+            new RuntimeException(new OMException("Permission Denied", ResultCodes.PERMISSION_DENIED)));
+        return volume;
+      }
+    };
+
+    final OS3Exception e = assertThrows(
+        OS3Exception.class, () -> endpointBase.listS3Buckets(
+            "prefix", volume -> { }), "listS3Buckets should fail.");
+
+    // Ensure we get the correct code
+    assertEquals("AccessDenied", e.getCode());
+  }
+
+  @Test
+  public void testListS3BucketsHandlesRuntimeExceptionWrappingOMExceptionVolumeNotFound() throws Exception {
+    final EndpointBase endpointBase = new EndpointBase() {
+      @Override
+      public void init() { }
+
+      @Override
+      protected OzoneVolume getVolume() {
+        final OzoneVolume volume = mock(OzoneVolume.class);
+        when(volume.listBuckets(anyString())).thenThrow(
+            new RuntimeException(new OMException("Volume Not Found", ResultCodes.VOLUME_NOT_FOUND)));
+        return volume;
+      }
+    };
+
+    // Ensure we get an empty iterator
+    assertFalse(endpointBase.listS3Buckets("prefix", volume -> { }).hasNext());
+  }
+
+  @ParameterizedTest
+  @MethodSource("reservedInternalMetadataKeyPrefixCases")
+  public void testRejectReservedInternalMetadataKeyPrefix(String metadataKey) {
+    MultivaluedMap<String, String> s3requestHeaders = new MultivaluedHashMap<>();
+    s3requestHeaders.add(CUSTOM_METADATA_HEADER_PREFIX + metadataKey, "user-value");
+
+    EndpointBase endpointBase = new EndpointBase() {
+    };
+
+    OS3Exception e = assertThrows(OS3Exception.class, () -> endpointBase
+        .getCustomMetadataFromHeaders(s3requestHeaders));
+    assertThat(e.getCode()).contains(INVALID_ARGUMENT.getCode());
+    assertThat(e.getErrorMessage()).contains(RESERVED_USER_METADATA_KEY_PREFIX);
+  }
+
+  private static Stream<String> reservedInternalMetadataKeyPrefixCases() {
+    return Stream.of(
+        RESERVED_USER_METADATA_KEY_PREFIX + "cache-control",
+        RESERVED_USER_METADATA_KEY_PREFIX.toUpperCase(Locale.ROOT) + "cache-control");
   }
 
 }

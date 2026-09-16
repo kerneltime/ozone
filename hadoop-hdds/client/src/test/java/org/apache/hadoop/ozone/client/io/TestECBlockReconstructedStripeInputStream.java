@@ -1,38 +1,37 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.hadoop.ozone.client.io;
 
+import static java.util.Collections.emptySet;
+import static java.util.Collections.singleton;
+import static java.util.stream.Collectors.toSet;
+import static org.apache.hadoop.ozone.client.io.ECStreamTestUtil.generateParity;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+
 import com.google.common.collect.ImmutableSet;
-import org.apache.hadoop.hdds.client.ECReplicationConfig;
-import org.apache.hadoop.hdds.protocol.DatanodeDetails;
-import org.apache.hadoop.hdds.protocol.MockDatanodeDetails;
-import org.apache.hadoop.hdds.scm.storage.BlockLocationInfo;
-import org.apache.hadoop.io.ByteBufferPool;
-import org.apache.hadoop.io.ElasticByteBufferPool;
-import org.apache.hadoop.ozone.client.io.ECStreamTestUtil.TestBlockInputStreamFactory;
-import org.apache.hadoop.ozone.client.io.ECStreamTestUtil.TestBlockInputStream;
-
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.MethodSource;
-
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -41,21 +40,31 @@ import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Random;
 import java.util.Set;
 import java.util.SplittableRandom;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadLocalRandom;
-
-import static java.util.Collections.emptySet;
-import static java.util.Collections.singleton;
-import static java.util.stream.Collectors.toSet;
-import static org.apache.hadoop.ozone.client.io.ECStreamTestUtil.generateParity;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.apache.commons.lang3.RandomUtils;
+import org.apache.hadoop.hdds.client.ECReplicationConfig;
+import org.apache.hadoop.hdds.conf.OzoneConfiguration;
+import org.apache.hadoop.hdds.protocol.DatanodeDetails;
+import org.apache.hadoop.hdds.protocol.MockDatanodeDetails;
+import org.apache.hadoop.hdds.scm.OzoneClientConfig;
+import org.apache.hadoop.hdds.scm.storage.BlockLocationInfo;
+import org.apache.hadoop.io.ByteBufferPool;
+import org.apache.hadoop.io.ElasticByteBufferPool;
+import org.apache.hadoop.ozone.client.io.ECStreamTestUtil.TestBlockInputStream;
+import org.apache.hadoop.ozone.client.io.ECStreamTestUtil.TestBlockInputStreamFactory;
+import org.apache.ozone.erasurecode.rawcoder.RSRawErasureCoderFactory;
+import org.apache.ozone.erasurecode.rawcoder.RawErasureDecoder;
+import org.apache.ozone.erasurecode.rawcoder.util.CodecUtil;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.mockito.MockedStatic;
 
 /**
  * Test for the ECBlockReconstructedStripeInputStream.
@@ -72,7 +81,8 @@ public class TestECBlockReconstructedStripeInputStream {
   private ByteBufferPool bufferPool = new ElasticByteBufferPool();
   private ExecutorService ecReconstructExecutor =
       Executors.newFixedThreadPool(3);
-
+  private OzoneConfiguration conf = new OzoneConfiguration();
+  
   static List<Set<Integer>> recoveryCases() { // TODO better name
     List<Set<Integer>> params = new ArrayList<>();
     params.add(emptySet()); // non-recovery
@@ -645,7 +655,7 @@ public class TestECBlockReconstructedStripeInputStream {
   }
 
   private Integer getRandomStreamIndex(Set<Integer> set) {
-    return set.stream().skip(new Random().nextInt(set.size()))
+    return set.stream().skip(RandomUtils.secure().randomInt(0, set.size()))
         .findFirst().orElse(null);
   }
 
@@ -791,8 +801,8 @@ public class TestECBlockReconstructedStripeInputStream {
 
       // Read full stripe
       int read = ecb.read(bufs);
-      for (int j = 0; j < bufs.length; j++) {
-        ECStreamTestUtil.assertBufferMatches(bufs[j], dataGen);
+      for (ByteBuffer buffer : bufs) {
+        ECStreamTestUtil.assertBufferMatches(buffer, dataGen);
       }
       assertEquals(stripeSize(), read);
 
@@ -800,25 +810,57 @@ public class TestECBlockReconstructedStripeInputStream {
       // created in the stream factory, indicating we did not read them.
       List<TestBlockInputStream> streams = streamFactory.getBlockStreams();
       for (TestBlockInputStream stream : streams) {
-        assertTrue(stream.getEcReplicaIndex() > 2);
+        assertThat(stream.getEcReplicaIndex()).isGreaterThan(2);
       }
     }
   }
 
+  @Test
+  public void testDecoderReleasedOnClose() throws IOException {
+    // The stream must release its RawErasureDecoder on close so the decoder's
+    // native resources (e.g. ISA-L coder context) are not leaked. The decoder
+    // is created lazily in init() on the first read.
+    int chunkSize = repConfig.getEcChunkSize();
+    int blockLength = chunkSize * repConfig.getData();
+    ByteBuffer[] dataBufs = allocateBuffers(repConfig.getData(), chunkSize);
+    ECStreamTestUtil.randomFill(dataBufs, chunkSize, dataGen, blockLength);
+    ByteBuffer[] parity = generateParity(dataBufs, repConfig);
+    addDataStreamsToFactory(dataBufs, parity);
+
+    // Data index 1 is missing, so a read must build the decoder to reconstruct.
+    Map<DatanodeDetails, Integer> dnMap =
+        ECStreamTestUtil.createIndexMap(2, 3, 4, 5);
+    BlockLocationInfo keyInfo =
+        ECStreamTestUtil.createKeyInfo(repConfig, blockLength, dnMap);
+    streamFactory.setCurrentPipeline(keyInfo.getPipeline());
+
+    RawErasureDecoder spyDecoder =
+        spy(new RSRawErasureCoderFactory().createDecoder(repConfig));
+    ByteBuffer[] bufs = allocateByteBuffers(repConfig);
+    try (MockedStatic<CodecUtil> mocked = mockStatic(CodecUtil.class)) {
+      mocked.when(() -> CodecUtil.createRawDecoderWithFallback(any()))
+          .thenReturn(spyDecoder);
+      try (ECBlockReconstructedStripeInputStream ecBlockReconstructedStripeInputStream =
+          createInputStream(keyInfo)) {
+        // The read triggers init(), which creates the (spied) decoder.
+        ecBlockReconstructedStripeInputStream.read(bufs);
+      }
+    }
+    verify(spyDecoder).release();
+  }
+
   private ECBlockReconstructedStripeInputStream createInputStream(
       BlockLocationInfo keyInfo) {
-    return new ECBlockReconstructedStripeInputStream(repConfig, keyInfo, true,
-        null, null, streamFactory, bufferPool, ecReconstructExecutor);
+    OzoneClientConfig clientConfig = conf.getObject(OzoneClientConfig.class);
+    clientConfig.setChecksumVerify(true);
+    return new ECBlockReconstructedStripeInputStream(repConfig, keyInfo,
+        null, null, streamFactory, bufferPool, ecReconstructExecutor,
+        clientConfig);
   }
 
   private void addDataStreamsToFactory(ByteBuffer[] data, ByteBuffer[] parity) {
-    List<ByteBuffer> dataStreams = new ArrayList<>();
-    for (ByteBuffer b : data) {
-      dataStreams.add(b);
-    }
-    for (ByteBuffer b : parity) {
-      dataStreams.add(b);
-    }
+    List<ByteBuffer> dataStreams = new ArrayList<>(Arrays.asList(data));
+    dataStreams.addAll(Arrays.asList(parity));
     streamFactory.setBlockStreamData(dataStreams);
   }
 

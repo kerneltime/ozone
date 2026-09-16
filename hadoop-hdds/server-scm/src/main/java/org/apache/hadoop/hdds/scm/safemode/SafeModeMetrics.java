@@ -1,13 +1,12 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- *  with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,91 +17,177 @@
 
 package org.apache.hadoop.hdds.scm.safemode;
 
+import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.metrics2.MetricsSystem;
 import org.apache.hadoop.metrics2.annotation.Metric;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.hadoop.metrics2.lib.MutableCounterLong;
+import org.apache.hadoop.metrics2.lib.MutableGaugeInt;
+import org.apache.hadoop.metrics2.lib.MutableGaugeLong;
 
 /**
  * This class is used for maintaining SafeMode metric information, which can
- * be used for monitoring during SCM startup when SCM is still in SafeMode.
+ * be used for monitoring during SCM startup when SCM is still in SafeMode.<p>
+ * The metrics from this class are valid iff
+ * {@link org.apache.hadoop.hdds.HddsConfigKeys#HDDS_SCM_SAFEMODE_ENABLED} is
+ * set to true and the SCM is still in SafeMode.
  */
 public class SafeModeMetrics {
-  private static final String SOURCE_NAME =
-      SafeModeMetrics.class.getSimpleName();
-
+  private static final String SOURCE_NAME = SafeModeMetrics.class.getSimpleName();
 
   // These all values will be set to some values when safemode is enabled.
-  private @Metric MutableCounterLong
+  private @Metric MutableGaugeLong
       numContainerWithOneReplicaReportedThreshold;
+  private @Metric MutableGaugeLong
+      numContainerWithECDataReplicaReportedThreshold;
   private @Metric MutableCounterLong
       currentContainersWithOneReplicaReportedCount;
-
-  // When hdds.scm.safemode.pipeline-availability.check is set then only
-  // below metrics will have some values, otherwise they will be zero.
-  private @Metric MutableCounterLong numHealthyPipelinesThreshold;
-  private @Metric MutableCounterLong currentHealthyPipelinesCount;
   private @Metric MutableCounterLong
+      currentContainersWithECDataReplicaReportedCount;
+
+  // Pipeline metrics for safemode
+  private @Metric MutableGaugeLong numHealthyPipelinesThreshold;
+  private @Metric MutableGaugeLong currentHealthyPipelinesCount;
+  private @Metric MutableGaugeLong
       numPipelinesWithAtleastOneReplicaReportedThreshold;
   private @Metric MutableCounterLong
       currentPipelinesWithAtleastOneReplicaReportedCount;
 
+  @Metric("Metric will be set to 1 if SCM is in SafeMode, otherwise 0") 
+  private MutableGaugeInt scmInSafeMode;
+  
+  @Metric private MutableGaugeLong numRequiredDatanodesThreshold;
+  @Metric private MutableCounterLong currentRegisteredDatanodesCount;
+
+  @Metric("Wall-clock time (ms) SCM spent in safe mode for the last exit")
+  private MutableGaugeLong scmSafeModeExitDurationMs;
+  @Metric("Duration (ms) of the last Ratis container safe mode rule incremental refresh")
+  private MutableGaugeLong lastRatisContainerSafeModeRuleRefreshDurationMs;
+  @Metric("Duration (ms) of the last EC container safe mode rule incremental refresh")
+  private MutableGaugeLong lastEcContainerSafeModeRuleRefreshDurationMs;
+  @Metric("Number of refresh calls before exiting safemode")
+  private MutableCounterLong numContainerSafeModeRuleRefreshes;
+
   public static SafeModeMetrics create() {
-    MetricsSystem ms = DefaultMetricsSystem.instance();
-    return ms.register(SOURCE_NAME,
-        "SCM Safemode Metrics",
-        new SafeModeMetrics());
+    final MetricsSystem ms = DefaultMetricsSystem.instance();
+    return ms.register(SOURCE_NAME, "SCM Safemode Metrics", new SafeModeMetrics());
   }
 
   public void setNumHealthyPipelinesThreshold(long val) {
-    this.numHealthyPipelinesThreshold.incr(val);
+    this.numHealthyPipelinesThreshold.set(val);
   }
 
   public void incCurrentHealthyPipelinesCount() {
     this.currentHealthyPipelinesCount.incr();
   }
 
+  public void setNumCurrentHealthyPipelines(long val) {
+    this.currentHealthyPipelinesCount.set(val);
+  }
+
   public void setNumPipelinesWithAtleastOneReplicaReportedThreshold(long val) {
-    this.numPipelinesWithAtleastOneReplicaReportedThreshold.incr(val);
+    this.numPipelinesWithAtleastOneReplicaReportedThreshold.set(val);
   }
 
   public void incCurrentHealthyPipelinesWithAtleastOneReplicaReportedCount() {
     this.currentPipelinesWithAtleastOneReplicaReportedCount.incr();
   }
 
-  public void setNumContainerWithOneReplicaReportedThreshold(long val) {
-    this.numContainerWithOneReplicaReportedThreshold.incr(val);
+  public void setNumContainerReportedThreshold(HddsProtos.ReplicationType type, long val) {
+    switch (type) {
+    case RATIS:
+      this.numContainerWithOneReplicaReportedThreshold.set(val);
+      break;
+    case EC:
+      this.numContainerWithECDataReplicaReportedThreshold.set(val);
+      break;
+    default:
+      throw new IllegalArgumentException("Unsupported replication type: " + type);
+    }
+  }
+
+  public void setScmInSafeMode(boolean inSafeMode) {
+    this.scmInSafeMode.set(inSafeMode ? 1 : 0);
+  }
+
+  public void setNumRequiredDatanodesThreshold(long val) {
+    this.numRequiredDatanodesThreshold.set(val);
   }
 
   public void incCurrentContainersWithOneReplicaReportedCount() {
     this.currentContainersWithOneReplicaReportedCount.incr();
   }
 
-  public MutableCounterLong getNumHealthyPipelinesThreshold() {
+  public void incCurrentContainersWithECDataReplicaReportedCount() {
+    this.currentContainersWithECDataReplicaReportedCount.incr();
+  }
+
+  public void incNumContainerSafeModeRuleRefreshes() {
+    this.numContainerSafeModeRuleRefreshes.incr();
+  }
+
+  public void incCurrentRegisteredDatanodesCount() {
+    this.currentRegisteredDatanodesCount.incr();
+  }
+
+  public void setScmSafeModeExitDurationMs(long durationMs) {
+    this.scmSafeModeExitDurationMs.set(durationMs);
+  }
+
+  public void setLastContainerSafeModeRuleRefreshDurationMs(
+      HddsProtos.ReplicationType type, long durationMs) {
+    switch (type) {
+    case RATIS:
+      this.lastRatisContainerSafeModeRuleRefreshDurationMs.set(durationMs);
+      break;
+    case EC:
+      this.lastEcContainerSafeModeRuleRefreshDurationMs.set(durationMs);
+      break;
+    default:
+      break;
+    }
+  }
+
+  MutableGaugeLong getNumHealthyPipelinesThreshold() {
     return numHealthyPipelinesThreshold;
   }
 
-  public MutableCounterLong getCurrentHealthyPipelinesCount() {
+  MutableGaugeLong getCurrentHealthyPipelinesCount() {
     return currentHealthyPipelinesCount;
   }
 
-  public MutableCounterLong
+  MutableGaugeLong
       getNumPipelinesWithAtleastOneReplicaReportedThreshold() {
     return numPipelinesWithAtleastOneReplicaReportedThreshold;
   }
 
-  public MutableCounterLong getCurrentPipelinesWithAtleastOneReplicaCount() {
+  MutableCounterLong getCurrentPipelinesWithAtleastOneReplicaCount() {
     return currentPipelinesWithAtleastOneReplicaReportedCount;
   }
 
-  public MutableCounterLong getNumContainerWithOneReplicaReportedThreshold() {
+  MutableGaugeLong getNumContainerWithOneReplicaReportedThreshold() {
     return numContainerWithOneReplicaReportedThreshold;
   }
 
-  public MutableCounterLong getCurrentContainersWithOneReplicaReportedCount() {
+  MutableGaugeLong getNumContainerWithECDataReplicaReportedThreshold() {
+    return numContainerWithECDataReplicaReportedThreshold;
+  }
+
+  MutableCounterLong getCurrentContainersWithOneReplicaReportedCount() {
     return currentContainersWithOneReplicaReportedCount;
   }
 
+  public MutableCounterLong getNumContainerSafeModeRuleRefreshes() {
+    return numContainerSafeModeRuleRefreshes;
+  }
+
+  MutableCounterLong getCurrentRegisteredDatanodesCount() {
+    return currentRegisteredDatanodesCount;
+  }
+
+  MutableGaugeInt getScmInSafeMode() {
+    return scmInSafeMode;
+  }
 
   public void unRegister() {
     MetricsSystem ms = DefaultMetricsSystem.instance();

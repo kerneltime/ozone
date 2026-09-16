@@ -1,24 +1,28 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- *  with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
  *      http://www.apache.org/licenses/LICENSE-2.0
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package org.apache.hadoop.ozone.container.keyvalue.impl;
 
 import com.google.common.base.Preconditions;
+import java.io.File;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ContainerCommandRequestProto;
 import org.apache.hadoop.hdds.ratis.ContainerCommandRequestMessage;
@@ -27,133 +31,31 @@ import org.apache.hadoop.hdds.scm.container.common.helpers.StorageContainerExcep
 import org.apache.hadoop.hdds.scm.storage.BlockDataStreamOutput;
 import org.apache.hadoop.ozone.container.common.helpers.ContainerMetrics;
 import org.apache.hadoop.ozone.container.common.impl.ContainerData;
-import org.apache.hadoop.util.Time;
 import org.apache.ratis.thirdparty.com.google.protobuf.ByteString;
 import org.apache.ratis.thirdparty.io.netty.buffer.ByteBuf;
-import org.apache.ratis.thirdparty.io.netty.buffer.Unpooled;
 import org.apache.ratis.util.ReferenceCountedObject;
+import org.apache.ratis.util.function.CheckedConsumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.File;
-import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Deque;
-import java.util.Iterator;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Objects;
-import java.util.Optional;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * This class is used to get the DataChannel for streaming.
  */
 public class KeyValueStreamDataChannel extends StreamDataChannelBase {
-  public static final Logger LOG =
-      LoggerFactory.getLogger(KeyValueStreamDataChannel.class);
+  static final Logger LOG = LoggerFactory.getLogger(KeyValueStreamDataChannel.class);
 
-  /**
-   * Keep the last {@link Buffers#max} bytes in the buffer
-   * in order to create putBlockRequest
-   * at {@link #closeBuffers(Buffers, WriteMethod)}}.
-   */
-  static class Buffers {
-    private final Deque<ReferenceCountedObject<ByteBuffer>> deque
-        = new LinkedList<>();
-    private final int max;
-    private int length;
+  private final Buffers buffers = new Buffers(BlockDataStreamOutput.PUT_BLOCK_REQUEST_LENGTH_MAX);
 
-    Buffers(int max) {
-      this.max = max;
-    }
-
-    private boolean isExtra(int n) {
-      return length - n >= max;
-    }
-
-    private boolean hasExtraBuffer() {
-      return Optional.ofNullable(deque.peek())
-          .map(ReferenceCountedObject::get)
-          .filter(b -> isExtra(b.remaining()))
-          .isPresent();
-    }
-
-    /**
-     * @return extra buffers which are safe to be written.
-     */
-    Iterable<ReferenceCountedObject<ByteBuffer>> offer(
-        ReferenceCountedObject<ByteBuffer> ref) {
-      final ByteBuffer buffer = ref.retain();
-      LOG.debug("offer {}", buffer);
-      final boolean offered = deque.offer(ref);
-      Preconditions.checkState(offered, "Failed to offer");
-      length += buffer.remaining();
-
-      return () -> new Iterator<ReferenceCountedObject<ByteBuffer>>() {
-        @Override
-        public boolean hasNext() {
-          return hasExtraBuffer();
-        }
-
-        @Override
-        public ReferenceCountedObject<ByteBuffer> next() {
-          final ReferenceCountedObject<ByteBuffer> polled = poll();
-          length -= polled.get().remaining();
-          Preconditions.checkState(length >= max);
-          return polled;
-        }
-      };
-    }
-
-    ReferenceCountedObject<ByteBuffer> poll() {
-      final ReferenceCountedObject<ByteBuffer> polled
-          = Objects.requireNonNull(deque.poll());
-      RatisHelper.debug(polled.get(), "polled", LOG);
-      return polled;
-    }
-
-    ReferenceCountedObject<ByteBuf> pollAll() {
-      Preconditions.checkState(!deque.isEmpty(), "The deque is empty");
-      final ByteBuffer[] array = new ByteBuffer[deque.size()];
-      final List<ReferenceCountedObject<ByteBuffer>> refs
-          = new ArrayList<>(deque.size());
-      for (int i = 0; i < array.length; i++) {
-        final ReferenceCountedObject<ByteBuffer> ref = poll();
-        refs.add(ref);
-        array[i] = ref.get();
-      }
-      final ByteBuf buf = Unpooled.wrappedBuffer(array).asReadOnly();
-      return ReferenceCountedObject.wrap(buf, () -> {
-      }, () -> {
-        buf.release();
-        refs.forEach(ReferenceCountedObject::release);
-      });
-    }
-
-    void cleanUpAll() {
-      while (!deque.isEmpty()) {
-        poll().release();
-      }
-    }
-  }
-
-  interface WriteMethod {
-    int applyAsInt(ByteBuffer src) throws IOException;
-  }
-
-  private final Buffers buffers = new Buffers(
-      BlockDataStreamOutput.PUT_BLOCK_REQUEST_LENGTH_MAX);
   private final AtomicReference<ContainerCommandRequestProto> putBlockRequest
       = new AtomicReference<>();
   private final AtomicBoolean closed = new AtomicBoolean();
+  private final CheckedConsumer<ContainerCommandRequestProto, IOException> putBlock;
 
   KeyValueStreamDataChannel(File file, ContainerData containerData,
-                            ContainerMetrics metrics)
-      throws StorageContainerException {
+                            CheckedConsumer<ContainerCommandRequestProto, IOException> putBlock,
+                            ContainerMetrics metrics) throws StorageContainerException {
     super(file, containerData, metrics);
+    this.putBlock = putBlock;
   }
 
   @Override
@@ -162,16 +64,18 @@ public class KeyValueStreamDataChannel extends StreamDataChannelBase {
   }
 
   @Override
+  boolean isPutBlockCommittedOnClose() {
+    return putBlock != null;
+  }
+
+  @Override
   public int write(ReferenceCountedObject<ByteBuffer> referenceCounted)
       throws IOException {
     getMetrics().incContainerOpsMetrics(getType());
     assertOpen();
+    assertSpaceAvailability(referenceCounted.get().remaining());
 
-    final long l = Time.monotonicNow();
-    int len = writeBuffers(referenceCounted, buffers, super::writeFileChannel);
-    getMetrics()
-        .incContainerOpsLatencies(getType(), Time.monotonicNow() - l);
-    return len;
+    return writeBuffers(referenceCounted, buffers, this::writeFileChannel);
   }
 
   static int writeBuffers(ReferenceCountedObject<ByteBuffer> src,
@@ -187,9 +91,9 @@ public class KeyValueStreamDataChannel extends StreamDataChannelBase {
     return src.get().remaining();
   }
 
-  private static void writeFully(ByteBuffer b, WriteMethod writeMethod)
+  static void writeFully(ByteBuffer b, WriteMethod writeMethod)
       throws IOException {
-    for (; b.remaining() > 0;) {
+    while (b.remaining() > 0) {
       final int written = writeMethod.applyAsInt(b);
       if (written <= 0) {
         throw new IOException("Unable to write");
@@ -198,8 +102,7 @@ public class KeyValueStreamDataChannel extends StreamDataChannelBase {
   }
 
   public ContainerCommandRequestProto getPutBlockRequest() {
-    return Objects.requireNonNull(putBlockRequest.get(),
-        () -> "putBlockRequest == null, " + this);
+    return putBlockRequest.get();
   }
 
   void assertOpen() throws IOException {
@@ -212,7 +115,13 @@ public class KeyValueStreamDataChannel extends StreamDataChannelBase {
   public void close() throws IOException {
     if (closed.compareAndSet(false, true)) {
       try {
-        putBlockRequest.set(closeBuffers(buffers, super::writeFileChannel));
+        if (isPutBlockCommittedOnClose()) {
+          // This path requires the client appends the PutBlock at the
+          // end of the stream.
+          closeWithStreamPutBlock();
+        } else {
+          writeBuffers();
+        }
       } finally {
         super.close();
       }
@@ -227,22 +136,38 @@ public class KeyValueStreamDataChannel extends StreamDataChannelBase {
     }
   }
 
+  /**
+   * Write the data in {@link #buffers} to the channel.
+   * Note that the PutBlock proto at the end is ignored; see HDDS-12007.
+   */
+  private void writeBuffers() throws IOException {
+    final ReferenceCountedObject<ByteBuf> ref = buffers.pollAll();
+    final ByteBuf buf = ref.retain();
+    try {
+      setEndIndex(buf);
+      // write the remaining data
+      writeFully(buf.nioBuffer(), super::writeFileChannel);
+    } finally {
+      ref.release();
+    }
+  }
+
   static ContainerCommandRequestProto closeBuffers(
       Buffers buffers, WriteMethod writeMethod) throws IOException {
     final ReferenceCountedObject<ByteBuf> ref = buffers.pollAll();
     final ByteBuf buf = ref.retain();
-    final ContainerCommandRequestProto putBlockRequest;
+    final ContainerCommandRequestProto putBlockRequestProto;
     try {
-      putBlockRequest = readPutBlockRequest(buf);
+      putBlockRequestProto = readPutBlockRequest(buf);
       // write the remaining data
       writeFully(buf.nioBuffer(), writeMethod);
     } finally {
       ref.release();
     }
-    return putBlockRequest;
+    return putBlockRequestProto;
   }
 
-  private static int readProtoLength(ByteBuf b, int lengthIndex) {
+  static int readProtoLength(ByteBuf b, int lengthIndex) {
     final int readerIndex = b.readerIndex();
     LOG.debug("{}, lengthIndex = {}, readerIndex = {}",
         b, lengthIndex, readerIndex);
@@ -255,8 +180,8 @@ public class KeyValueStreamDataChannel extends StreamDataChannelBase {
     return b.nioBuffer().getInt();
   }
 
-  static ContainerCommandRequestProto readPutBlockRequest(ByteBuf b)
-      throws IOException {
+  /** Set end index to the proto index in order to ignore the proto. */
+  static void setEndIndex(ByteBuf b) {
     //   readerIndex   protoIndex   lengthIndex    readerIndex+readableBytes
     //         V            V             V                              V
     // format: |--- data ---|--- proto ---|--- proto length (4 bytes) ---|
@@ -264,6 +189,26 @@ public class KeyValueStreamDataChannel extends StreamDataChannelBase {
     final int lengthIndex = readerIndex + b.readableBytes() - 4;
     final int protoLength = readProtoLength(b.duplicate(), lengthIndex);
     final int protoIndex = lengthIndex - protoLength;
+
+    // set index for reading data
+    b.writerIndex(protoIndex);
+  }
+
+  static ContainerCommandRequestProto readPutBlockRequest(ByteBuf b)
+      throws IOException {
+    //   readerIndex   protoIndex   lengthIndex    readerIndex+readableBytes
+    //         V            V             V                              V
+    // format: |--- data ---|--- proto ---|--- proto length (4 bytes) ---|
+    final int readerIndex = b.readerIndex();
+    final int lengthIndex = readerIndex + b.readableBytes() - 4;
+    if (lengthIndex < readerIndex) {
+      throw new IOException("Buffer too short for PutBlock length: " + b.readableBytes());
+    }
+    final int protoLength = readProtoLength(b.duplicate(), lengthIndex);
+    final int protoIndex = lengthIndex - protoLength;
+    if (protoIndex < readerIndex) {
+      throw new IOException("Invalid PutBlock proto length: " + protoLength);
+    }
 
     final ContainerCommandRequestProto proto;
     try {
@@ -297,5 +242,18 @@ public class KeyValueStreamDataChannel extends StreamDataChannelBase {
           ContainerProtos.Result.MALFORMED_REQUEST);
     }
     return request;
+  }
+
+  private void closeWithStreamPutBlock() throws IOException {
+    final ContainerCommandRequestProto proto =
+        closeBuffers(buffers, super::writeFileChannel);
+    putBlockRequest.set(proto);
+    Preconditions.checkState(putBlock != null);
+    putBlock.accept(proto);
+    setLinked();
+  }
+
+  interface WriteMethod {
+    int applyAsInt(ByteBuffer src) throws IOException;
   }
 }

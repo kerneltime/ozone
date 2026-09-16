@@ -1,13 +1,12 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,37 +14,51 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.hadoop.ozone.s3.signature;
 
-import javax.enterprise.context.RequestScoped;
-import javax.ws.rs.container.ContainerRequestContext;
-import javax.ws.rs.core.Context;
-import javax.ws.rs.core.MultivaluedMap;
+import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.ACCESS_DENIED;
+import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.MALFORMED_HEADER;
+import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.PAYLOAD_TOO_LARGE;
+import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.S3_AUTHINFO_CREATION_ERROR;
+import static org.apache.hadoop.ozone.s3.util.S3Consts.UNSIGNED_PAYLOAD;
+import static org.apache.hadoop.ozone.s3.util.S3Consts.X_AMZ_CONTENT_SHA256;
+import static org.apache.hadoop.ozone.s3sts.S3STSConfigKeys.OZONE_S3G_STS_PAYLOAD_HASH_MAX_VALUE;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Strings;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-
+import javax.enterprise.context.RequestScoped;
+import javax.ws.rs.container.ContainerRequestContext;
+import javax.ws.rs.core.Context;
+import javax.ws.rs.core.MultivaluedMap;
 import org.apache.hadoop.ozone.audit.AuditEventStatus;
 import org.apache.hadoop.ozone.audit.AuditLogger;
 import org.apache.hadoop.ozone.audit.AuditLoggerType;
 import org.apache.hadoop.ozone.audit.AuditMessage;
 import org.apache.hadoop.ozone.s3.HeaderPreprocessor;
 import org.apache.hadoop.ozone.s3.exception.OS3Exception;
+import org.apache.hadoop.ozone.s3.exception.OSTSException;
 import org.apache.hadoop.ozone.s3.exception.S3ErrorTable;
 import org.apache.hadoop.ozone.s3.signature.SignatureInfo.Version;
-
-import com.google.common.annotations.VisibleForTesting;
 import org.apache.hadoop.ozone.s3.util.AuditUtils;
+import org.apache.kerby.util.Hex;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.MALFORMED_HEADER;
-
 /**
- * Parser to process AWS V2 & V4 auth request. Creates string to sign and auth
+ * Parser to process AWS V2 and V4 auth request. Creates string to sign and auth
  * header. For more details refer to AWS documentation https://docs.aws
  * .amazon.com/general/latest/gr/sigv4-create-canonical-request.html.
  **/
@@ -58,10 +71,13 @@ public class AWSSignatureProcessor implements SignatureProcessor {
   private static final AuditLogger AUDIT =
       new AuditLogger(AuditLoggerType.S3GLOGGER);
 
+  private static final String X_AMZ_SECURITY_TOKEN = "x-amz-security-token";
+
   @Context
   private ContainerRequestContext context;
 
-  public SignatureInfo parseSignature() throws OS3Exception {
+  @Override
+  public SignatureInfo parseSignature() throws OS3Exception, IOException, NoSuchAlgorithmException {
 
     LowerCaseKeyStringMap headers =
         LowerCaseKeyStringMap.fromHeaderMap(context.getHeaders());
@@ -80,9 +96,11 @@ public class AWSSignatureProcessor implements SignatureProcessor {
     for (SignatureParser parser : signatureParsers) {
       try {
         signatureInfo = parser.parseSignature();
+      } catch (AccessDeniedResourceException e) {
+        AUDIT.logAuthFailure(buildAuthFailureMessage(e));
+        throw S3ErrorTable.newError(ACCESS_DENIED, e.getResource());
       } catch (MalformedResourceException e) {
-        AuditMessage message = buildAuthFailureMessage(e);
-        AUDIT.logAuthFailure(message);
+        AUDIT.logAuthFailure(buildAuthFailureMessage(e));
         throw S3ErrorTable.newError(MALFORMED_HEADER, e.getResource());
       }
       if (signatureInfo != null) {
@@ -90,14 +108,91 @@ public class AWSSignatureProcessor implements SignatureProcessor {
       }
     }
     if (signatureInfo == null) {
-      signatureInfo = new SignatureInfo(
-          Version.NONE,
-          "", "", "", "", "", "", "", false
-      );
+      signatureInfo = new SignatureInfo.Builder(Version.NONE).setService("s3").build();
     }
+
+    // Capture STS session token if present (header-based or query-based).
+    // - Header-based SigV4: x-amz-security-token
+    // - Query-based (for presigned URLs): X-Amz-Security-Token
+    final String sessionToken = extractSessionToken(headers);
+    if (sessionToken != null && !sessionToken.isEmpty()) {
+      signatureInfo.setSessionToken(sessionToken);
+    }
+
+    String payloadHash = getPayloadHash(headers, signatureInfo);
+    signatureInfo.setPayloadHash(payloadHash);
     signatureInfo.setUnfilteredURI(
         context.getUriInfo().getRequestUri().getPath());
     return signatureInfo;
+  }
+
+  private String extractSessionToken(LowerCaseKeyStringMap headers) {
+    // Header-based token
+    final String headerToken = headers.get(X_AMZ_SECURITY_TOKEN);
+    if (headerToken != null && !headerToken.isEmpty()) {
+      return headerToken;
+    }
+
+    // Query-based token - this would be used for presigned URLs
+    final MultivaluedMap<String, String> queryParams = context.getUriInfo().getQueryParameters();
+    if (queryParams == null) {
+      return null;
+    }
+    for (Map.Entry<String, List<String>> entry : queryParams.entrySet()) {
+      final String key = entry.getKey();
+      if (Strings.isNullOrEmpty(key)) {
+        continue;
+      }
+      if (key.compareToIgnoreCase(X_AMZ_SECURITY_TOKEN) == 0) {
+        final List<String> values = entry.getValue();
+        if (values != null && !values.isEmpty()) {
+          return values.get(0);
+        }
+      }
+    }
+    return null;
+  }
+
+  private String getPayloadHash(Map<String, String> headers, SignatureInfo signatureInfo)
+      throws OS3Exception, NoSuchAlgorithmException, IOException {
+    if (signatureInfo.getVersion() == Version.V2) {
+      throw S3ErrorTable.newError(S3_AUTHINFO_CREATION_ERROR);
+    }
+    if (signatureInfo.getService().equals("s3")) {
+      if (!signatureInfo.isSignPayload()) {
+        // According to AWS Signature V4 documentation using Query Parameters
+        // https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-query-string-auth.html
+        return UNSIGNED_PAYLOAD;
+      }
+      String contentSignatureHeaderValue = headers.get(X_AMZ_CONTENT_SHA256);
+      // According to AWS Signature V4 documentation using Authorization Header
+      // https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-header-based-auth.html
+      // The x-amz-content-sha256 header is required
+      // for all AWS Signature Version 4 requests using Authorization header.
+      if (contentSignatureHeaderValue == null) {
+        LOG.error("The request must include " + X_AMZ_CONTENT_SHA256
+            + " header for signed payload");
+        throw S3ErrorTable.newError(S3_AUTHINFO_CREATION_ERROR);
+      }
+      // Simply return the header value of x-amz-content-sha256 as the payload hash
+      // These are the possible cases:
+      // 1. Actual payload checksum for single chunk upload
+      // 2. Unsigned payloads for multiple chunks upload
+      //    - UNSIGNED-PAYLOAD
+      //    - STREAMING-UNSIGNED-PAYLOAD-TRAILER
+      // 3. Signed payloads for multiple chunks upload
+      //    - STREAMING-AWS4-HMAC-SHA256-PAYLOAD
+      //    - STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER
+      //    - STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD
+      //    - STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD-TRAILER
+      return contentSignatureHeaderValue;
+    }
+    // For STS payload hash is calculated over the body
+    InputStream in = context.getEntityStream();
+    byte[] body = readAllBytes(in);
+    String payloadHash = Hex.encode(MessageDigest.getInstance("SHA-256").digest(body));
+    context.setEntityStream(new ByteArrayInputStream(body));
+    return payloadHash;
   }
 
   private AuditMessage buildAuthFailureMessage(MalformedResourceException e) {
@@ -109,6 +204,21 @@ public class AWSSignatureProcessor implements SignatureProcessor {
         .withException(e)
         .build();
     return message;
+  }
+
+  private byte[] readAllBytes(InputStream in) throws OS3Exception, IOException {
+    ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+    byte[] chunk = new byte[8192];
+    int totalRead = 0;
+    int n;
+    while ((n = in.read(chunk)) != -1) {
+      if (totalRead + n > OZONE_S3G_STS_PAYLOAD_HASH_MAX_VALUE) {
+        throw new OSTSException(PAYLOAD_TOO_LARGE);
+      }
+      buffer.write(chunk, 0, n);
+      totalRead += n;
+    }
+    return buffer.toByteArray();
   }
 
   @VisibleForTesting
@@ -138,7 +248,7 @@ public class AWSSignatureProcessor implements SignatureProcessor {
           new LowerCaseKeyStringMap();
 
       for (Entry<String, List<String>> headerEntry : rawHeaders.entrySet()) {
-        if (0 < headerEntry.getValue().size()) {
+        if (!headerEntry.getValue().isEmpty()) {
           String headerKey = headerEntry.getKey();
           if (headers.containsKey(headerKey)) {
             //multiple headers from the same type are combined
@@ -201,7 +311,7 @@ public class AWSSignatureProcessor implements SignatureProcessor {
 
     @Override
     public String remove(Object key) {
-      return delegate.remove(key.toString());
+      return delegate.remove(key.toString().toLowerCase());
     }
 
     @Override

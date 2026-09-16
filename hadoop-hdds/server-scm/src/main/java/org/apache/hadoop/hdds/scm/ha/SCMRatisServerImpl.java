@@ -1,42 +1,48 @@
 /*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with this
- * work for additional information regarding copyright ownership.  The ASF
- * licenses this file to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- * <p/>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p/>
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations under
- * the License.
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package org.apache.hadoop.hdds.scm.ha;
 
+import static org.apache.hadoop.hdds.scm.ha.HASecurityUtils.createSCMRatisTLSConfig;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.net.InetAddresses;
+import jakarta.annotation.Nullable;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.util.ArrayList;
-import java.util.List;
-import java.util.UUID;
 import java.util.Collection;
+import java.util.List;
+import java.util.Objects;
+import java.util.OptionalInt;
+import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
 import org.apache.hadoop.hdds.HddsUtils;
 import org.apache.hadoop.hdds.conf.ConfigurationSource;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
-import org.apache.hadoop.hdds.protocol.proto.SCMRatisProtocol.RequestType;
 import org.apache.hadoop.hdds.ratis.RatisHelper;
 import org.apache.hadoop.hdds.scm.AddSCMRequest;
 import org.apache.hadoop.hdds.scm.RemoveSCMRequest;
 import org.apache.hadoop.hdds.scm.ScmConfigKeys;
+import org.apache.hadoop.hdds.scm.ha.invoker.ScmInvoker;
 import org.apache.hadoop.hdds.scm.server.StorageContainerManager;
 import org.apache.hadoop.hdds.security.SecurityConfig;
 import org.apache.hadoop.ozone.OzoneConsts;
@@ -52,19 +58,18 @@ import org.apache.ratis.protocol.RaftGroup;
 import org.apache.ratis.protocol.RaftGroupId;
 import org.apache.ratis.protocol.RaftPeer;
 import org.apache.ratis.protocol.RaftPeerId;
+import org.apache.ratis.protocol.SetConfigurationRequest;
 import org.apache.ratis.protocol.SnapshotManagementRequest;
 import org.apache.ratis.protocol.exceptions.NotLeaderException;
-import org.apache.ratis.protocol.SetConfigurationRequest;
 import org.apache.ratis.server.RaftServer;
 import org.apache.ratis.server.storage.RaftStorage;
 import org.apache.ratis.thirdparty.com.google.protobuf.ByteString;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static org.apache.hadoop.hdds.scm.ha.HASecurityUtils.createSCMRatisTLSConfig;
-
 /**
- * TODO.
+ * Default {@link SCMRatisServer} implementation backed by a Ratis
+ * {@link RaftServer} running the {@link SCMStateMachine}.
  */
 public class SCMRatisServerImpl implements SCMRatisServer {
   private static final Logger LOG =
@@ -147,6 +152,16 @@ public class SCMRatisServerImpl implements SCMRatisServer {
     return grpcTlsConfig;
   }
 
+  @Override
+  @Nullable
+  public RaftPeerId getLeaderId() {
+    RaftPeer raftLeaderPeer = getLeader();
+    if (raftLeaderPeer != null) {
+      return raftLeaderPeer.getId();
+    }
+    return null;
+  }
+
   private static void waitForLeaderToBeReady(RaftServer server,
       OzoneConfiguration conf, RaftGroup group) throws IOException {
     boolean ready;
@@ -209,9 +224,8 @@ public class SCMRatisServerImpl implements SCMRatisServer {
   }
 
   @Override
-  public void registerStateMachineHandler(final RequestType handlerType,
-                                          final Object handler) {
-    stateMachine.registerHandler(handlerType, handler);
+  public void registerStateMachineHandler(final ScmInvoker<?> handler) {
+    stateMachine.registerInvoker(handler.getType(), handler);
   }
 
   @Override
@@ -230,9 +244,7 @@ public class SCMRatisServerImpl implements SCMRatisServer {
     final RaftClientReply raftClientReply =
         server.submitClientRequestAsync(raftClientRequest)
             .get(requestTimeout, TimeUnit.MILLISECONDS);
-    if (LOG.isDebugEnabled()) {
-      LOG.info("request {} Reply {}", raftClientRequest, raftClientReply);
-    }
+    LOG.debug("request {} Reply {}", raftClientRequest, raftClientReply);
     return SCMRatisResponse.decode(raftClientReply);
   }
 
@@ -265,7 +277,6 @@ public class SCMRatisServerImpl implements SCMRatisServer {
     return isStopped;
   }
 
-
   @Override
   public List<String> getRatisRoles() {
     Collection<RaftPeer> peers = division.getGroup().getPeers();
@@ -280,16 +291,32 @@ public class SCMRatisServerImpl implements SCMRatisServer {
         LOG.error("SCM Ratis PeerInetAddress {} is unresolvable",
             peer.getAddress());
       }
-      ratisRoles.add((peer.getAddress() == null ? "" :
-          peer.getAddress().concat(peer.equals(leader) ?
-                  ":".concat(RaftProtos.RaftPeerRole.LEADER.toString()) :
-                  ":".concat(RaftProtos.RaftPeerRole.FOLLOWER.toString()))
-                  .concat(":".concat(peer.getId().toString()))
-                  .concat(":".concat(peerInetAddress == null ? "" :
-                      peerInetAddress.getHostAddress()))));
+      if (peer.getAddress() == null) {
+        ratisRoles.add("");
+        continue;
+      }
+      String host = HddsUtils.getHostName(peer.getAddress()).orElse("");
+      OptionalInt portOpt = HddsUtils.getHostPort(peer.getAddress());
+      if (!portOpt.isPresent()) {
+        LOG.error("SCM Ratis peer address {} has no port, skipping",
+            peer.getAddress());
+        continue;
+      }
+      String normalizedAddress = HddsUtils.getHostPortString(host, portOpt.getAsInt());
+      String role = peer.equals(leader)
+          ? RaftProtos.RaftPeerRole.LEADER.toString()
+          : RaftProtos.RaftPeerRole.FOLLOWER.toString();
+      String hostIp = "";
+      if (peerInetAddress != null) {
+        hostIp = InetAddresses.toUriString(peerInetAddress);
+      }
+      String roleEntry = normalizedAddress + ":" + role + ":"
+          + peer.getId().toString() + ":" + hostIp;
+      ratisRoles.add(roleEntry);
     }
     return ratisRoles;
   }
+
   /**
    * {@inheritDoc}
    */
@@ -329,14 +356,15 @@ public class SCMRatisServerImpl implements SCMRatisServer {
       if (raftClientReply.isSuccess()) {
         LOG.info("Successfully added new SCM: {}.", request.getScmId());
       } else {
-        LOG.error("Failed to add new SCM: {}. Ratis reply: {}" +
+        LOG.error("Failed to add new SCM: {}. Ratis reply: {}",
             request.getScmId(), raftClientReply);
         throw new IOException(raftClientReply.getException());
       }
       return raftClientReply.isSuccess();
     } catch (IOException e) {
-      LOG.error("Failed to update Ratis configuration and add new peer. " +
-          "Cannot add new SCM: {}.", scm.getScmId(), e);
+      LOG.warn("Failed to update Ratis configuration and add new peer. " +
+          "Cannot add new SCM: {}. {}", scm.getScmId(), e.getMessage());
+      LOG.debug("addSCM call failed due to: ", e);
       throw e;
     }
   }
@@ -364,7 +392,7 @@ public class SCMRatisServerImpl implements SCMRatisServer {
       if (raftClientReply.isSuccess()) {
         LOG.info("Successfully removed SCM: {}.", request.getScmId());
       } else {
-        LOG.error("Failed to remove SCM: {}. Ratis reply: {}" +
+        LOG.error("Failed to remove SCM: {}. Ratis reply: {}",
             request.getScmId(), raftClientReply);
         throw new IOException(raftClientReply.getException());
       }
@@ -382,12 +410,22 @@ public class SCMRatisServerImpl implements SCMRatisServer {
 
   private static RaftGroup buildRaftGroup(SCMNodeDetails details,
       String scmId, String clusterId) {
-    Preconditions.checkNotNull(scmId);
+    Objects.requireNonNull(scmId, "scmId == null");
     final RaftGroupId groupId = buildRaftGroupId(clusterId);
     RaftPeerId selfPeerId = getSelfPeerId(scmId);
 
+    // Pass the configured host:port string through verbatim. The
+    // invariant is "do not pre-resolve" -- never construct an
+    // InetSocketAddress from the configured address and hand the
+    // resolved form to RaftPeer.setAddress, which would freeze the peer
+    // at one IP for the channel's lifetime. Ratis routes the string to
+    // gRPC's NettyChannelBuilder, whose default DnsNameResolver
+    // re-resolves hostname addresses on connection failure (peer pod
+    // restarts recover automatically in Kubernetes-style environments
+    // where DNS names are stable but IPs are not). IP-literal configs
+    // are still honored exactly as configured. See HDDS-15514
+    // (DNS-refresh-on-failure for all RPC paths).
     RaftPeer localRaftPeer = RaftPeer.newBuilder().setId(selfPeerId)
-        // TODO : Should we use IP instead of hostname??
         .setAddress(details.getRatisHostPortStr()).build();
 
     List<RaftPeer> raftPeers = new ArrayList<>();
@@ -404,7 +442,7 @@ public class SCMRatisServerImpl implements SCMRatisServer {
 
   @VisibleForTesting
   public static RaftGroupId buildRaftGroupId(String clusterId) {
-    Preconditions.checkNotNull(clusterId);
+    Objects.requireNonNull(clusterId, "clusterId == null");
     return RaftGroupId.valueOf(
         UUID.fromString(clusterId.replace(OzoneConsts.CLUSTER_ID_PREFIX, "")));
   }

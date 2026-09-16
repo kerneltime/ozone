@@ -1,114 +1,158 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package org.apache.hadoop.ozone.s3.endpoint;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_FS_DATASTREAM_AUTO_THRESHOLD;
+import static org.apache.hadoop.ozone.client.OzoneClientTestUtils.assertKeyContent;
+import static org.apache.hadoop.ozone.s3.endpoint.EndpointTestUtils.FailingInputStream;
+import static org.apache.hadoop.ozone.s3.endpoint.EndpointTestUtils.assertErrorResponse;
+import static org.apache.hadoop.ozone.s3.endpoint.EndpointTestUtils.assertSucceeds;
+import static org.apache.hadoop.ozone.s3.endpoint.EndpointTestUtils.put;
+import static org.apache.hadoop.ozone.s3.signature.SignatureTestUtils.signatureInfo;
+import static org.apache.hadoop.ozone.s3.signature.SignatureTestUtils.signedChunkedBody;
+import static org.apache.hadoop.ozone.s3.signature.SignatureTestUtils.signingKey;
+import static org.apache.hadoop.ozone.s3.util.S3Consts.COPY_SOURCE_HEADER;
+import static org.apache.hadoop.ozone.s3.util.S3Consts.DECODED_CONTENT_LENGTH_HEADER;
+import static org.apache.hadoop.ozone.s3.util.S3Consts.STORAGE_CLASS_HEADER;
+import static org.apache.hadoop.ozone.s3.util.S3Consts.STREAMING_AWS4_HMAC_SHA256_PAYLOAD;
+import static org.apache.hadoop.ozone.s3.util.S3Consts.X_AMZ_CONTENT_SHA256;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import java.io.IOException;
+import java.io.OutputStream;
+import java.security.MessageDigest;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import javax.ws.rs.core.HttpHeaders;
 import org.apache.hadoop.hdds.client.ReplicationConfig;
 import org.apache.hadoop.hdds.client.ReplicationFactor;
 import org.apache.hadoop.hdds.client.ReplicationType;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.conf.StorageUnit;
 import org.apache.hadoop.ozone.OzoneConfigKeys;
+import org.apache.hadoop.ozone.OzoneConsts;
+import org.apache.hadoop.ozone.audit.AuditLogger;
 import org.apache.hadoop.ozone.client.OzoneBucket;
+import org.apache.hadoop.ozone.client.OzoneBucketStub;
 import org.apache.hadoop.ozone.client.OzoneClient;
 import org.apache.hadoop.ozone.client.OzoneClientStub;
-import org.junit.jupiter.api.BeforeAll;
+import org.apache.hadoop.ozone.s3.MultiDigestInputStream;
+import org.apache.hadoop.ozone.s3.exception.S3ErrorTable;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-
-import javax.ws.rs.container.ContainerRequestContext;
-import javax.ws.rs.core.HttpHeaders;
-import javax.ws.rs.core.MultivaluedHashMap;
-import javax.ws.rs.core.Response;
-import javax.ws.rs.core.UriInfo;
-import java.io.ByteArrayInputStream;
-import java.io.OutputStream;
-import java.util.HashMap;
-import java.util.Map;
-
-import static java.nio.charset.StandardCharsets.UTF_8;
-import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_FS_DATASTREAM_AUTO_THRESHOLD;
-import static org.apache.hadoop.ozone.s3.util.S3Consts.COPY_SOURCE_HEADER;
-import static org.apache.hadoop.ozone.s3.util.S3Consts.STORAGE_CLASS_HEADER;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /**
  * This class tests Upload request.
  */
 public class TestUploadWithStream {
 
-  private static final ObjectEndpoint REST = new ObjectEndpoint();
-
   private static final String S3BUCKET = "streamb1";
   private static final String S3KEY = "testkey";
   private static final String S3_COPY_EXISTING_KEY = "test_copy_existing_key";
   private static final String S3_COPY_EXISTING_KEY_CONTENT =
       "test_copy_existing_key_content";
-  private static OzoneClient client;
-  private static final HttpHeaders HEADERS;
-  private static ContainerRequestContext context;
 
-  static {
-    HEADERS = mock(HttpHeaders.class);
-    when(HEADERS.getHeaderString(STORAGE_CLASS_HEADER)).thenReturn("STANDARD");
-  }
+  private ObjectEndpoint rest;
 
-  @BeforeAll
-  public static void setUp() throws Exception {
+  private OzoneClient client;
+  private HttpHeaders headers;
+
+  @BeforeEach
+  public void setUp() throws Exception {
     client = new OzoneClientStub();
     client.getObjectStore().createS3Bucket(S3BUCKET);
 
-    REST.setHeaders(HEADERS);
-    REST.setClient(client);
+    headers = mock(HttpHeaders.class);
+    when(headers.getHeaderString(X_AMZ_CONTENT_SHA256)).thenReturn("UNSIGNED-PAYLOAD");
+    when(headers.getHeaderString(STORAGE_CLASS_HEADER)).thenReturn("STANDARD");
 
     OzoneConfiguration conf = new OzoneConfiguration();
-    conf.setBoolean(OzoneConfigKeys.DFS_CONTAINER_RATIS_DATASTREAM_ENABLED,
+    conf.setBoolean(OzoneConfigKeys.HDDS_CONTAINER_RATIS_DATASTREAM_ENABLED,
         true);
     conf.setStorageSize(OZONE_FS_DATASTREAM_AUTO_THRESHOLD, 1,
         StorageUnit.BYTES);
-    REST.setOzoneConfiguration(conf);
 
-    context = mock(ContainerRequestContext.class);
-    when(context.getUriInfo()).thenReturn(mock(UriInfo.class));
-    when(context.getUriInfo().getQueryParameters())
-        .thenReturn(new MultivaluedHashMap<>());
-    REST.setContext(context);
-
-    REST.init();
+    rest = EndpointBuilder.newObjectEndpointBuilder()
+        .setClient(client)
+        .setHeaders(headers)
+        .setConfig(conf)
+        .setSignatureInfo(signatureInfo())
+        .build();
   }
 
   @Test
   public void testEnableStream() {
-    assertTrue(REST.isDatastreamEnabled());
+    assertTrue(rest.isDatastreamEnabled());
   }
 
   @Test
   public void testUpload() throws Exception {
-    byte[] keyContent = S3_COPY_EXISTING_KEY_CONTENT.getBytes(UTF_8);
-    ByteArrayInputStream body =
-        new ByteArrayInputStream(keyContent);
-    Response response = REST.put(S3BUCKET, S3KEY, 0, 0, null, body);
+    assertSucceeds(() -> put(rest, S3BUCKET, S3KEY, S3_COPY_EXISTING_KEY_CONTENT));
+  }
 
-    assertEquals(200, response.getStatus());
+  @Test
+  public void testUploadWithValidSignedChunks() throws Exception {
+    OzoneBucket bucket = configureSignedChunks(S3_COPY_EXISTING_KEY_CONTENT.length());
+
+    assertSucceeds(() -> put(rest, S3BUCKET, S3KEY, signedChunkedBody(S3_COPY_EXISTING_KEY_CONTENT)));
+
+    assertKeyContent(bucket, S3KEY, S3_COPY_EXISTING_KEY_CONTENT);
+  }
+
+  @Test
+  public void testUploadRejectsTamperedSignedChunk() throws Exception {
+    OzoneBucket bucket = configureSignedChunks(S3_COPY_EXISTING_KEY_CONTENT.length());
+    String tamperedBody = signedChunkedBody(S3_COPY_EXISTING_KEY_CONTENT)
+        .replace(S3_COPY_EXISTING_KEY_CONTENT, "X" + S3_COPY_EXISTING_KEY_CONTENT.substring(1));
+
+    assertErrorResponse(S3ErrorTable.SIGNATURE_DOES_NOT_MATCH,
+        () -> put(rest, S3BUCKET, S3KEY, tamperedBody));
+    assertThatThrownBy(() -> bucket.getKey(S3KEY)).isInstanceOf(IOException.class);
+  }
+
+  @Test
+  public void testUploadDoesNotCommitWhenBodyReadFails() throws Exception {
+    OzoneBucket bucket = client.getObjectStore().getS3Bucket(S3BUCKET);
+    byte[] keyContent = S3_COPY_EXISTING_KEY_CONTENT.getBytes(UTF_8);
+    try (FailingInputStream failing = new FailingInputStream(keyContent, 5);
+        MultiDigestInputStream body = new MultiDigestInputStream(failing,
+            Collections.singletonList(
+                MessageDigest.getInstance(OzoneConsts.MD5_HASH)))) {
+
+      IOException ex = assertThrows(IOException.class,
+          () -> ObjectEndpointStreaming.put(bucket, S3KEY, keyContent.length,
+              ReplicationConfig.fromTypeAndFactor(ReplicationType.RATIS,
+                  ReplicationFactor.THREE), rest.getChunkSize(),
+              new HashMap<>(), new HashMap<>(), body, rest.getHeaders(), true,
+              new AuditLogger.PerformanceStringBuilder(),
+              S3ConditionalRequest.parseWriteConditions(rest.getHeaders(),
+                  S3KEY),
+              false, derivedKey -> { }));
+      assertEquals("upload interrupted", ex.getMessage());
+      assertThrows(IOException.class, () -> bucket.getKey(S3KEY));
+    }
   }
 
   @Test
@@ -132,19 +176,25 @@ public class TestUploadWithStream {
     additionalHeaders
         .put(COPY_SOURCE_HEADER, S3BUCKET + "/" + S3_COPY_EXISTING_KEY);
 
-    HttpHeaders headers = mock(HttpHeaders.class);
-    when(headers.getHeaderString(STORAGE_CLASS_HEADER)).thenReturn(
+    HttpHeaders copyHeaders = mock(HttpHeaders.class);
+    when(copyHeaders.getHeaderString(STORAGE_CLASS_HEADER)).thenReturn(
         "STANDARD");
 
     additionalHeaders
-        .forEach((k, v) -> when(headers.getHeaderString(k)).thenReturn(v));
-    REST.setHeaders(headers);
+        .forEach((k, v) -> when(copyHeaders.getHeaderString(k)).thenReturn(v));
+    rest.setHeaders(copyHeaders);
 
-    Response response = REST.put(S3BUCKET, S3KEY, 0, 0, null, null);
-
-    assertEquals(200, response.getStatus());
+    assertSucceeds(() -> put(rest, S3BUCKET, S3KEY, null));
 
     final long newDataSize = bucket.getKey(S3KEY).getDataSize();
     assertEquals(dataSize, newDataSize);
+  }
+
+  private OzoneBucket configureSignedChunks(int decodedLength) throws IOException {
+    OzoneBucket bucket = client.getObjectStore().getS3Bucket(S3BUCKET);
+    ((OzoneBucketStub) bucket).setDerivedKey(signingKey());
+    when(headers.getHeaderString(X_AMZ_CONTENT_SHA256)).thenReturn(STREAMING_AWS4_HMAC_SHA256_PAYLOAD);
+    when(headers.getHeaderString(DECODED_CONTENT_LENGTH_HEADER)).thenReturn(String.valueOf(decodedLength));
+    return bucket;
   }
 }

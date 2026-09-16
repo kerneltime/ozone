@@ -1,49 +1,39 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- *  or more contributor license agreements.  See the NOTICE file
- *  distributed with this work for additional information
- *  regarding copyright ownership.  The ASF licenses this file
- *  to you under the Apache License, Version 2.0 (the
- *  "License"); you may not use this file except in compliance
- *  with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *       http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package org.apache.hadoop.fs.contract;
 
+import static org.apache.hadoop.fs.contract.ContractTestUtils.cleanup;
+import static org.apache.hadoop.fs.contract.ContractTestUtils.skip;
+import static org.assertj.core.api.Assumptions.assumeThat;
+
+import java.io.IOException;
+import java.net.URI;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.ozone.test.JUnit5AwareTimeout;
 import org.assertj.core.api.Assertions;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Rule;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.TestInfo;
-import org.junit.rules.TestName;
-import org.junit.rules.TestRule;
-import org.junit.rules.Timeout;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.IOException;
-import java.net.URI;
-
-import static org.apache.hadoop.fs.contract.ContractTestUtils.cleanup;
-import static org.apache.hadoop.fs.contract.ContractTestUtils.skip;
-import static org.assertj.core.api.Assumptions.assumeThat;
 
 /**
  * This is the base class for all the contract tests.
@@ -78,12 +68,8 @@ public abstract class AbstractFSContractTestBase implements ContractOptions {
    */
   private Path testPath;
 
-  @Rule
-  public TestName methodName = new TestName();
-
   private String testMethodName;
 
-  @BeforeClass
   @BeforeAll
   public static void nameTestThread() {
     Thread.currentThread().setName("JUnit");
@@ -91,12 +77,6 @@ public abstract class AbstractFSContractTestBase implements ContractOptions {
 
   private void nameThread() {
     Thread.currentThread().setName("JUnit-" + getMethodName());
-  }
-
-  @Before
-  public void getTestMethodName() {
-    testMethodName = methodName.getMethodName();
-    nameThread();
   }
 
   @BeforeEach
@@ -180,12 +160,6 @@ public abstract class AbstractFSContractTestBase implements ContractOptions {
   }
 
   /**
-   * Set the timeout for every test.
-   */
-  @Rule
-  public TestRule testTimeout = new JUnit5AwareTimeout(new Timeout(getTestTimeoutMillis()));
-
-  /**
    * Option for tests to override the default timeout value.
    * @return the current test timeout
    */
@@ -198,7 +172,6 @@ public abstract class AbstractFSContractTestBase implements ContractOptions {
    * Setup: create the contract then init it.
    * @throws Exception on any failure
    */
-  @Before
   @BeforeEach
   public void setup() throws Exception {
     Thread.currentThread().setName("setup");
@@ -231,7 +204,6 @@ public abstract class AbstractFSContractTestBase implements ContractOptions {
    * Teardown.
    * @throws Exception on any failure
    */
-  @After
   @AfterEach
   public void teardown() throws Exception {
     Thread.currentThread().setName("teardown");
@@ -373,7 +345,6 @@ public abstract class AbstractFSContractTestBase implements ContractOptions {
   protected void assertIsDirectory(Path path) throws IOException {
     ContractTestUtils.assertIsDirectory(fileSystem, path);
   }
-
 
   /**
    * Assert that a file exists and whose {@link FileStatus} entry

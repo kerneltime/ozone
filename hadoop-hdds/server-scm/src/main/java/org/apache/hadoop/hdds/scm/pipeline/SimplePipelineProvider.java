@@ -1,13 +1,12 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,17 +17,16 @@
 
 package org.apache.hadoop.hdds.scm.pipeline;
 
+import java.io.IOException;
+import java.util.Collections;
+import java.util.List;
+import java.util.Set;
+import org.apache.hadoop.hdds.client.ReplicationConfig;
 import org.apache.hadoop.hdds.client.StandaloneReplicationConfig;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
 import org.apache.hadoop.hdds.scm.container.ContainerReplica;
 import org.apache.hadoop.hdds.scm.node.NodeManager;
 import org.apache.hadoop.hdds.scm.pipeline.Pipeline.PipelineState;
-
-import java.io.IOException;
-import java.util.Collections;
-import java.util.List;
-import java.util.Set;
-import java.util.stream.Collectors;
 
 /**
  * Implements Api for creating stand alone pipelines.
@@ -63,33 +61,27 @@ public class SimplePipelineProvider
     }
 
     Collections.shuffle(dns);
-    return Pipeline.newBuilder()
+    return newPipelineBuilder(replicationConfig, dns.subList(0, replicationConfig.getReplicationFactor().getNumber()))
         .setId(PipelineID.randomId())
-        .setState(PipelineState.OPEN)
-        .setReplicationConfig(replicationConfig)
-        .setNodes(dns.subList(0,
-            replicationConfig.getReplicationFactor().getNumber()))
         .build();
   }
 
   @Override
   public Pipeline create(StandaloneReplicationConfig replicationConfig,
       List<DatanodeDetails> nodes) {
-    return Pipeline.newBuilder()
+    return newPipelineBuilder(replicationConfig, nodes)
         .setId(PipelineID.randomId())
-        .setState(PipelineState.OPEN)
-        .setReplicationConfig(replicationConfig)
-        .setNodes(nodes)
         .build();
   }
 
   @Override
   public Pipeline createForRead(StandaloneReplicationConfig replicationConfig,
       Set<ContainerReplica> replicas) {
-    return create(replicationConfig, replicas
-        .stream()
-        .map(ContainerReplica::getDatanodeDetails)
-        .collect(Collectors.toList()));
+    // Use insecureRandomId for throwaway read pipeline IDs to avoid
+    // contention on the shared SecureRandom instance.
+    return newPipelineBuilder(replicationConfig, ContainerReplica.toDatanodeDetailsList(replicas))
+        .setId(PipelineID.insecureRandomId())
+        .build();
   }
 
   @Override
@@ -98,7 +90,8 @@ public class SimplePipelineProvider
   }
 
   @Override
-  public void shutdown() {
-    // Do nothing.
+  protected Pipeline.Builder newPipelineBuilder(ReplicationConfig replicationConfig, List<DatanodeDetails> nodes) {
+    return super.newPipelineBuilder(replicationConfig, nodes)
+        .setState(PipelineState.OPEN);
   }
 }

@@ -1,13 +1,12 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,18 +17,7 @@
 
 package org.apache.ozone.lib.service.instrumentation;
 
-import org.apache.hadoop.hdds.annotation.InterfaceAudience;
-import org.apache.ozone.lib.server.BaseService;
-import org.apache.ozone.lib.server.ServiceException;
-import org.apache.ozone.lib.service.Instrumentation;
-import org.apache.ozone.lib.service.Scheduler;
-import org.apache.hadoop.util.Time;
-import org.json.simple.JSONAware;
-import org.json.simple.JSONObject;
-import org.json.simple.JSONStreamAware;
-
-import java.io.IOException;
-import java.io.Writer;
+import com.fasterxml.jackson.annotation.JsonValue;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -39,6 +27,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import org.apache.hadoop.hdds.annotation.InterfaceAudience;
+import org.apache.hadoop.util.Time;
+import org.apache.ozone.lib.server.BaseService;
+import org.apache.ozone.lib.server.ServiceException;
+import org.apache.ozone.lib.service.Instrumentation;
+import org.apache.ozone.lib.service.Scheduler;
 
 /**
  * Hadoop server instrumentation.
@@ -131,43 +125,23 @@ public class InstrumentationService extends BaseService
                          Class<T> klass,
                          Lock lock,
                          Map<String, Map<String, T>> map) {
-    boolean locked = false;
+    lock.lock();
     try {
-      Map<String, T> groupMap = map.get(group);
-      if (groupMap == null) {
-        lock.lock();
-        locked = true;
-        groupMap = map.get(group);
-        if (groupMap == null) {
-          groupMap = new ConcurrentHashMap<String, T>();
-          map.put(group, groupMap);
-        }
-      }
-      T element = groupMap.get(name);
-      if (element == null) {
-        if (!locked) {
-          lock.lock();
-          locked = true;
-        }
-        element = groupMap.get(name);
-        if (element == null) {
-          try {
-            if (klass == Timer.class) {
-              element = (T) new Timer(timersSize);
-            } else {
-              element = klass.newInstance();
+      return map
+          .computeIfAbsent(group, k -> new ConcurrentHashMap<>())
+          .computeIfAbsent(name, k -> {
+            try {
+              if (klass == Timer.class) {
+                return (T) new Timer(timersSize);
+              } else {
+                return klass.newInstance();
+              }
+            } catch (Exception ex) {
+              throw new RuntimeException(ex);
             }
-          } catch (Exception ex) {
-            throw new RuntimeException(ex);
-          }
-          groupMap.put(name, element);
-        }
-      }
-      return element;
+          });
     } finally {
-      if (locked) {
-        lock.unlock();
-      }
+      lock.unlock();
     }
   }
 
@@ -217,7 +191,7 @@ public class InstrumentationService extends BaseService
 
   }
 
-  static class Timer implements JSONAware, JSONStreamAware {
+  static class Timer {
     static final int LAST_TOTAL = 0;
     static final int LAST_OWN = 1;
     static final int AVG_TOTAL = 2;
@@ -273,25 +247,15 @@ public class InstrumentationService extends BaseService
       }
     }
 
-    @SuppressWarnings("unchecked")
-    private JSONObject getJSON() {
+    @JsonValue
+    Map<String, Object> getJSON() {
       long[] values = getValues();
-      JSONObject json = new JSONObject();
+      Map<String, Object> json = new LinkedHashMap<>();
       json.put("lastTotal", values[0]);
       json.put("lastOwn", values[1]);
       json.put("avgTotal", values[2]);
       json.put("avgOwn", values[3]);
       return json;
-    }
-
-    @Override
-    public String toJSONString() {
-      return getJSON().toJSONString();
-    }
-
-    @Override
-    public void writeJSONString(Writer out) throws IOException {
-      getJSON().writeJSONString(out);
     }
 
   }
@@ -317,9 +281,9 @@ public class InstrumentationService extends BaseService
     timer.addCron((Cron) cron);
   }
 
-  static class VariableHolder<E> implements JSONAware, JSONStreamAware {
-    // Supressed, because it is only used in this class or in test files,
-    // but the tests will be removed later.
+  static class VariableHolder<E> {
+    // Package-private and mutable so the enclosing service can assign it
+    // directly; suppress the visibility check.
     @SuppressWarnings("checkstyle:VisibilityModifier")
     Variable<E> var;
 
@@ -330,21 +294,11 @@ public class InstrumentationService extends BaseService
       this.var = var;
     }
 
-    @SuppressWarnings("unchecked")
-    private JSONObject getJSON() {
-      JSONObject json = new JSONObject();
+    @JsonValue
+    Map<String, Object> getJSON() {
+      Map<String, Object> json = new LinkedHashMap<>();
       json.put("value", var.getValue());
       return json;
-    }
-
-    @Override
-    public String toJSONString() {
-      return getJSON().toJSONString();
-    }
-
-    @Override
-    public void writeJSONString(Writer out) throws IOException {
-      out.write(toJSONString());
     }
 
   }
@@ -356,7 +310,7 @@ public class InstrumentationService extends BaseService
     holder.var = variable;
   }
 
-  static class Sampler implements JSONAware, JSONStreamAware {
+  static class Sampler {
     private Variable<Long> variable;
     private long[] values;
     private AtomicLong sum;
@@ -384,22 +338,12 @@ public class InstrumentationService extends BaseService
           ((full) ? values.length : ((last == 0) ? 1 : last));
     }
 
-    @SuppressWarnings("unchecked")
-    private JSONObject getJSON() {
-      JSONObject json = new JSONObject();
+    @JsonValue
+    Map<String, Object> getJSON() {
+      Map<String, Object> json = new LinkedHashMap<>();
       json.put("sampler", getRate());
       json.put("size", (full) ? values.length : last);
       return json;
-    }
-
-    @Override
-    public String toJSONString() {
-      return getJSON().toJSONString();
-    }
-
-    @Override
-    public void writeJSONString(Writer out) throws IOException {
-      out.write(toJSONString());
     }
   }
 
@@ -441,6 +385,4 @@ public class InstrumentationService extends BaseService
   public Map<String, Map<String, ?>> getSnapshot() {
     return all;
   }
-
-
 }

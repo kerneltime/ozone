@@ -1,30 +1,43 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- *  with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
  *      http://www.apache.org/licenses/LICENSE-2.0
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
+
 package org.apache.hadoop.ozone.insight;
+
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HTTPS_ADDRESS_KEY;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HTTPS_BIND_PORT_DEFAULT;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HTTP_ADDRESS_KEY;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HTTP_BIND_HOST_DEFAULT;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_HTTP_BIND_PORT_DEFAULT;
+import static org.apache.hadoop.hdds.server.http.HttpServer2.HTTPS_SCHEME;
+import static org.apache.hadoop.hdds.server.http.HttpServer2.HTTP_SCHEME;
+import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_HTTPS_ADDRESS_KEY;
+import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_HTTPS_BIND_PORT_DEFAULT;
+import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_HTTP_ADDRESS_KEY;
+import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_HTTP_BIND_HOST_DEFAULT;
+import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_HTTP_BIND_PORT_DEFAULT;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
-
+import java.util.OptionalInt;
 import org.apache.hadoop.hdds.HddsUtils;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.scm.ScmConfigKeys;
-import org.apache.hadoop.ozone.insight.Component.Type;
+import org.apache.hadoop.hdds.server.http.HttpConfig;
 import org.apache.hadoop.ozone.insight.datanode.DatanodeDispatcherInsight;
 import org.apache.hadoop.ozone.insight.datanode.RatisInsight;
 import org.apache.hadoop.ozone.insight.om.KeyManagerInsight;
@@ -37,7 +50,6 @@ import org.apache.hadoop.ozone.insight.scm.ScmProtocolContainerLocationInsight;
 import org.apache.hadoop.ozone.insight.scm.ScmProtocolDatanodeInsight;
 import org.apache.hadoop.ozone.insight.scm.ScmProtocolSecurityInsight;
 import org.apache.hadoop.ozone.om.OMConfigKeys;
-
 import picocli.CommandLine;
 
 /**
@@ -64,25 +76,75 @@ public class BaseInsightSubCommand {
    * Utility to get the host base on a component.
    */
   public String getHost(OzoneConfiguration conf, Component component) {
+    HttpConfig.Policy policy = HttpConfig.getHttpPolicy(conf);
+    String protocol = policy.isHttpsEnabled() ? HTTPS_SCHEME : HTTP_SCHEME;
+    
     if (component.getHostname() != null) {
-      return "http://" + component.getHostname() + ":" + component.getPort();
-    } else if (component.getName() == Type.SCM) {
-      Optional<String> scmHost =
-          HddsUtils.getHostNameFromConfigKeys(conf,
-              ScmConfigKeys.OZONE_SCM_BLOCK_CLIENT_ADDRESS_KEY,
-              ScmConfigKeys.OZONE_SCM_CLIENT_ADDRESS_KEY);
-
-      return "http://" + scmHost.get() + ":9876";
-    } else if (component.getName() == Type.OM) {
-      Optional<String> omHost =
-          HddsUtils.getHostNameFromConfigKeys(conf,
-              OMConfigKeys.OZONE_OM_ADDRESS_KEY);
-      return "http://" + omHost.get() + ":9874";
-    } else {
-      throw new IllegalArgumentException(
-          "Component type is not supported: " + component.getName());
+      return protocol + "://" + component.getHostname() + ":" + component.getPort();
     }
+    
+    String address = getComponentAddress(conf, component.getName(), policy);
+    return protocol + "://" + address;
+  }
 
+  /**
+   * Get the component address based on HTTP policy.
+   */
+  private String getComponentAddress(OzoneConfiguration conf,
+      Component.Type componentType, HttpConfig.Policy policy) {
+    boolean isHttpsEnabled = policy.isHttpsEnabled();
+    String address;
+
+    switch (componentType) {
+    case SCM:
+      if (isHttpsEnabled) {
+        address = conf.get(OZONE_SCM_HTTPS_ADDRESS_KEY, OZONE_SCM_HTTP_BIND_HOST_DEFAULT + ":" +
+            OZONE_SCM_HTTPS_BIND_PORT_DEFAULT);
+      } else {
+        address = conf.get(OZONE_SCM_HTTP_ADDRESS_KEY, OZONE_SCM_HTTP_BIND_HOST_DEFAULT + ":" +
+            OZONE_SCM_HTTP_BIND_PORT_DEFAULT);
+      }
+
+      // Fallback to RPC hostname
+      Optional<String> scmBindHost = HddsUtils.getHostName(address);
+      if (scmBindHost.isPresent()
+          && scmBindHost.get().equals(OZONE_SCM_HTTP_BIND_HOST_DEFAULT)) {
+        Optional<String> scmHost = HddsUtils.getHostNameFromConfigKeys(conf,
+            ScmConfigKeys.OZONE_SCM_BLOCK_CLIENT_ADDRESS_KEY,
+            ScmConfigKeys.OZONE_SCM_CLIENT_ADDRESS_KEY);
+        OptionalInt scmPort = HddsUtils.getHostPort(address);
+        if (scmHost.isPresent() && scmPort.isPresent()) {
+          return HddsUtils.getHostPortString(scmHost.get(), scmPort.getAsInt());
+        }
+      }
+      return address;
+
+    case OM:
+      if (isHttpsEnabled) {
+        address = conf.get(OZONE_OM_HTTPS_ADDRESS_KEY, OZONE_OM_HTTP_BIND_HOST_DEFAULT + ":" +
+            OZONE_OM_HTTPS_BIND_PORT_DEFAULT);
+      } else {
+        address = conf.get(OZONE_OM_HTTP_ADDRESS_KEY, OZONE_OM_HTTP_BIND_HOST_DEFAULT + ":" +
+            OZONE_OM_HTTP_BIND_PORT_DEFAULT);
+      }
+
+      // Fallback to RPC hostname
+      Optional<String> omBindHost = HddsUtils.getHostName(address);
+      if (omBindHost.isPresent()
+          && omBindHost.get().equals(OZONE_OM_HTTP_BIND_HOST_DEFAULT)) {
+        Optional<String> omHost = HddsUtils.getHostNameFromConfigKeys(conf,
+            OMConfigKeys.OZONE_OM_ADDRESS_KEY);
+        OptionalInt omPort = HddsUtils.getHostPort(address);
+        if (omHost.isPresent() && omPort.isPresent()) {
+          return HddsUtils.getHostPortString(omHost.get(), omPort.getAsInt());
+        }
+      }
+      return address;
+
+    default:
+      throw new IllegalArgumentException(
+          "Component type is not supported: " + componentType);
+    }
   }
 
   public Map<String, InsightPoint> createInsightPoints(

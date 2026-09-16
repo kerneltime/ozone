@@ -24,24 +24,12 @@
     <value>localhost</value>
   </property>
   <property>
-    <name>ozone.csi.owner</name>
-    <value>hadoop</value>
-  </property>
-  <property>
-    <name>ozone.csi.socket</name>
-    <value>/tmp/csi.sock</value>
-  </property>
-  <property>
     <name>ozone.scm.client.address</name>
     <value>localhost</value>
   </property>
   <property>
     <name>ozone.metadata.dirs</name>
     <value>/tmp/metadata</value>
-  </property>
-  <property>
-    <name>ozone.scm.ratis.enable</name>
-    <value>true</value>
   </property>
   <property>
     <name>ozone.scm.service.ids</name>

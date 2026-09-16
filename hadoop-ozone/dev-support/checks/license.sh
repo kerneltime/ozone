@@ -42,7 +42,7 @@ DEFAULT_SRC="target/generated-sources/license/THIRD-PARTY.txt"
 src="${1:-${DEFAULT_SRC}}"
 
 if [[ ! -e ${src} ]]; then
-  MAVEN_OPTIONS="-B -fae -Dskip.npx -Dskip.installnpx --no-transfer-progress ${MAVEN_OPTIONS:-}"
+  MAVEN_OPTIONS="-B -fae -DskipDocs -DskipRecon --no-transfer-progress ${MAVEN_OPTIONS:-}"
   mvn ${MAVEN_OPTIONS} license:aggregate-add-third-party | tee "${REPORT_DIR}/output.log"
   src="${DEFAULT_SRC}"
 fi
@@ -56,10 +56,11 @@ grep '(' ${src} \
     -e "Apache ${L}" -e "Apache Software ${L}" -e "Apache v2" -e "Apache.2" \
     -e "Bouncy Castle ${L}" \
     -e "(BSD)" -e "(The BSD ${L})" -e "\<BSD.[23]" -e "\<BSD ${L} [23]" -e "\<[23]\>.Clause.\<BSD\>" \
+    -e "(CC0)" \
     -e "(CDDL\>" -e ' CDDL '\
     -e "(EDL\>" -e "Eclipse Distribution ${L}" \
     -e "(EPL\>" -e "Eclipse Public ${L}" \
-    -e "(MIT)" -e "\<MIT ${L}" \
+    -e "(MIT)" -e "(MIT-0)" -e "\<MIT ${L}" \
     -e "Modified BSD\>" \
     -e "New BSD ${L}" \
     -e "Public Domain" \
@@ -67,9 +68,7 @@ grep '(' ${src} \
     || true ) \
   | sort -u \
   | tee "${REPORT_FILE}"
+rc=$?
 
-wc -l "${REPORT_FILE}" | awk '{ print $1 }' > "${REPORT_DIR}/failures"
-
-if [[ -s "${REPORT_FILE}" ]]; then
-   exit 1
-fi
+ERROR_PATTERN=""
+source "${DIR}/_post_process.sh"

@@ -1,14 +1,13 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,9 +17,9 @@
 
 package org.apache.hadoop.ozone.recon.scm;
 
-import java.util.UUID;
-
+import org.apache.hadoop.hdds.protocol.DatanodeID;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ContainerReplicaHistoryProto;
+import org.apache.hadoop.hdds.scm.container.ContainerChecksums;
 
 /**
  * A ContainerReplica timestamp class that tracks first and last seen time.
@@ -32,8 +31,8 @@ import org.apache.hadoop.hdds.protocol.proto.HddsProtos.ContainerReplicaHistoryP
  * of one DN but later moved back to the same DN.
  */
 public class ContainerReplicaHistory {
-  // Datanode UUID
-  private final UUID uuid;
+  // Datanode ID
+  private final DatanodeID id;
   // First reported time of the replica on this datanode
   private final Long firstSeenTime;
   // Last reported time of the replica
@@ -41,14 +40,16 @@ public class ContainerReplicaHistory {
 
   private long bcsId;
   private String state;
+  private ContainerChecksums checksums;
 
-  public ContainerReplicaHistory(UUID id, Long firstSeenTime,
-      Long lastSeenTime, long bcsId, String state) {
-    this.uuid = id;
+  public ContainerReplicaHistory(DatanodeID id, Long firstSeenTime,
+      Long lastSeenTime, long bcsId, String state, ContainerChecksums checksums) {
+    this.id = id;
     this.firstSeenTime = firstSeenTime;
     this.lastSeenTime = lastSeenTime;
     this.bcsId = bcsId;
     this.state = state;
+    setChecksums(checksums);
   }
 
   public long getBcsId() {
@@ -59,8 +60,8 @@ public class ContainerReplicaHistory {
     this.bcsId = bcsId;
   }
 
-  public UUID getUuid() {
-    return uuid;
+  public DatanodeID getId() {
+    return id;
   }
 
   public Long getFirstSeenTime() {
@@ -83,16 +84,30 @@ public class ContainerReplicaHistory {
     this.state = state;
   }
 
+  public long getDataChecksum() {
+    return getChecksums().getDataChecksum();
+  }
+
+  public ContainerChecksums getChecksums() {
+    return checksums;
+  }
+
+  public void setChecksums(ContainerChecksums checksums) {
+    this.checksums = checksums != null ? checksums : ContainerChecksums.unknown();
+  }
+
   public static ContainerReplicaHistory fromProto(
       ContainerReplicaHistoryProto proto) {
-    return new ContainerReplicaHistory(UUID.fromString(proto.getUuid()),
+    return new ContainerReplicaHistory(DatanodeID.fromUuidString(proto.getUuid()),
         proto.getFirstSeenTime(), proto.getLastSeenTime(), proto.getBcsId(),
-        proto.getState());
+        proto.getState(), ContainerChecksums.of(proto.getDataChecksum()));
   }
 
   public ContainerReplicaHistoryProto toProto() {
-    return ContainerReplicaHistoryProto.newBuilder().setUuid(uuid.toString())
+    return ContainerReplicaHistoryProto.newBuilder().setUuid(id.toString())
         .setFirstSeenTime(firstSeenTime).setLastSeenTime(lastSeenTime)
-        .setBcsId(bcsId).setState(state).build();
+        .setBcsId(bcsId).setState(state)
+        .setDataChecksum(checksums.getDataChecksum())
+        .build();
   }
 }

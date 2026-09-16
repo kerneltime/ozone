@@ -1,26 +1,30 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.hadoop.hdds.tracing;
 
-import org.junit.jupiter.api.Test;
+package org.apache.hadoop.hdds.tracing;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.SpanKind;
+import io.opentelemetry.sdk.trace.ReadableSpan;
+import java.io.IOException;
+import org.junit.jupiter.api.Test;
 
 /**
  * Test for {@link TraceAllMethod}.
@@ -52,6 +56,14 @@ public class TestTraceAllMethod {
       return otherMethod("default");
     }
 
+    String localMethod();
+
+    String skippedMethod();
+
+    void throwingMethod() throws IOException;
+
+    String normalMethod();
+
     String otherMethod(String name);
   }
 
@@ -60,9 +72,51 @@ public class TestTraceAllMethod {
    */
   public static class ServiceImpl implements Service {
 
+    private boolean spanActive = false;
+    private SpanKind spanKind;
+
+    public SpanKind lastSpanKind() {
+      return spanKind;
+    }
+
     @Override
     public String otherMethod(String name) {
       return "Hello " + name;
+    }
+
+    @Override
+    @SkipTracing
+    public String skippedMethod() {
+      this.spanActive = Span.current().getSpanContext().isValid();
+      return "skipped";
+    }
+
+    @Override
+    @SkipTracing
+    public void throwingMethod() throws IOException {
+      this.spanActive = Span.current().getSpanContext().isValid();
+      throw new IOException("Original Exception");
+    }
+
+    @Override
+    public String normalMethod() {
+      this.spanActive = Span.current().getSpanContext().isValid();
+      return "normal";
+    }
+
+    @Override
+    @InternalSpanKind
+    public String localMethod() {
+      Span span = Span.current();
+      this.spanActive = span.getSpanContext().isValid();
+      if (spanActive) {
+        this.spanKind = ((ReadableSpan) span).getKind();
+      }
+      return "local";
+    }
+
+    public boolean wasSpanActive() {
+      return spanActive;
     }
   }
 }

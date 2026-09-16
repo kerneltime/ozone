@@ -1,14 +1,13 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,24 +17,35 @@
 
 package org.apache.hadoop.ozone.om.request.util;
 
+import static org.apache.hadoop.ozone.OzoneConsts.OM_KEY_PREFIX;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.SortedMap;
+import java.util.TreeMap;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.hadoop.hdds.client.ReplicationConfig;
 import org.apache.hadoop.hdds.utils.UniqueId;
+import org.apache.hadoop.hdds.utils.db.Table;
+import org.apache.hadoop.hdds.utils.db.TableIterator;
+import org.apache.hadoop.hdds.utils.db.cache.CacheKey;
+import org.apache.hadoop.hdds.utils.db.cache.CacheValue;
 import org.apache.hadoop.ozone.om.OMMetadataManager;
 import org.apache.hadoop.ozone.om.helpers.BucketLayout;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
-import org.apache.hadoop.ozone.om.helpers.OzoneFSUtils;
-import org.apache.hadoop.ozone.om.request.file.OMFileRequest;
-
-import java.io.IOException;
-import java.util.UUID;
-
-import static org.apache.hadoop.ozone.OzoneConsts.OM_KEY_PREFIX;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartInfo;
+import org.apache.hadoop.ozone.om.helpers.OmMultipartPartKey;
+import org.apache.hadoop.ozone.om.helpers.QuotaUtil;
+import org.apache.hadoop.ozone.util.UUIDv7;
 
 /**
  * Utility class related to OM Multipart Upload.
  */
 public final class OMMultipartUploadUtils {
-
 
   private OMMultipartUploadUtils() {
   }
@@ -45,7 +55,7 @@ public final class OMMultipartUploadUtils {
    * @return multipart upload ID
    */
   public static String getMultipartUploadId() {
-    return UUID.randomUUID() + "-" + UniqueId.next();
+    return UUIDv7.randomUUID() + "-" + UniqueId.next();
   }
 
   /**
@@ -93,38 +103,11 @@ public final class OMMultipartUploadUtils {
        OMMetadataManager omMetadataManager, BucketLayout bucketLayout)
       throws IOException {
     if (bucketLayout == BucketLayout.FILE_SYSTEM_OPTIMIZED) {
-      return getMultipartOpenKeyFSO(volumeName, bucketName,
-          keyName, multipartUploadId, omMetadataManager);
+      return omMetadataManager.getMultipartKeyFSO(volumeName, bucketName, keyName, multipartUploadId);
     } else {
-      return getMultipartOpenKey(volumeName, bucketName,
-          keyName, multipartUploadId, omMetadataManager);
+      return omMetadataManager.getMultipartKey(volumeName, bucketName, keyName, multipartUploadId);
     }
   }
-
-  public static String getMultipartOpenKey(String volumeName,
-       String bucketName, String keyName, String multipartUploadId,
-       OMMetadataManager omMetadataManager) {
-    return omMetadataManager.getMultipartKey(
-        volumeName, bucketName, keyName, multipartUploadId);
-  }
-
-  public static String getMultipartOpenKeyFSO(String volumeName,
-        String bucketName, String keyName, String uploadID,
-        OMMetadataManager metaMgr) throws IOException {
-    String fileName = OzoneFSUtils.getFileName(keyName);
-
-    final long volumeId = metaMgr.getVolumeId(volumeName);
-    final long bucketId = metaMgr.getBucketId(volumeName, bucketName);
-    long parentID =
-        OMFileRequest.getParentID(volumeId, bucketId,
-            keyName, metaMgr);
-
-    String multipartKey = metaMgr.getMultipartKey(volumeId, bucketId,
-        parentID, fileName, uploadID);
-
-    return multipartKey;
-  }
-
 
   /**
    * Check whether key's isMultipartKey flag is set.
@@ -134,5 +117,101 @@ public final class OMMultipartUploadUtils {
   public static boolean isMultipartKeySet(OmKeyInfo openKeyInfo) {
     return openKeyInfo.getLatestVersionLocations() != null
         && openKeyInfo.getLatestVersionLocations().isMultipartKey();
+  }
+
+  /**
+   * Cache-aware scan for multipart parts table rows belonging to a given upload.
+   */
+  public static SortedMap<Integer, OmMultipartPartInfo> scanParts(
+      OMMetadataManager omMetadataManager, String uploadId) throws IOException {
+    // Null values in this map represent cache tombstones (pending deletes).
+    // containsKey returns true for tombstoned entries, which prevents the
+    // DB pass from re-inserting rows that were deleted in cache but not yet
+    // flushed to RocksDB.
+    SortedMap<Integer, OmMultipartPartInfo> parts = new TreeMap<>();
+
+    Iterator<Map.Entry<CacheKey<OmMultipartPartKey>,
+        CacheValue<OmMultipartPartInfo>>> cacheIterator =
+        omMetadataManager.getMultipartPartsTable().cacheIterator();
+    while (cacheIterator.hasNext()) {
+      Map.Entry<CacheKey<OmMultipartPartKey>, CacheValue<OmMultipartPartInfo>>
+          cacheEntry = cacheIterator.next();
+      OmMultipartPartKey key = cacheEntry.getKey().getCacheKey();
+      if (!uploadId.equals(key.getUploadId()) || !key.hasPartNumber()) {
+        continue;
+      }
+      parts.put(key.getPartNumber(), cacheEntry.getValue().getCacheValue());
+    }
+
+    OmMultipartPartKey prefix = OmMultipartPartKey.prefix(uploadId);
+    try (TableIterator<OmMultipartPartKey, Table.KeyValue<OmMultipartPartKey, OmMultipartPartInfo>>
+        iterator = omMetadataManager.getMultipartPartsTable().iterator(prefix)) {
+      while (iterator.hasNext()) {
+        Table.KeyValue<OmMultipartPartKey, OmMultipartPartInfo> kv = iterator.next();
+        if (kv == null) {
+          continue;
+        }
+        OmMultipartPartKey key = kv.getKey();
+        if (!uploadId.equals(key.getUploadId())) {
+          break;
+        }
+        if (key.hasPartNumber() && !parts.containsKey(key.getPartNumber())) {
+          parts.put(key.getPartNumber(), kv.getValue());
+        }
+      }
+    }
+
+    parts.values().removeIf(Objects::isNull);
+    return parts;
+  }
+
+  /**
+   * Count the multipart parts belonging to a given upload in the split
+   * multipartPartsTable, honouring cache tombstones and pending commits. The
+   * count therefore matches the set of parts a subsequent abort/cleanup would
+   * process, which makes it suitable for batch sizing.
+   */
+  public static int countParts(OMMetadataManager omMetadataManager, String uploadId) throws IOException {
+    return scanParts(omMetadataManager, uploadId).size();
+  }
+
+  public static List<OmMultipartPartKey> getPartKeys(String uploadId,
+      SortedMap<Integer, OmMultipartPartInfo> parts) {
+    List<OmMultipartPartKey> partKeys = new ArrayList<>(parts.size());
+    for (Integer partNumber : parts.keySet()) {
+      partKeys.add(OmMultipartPartKey.of(uploadId, partNumber));
+    }
+    return partKeys;
+  }
+
+  public static void addPartCleanupCacheEntries(
+      OMMetadataManager omMetadataManager,
+      List<OmMultipartPartKey> partKeys, long transactionLogIndex) {
+    for (OmMultipartPartKey partKey : partKeys) {
+      omMetadataManager.getMultipartPartsTable().addCacheEntry(
+          new CacheKey<>(partKey), CacheValue.get(transactionLogIndex));
+    }
+  }
+
+  public static long getReplicatedSize(
+      SortedMap<Integer, OmMultipartPartInfo> parts,
+      ReplicationConfig replicationConfig) {
+    long replicatedSize = 0;
+    for (OmMultipartPartInfo part : parts.values()) {
+      replicatedSize += QuotaUtil.getReplicatedSize(
+          part.getDataSize(), replicationConfig);
+    }
+    return replicatedSize;
+  }
+
+  public static List<OmKeyInfo> toOmKeyInfoList(
+      SortedMap<Integer, OmMultipartPartInfo> parts, String volumeName,
+      String bucketName, String keyName, ReplicationConfig replicationConfig) {
+    List<OmKeyInfo> keyInfos = new ArrayList<>(parts.size());
+    for (OmMultipartPartInfo part : parts.values()) {
+      keyInfos.add(part.toOmKeyInfo(volumeName, bucketName, keyName,
+          replicationConfig));
+    }
+    return keyInfos;
   }
 }

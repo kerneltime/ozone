@@ -1,14 +1,13 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,14 +18,16 @@
 package org.apache.hadoop.hdds.scm.storage;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
-import org.apache.hadoop.fs.FSExceptionMessages;
-
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
+import org.apache.hadoop.fs.FSExceptionMessages;
+import org.apache.ratis.util.Preconditions;
 
 /**
  * A stream for accessing multipart streams.
@@ -34,10 +35,12 @@ import java.util.List;
 public class MultipartInputStream extends ExtendedInputStream {
 
   private final String key;
-  private final long length;
+  private long length;
 
   // List of PartInputStream, one for each part of the key
   private final List<? extends PartInputStream> partStreams;
+  private final boolean isStreamBlockInputStream;
+  private final boolean statelessPositionedReadSupported;
 
   // partOffsets[i] stores the index of the first data byte in
   // partStream w.r.t the whole key data.
@@ -56,34 +59,47 @@ public class MultipartInputStream extends ExtendedInputStream {
   // can be reset if a new position is seeked.
   private int prevPartIndex;
 
+  private boolean initialized = false;
+
   public MultipartInputStream(String keyName,
                               List<? extends PartInputStream> inputStreams) {
-
-    Preconditions.checkNotNull(inputStreams);
+    Objects.requireNonNull(inputStreams, "inputStreams == null");
 
     this.key = keyName;
-    this.partStreams = inputStreams;
+    this.partStreams = Collections.unmodifiableList(inputStreams);
+    this.isStreamBlockInputStream = !inputStreams.isEmpty() && inputStreams.get(0) instanceof StreamBlockInputStream;
 
     // Calculate and update the partOffsets
     this.partOffsets = new long[inputStreams.size()];
+    boolean statelessSupported = !inputStreams.isEmpty();
     int i = 0;
     long streamLength = 0L;
     for (PartInputStream partInputStream : inputStreams) {
       this.partOffsets[i++] = streamLength;
+      if (isStreamBlockInputStream) {
+        Preconditions.assertInstanceOf(partInputStream, StreamBlockInputStream.class);
+      } else if (statelessSupported && !(partInputStream instanceof BlockInputStream)) {
+        statelessSupported = false;
+      }
       streamLength += partInputStream.getLength();
     }
+    this.statelessPositionedReadSupported = statelessSupported;
     this.length = streamLength;
+  }
+
+  public boolean isStreamBlockInputStream() {
+    return isStreamBlockInputStream;
   }
 
   @Override
   protected synchronized int readWithStrategy(ByteReaderStrategy strategy)
       throws IOException {
-    Preconditions.checkArgument(strategy != null);
+    Objects.requireNonNull(strategy, "strategy == null");
     checkOpen();
 
     int totalReadLen = 0;
     while (strategy.getTargetLength() > 0) {
-      if (partStreams.size() == 0 ||
+      if (partStreams.isEmpty() ||
           partStreams.size() - 1 <= partIndex &&
               partStreams.get(partIndex).getRemaining() == 0) {
         return totalReadLen == 0 ? EOF : totalReadLen;
@@ -130,6 +146,9 @@ public class MultipartInputStream extends ExtendedInputStream {
   @Override
   public synchronized void seek(long pos) throws IOException {
     checkOpen();
+    if (!initialized) {
+      initialize();
+    }
     if (pos == 0 && length == 0) {
       // It is possible for length and pos to be zero in which case
       // seek should return instead of throwing exception
@@ -160,7 +179,9 @@ public class MultipartInputStream extends ExtendedInputStream {
     }
 
     // Reset the previous partStream's position
-    partStreams.get(prevPartIndex).seek(0);
+    if (prevPartIndex != partIndex) {
+      partStreams.get(prevPartIndex).seek(0);
+    }
 
     // Reset all the partStreams above the partIndex. We do this to reset
     // any previous reads which might have updated the higher part
@@ -171,6 +192,120 @@ public class MultipartInputStream extends ExtendedInputStream {
     // 2. Seek the partStream to the adjusted position
     partStreams.get(partIndex).seek(pos - partOffsets[partIndex]);
     prevPartIndex = partIndex;
+  }
+
+  @Override
+  public boolean readFully(long position, ByteBuffer buffer) throws IOException {
+    if (isStreamBlockInputStream) {
+      return readFullyStreamBlock(position, buffer);
+    }
+    return readFullyStateless(position, buffer);
+  }
+
+  /**
+   * Positioned read for the StreamBlock path. This emulates a positioned read
+   * with seek-read-restore on the shared stream cursor, so it is synchronized
+   * to keep concurrent callers from corrupting each other's position.
+   */
+  private synchronized boolean readFullyStreamBlock(long position,
+      ByteBuffer buffer) throws IOException {
+    final long oldPos = getPos();
+    seek(position);
+    try {
+      int remainingBeforeRead = buffer.remaining();
+      if (remainingBeforeRead == 0) {
+        return true;
+      }
+      read(new ByteBufferReader(buffer) {
+        @Override
+        int readImpl(InputStream inputStream) throws IOException {
+          return Preconditions.assertInstanceOf(inputStream, StreamBlockInputStream.class)
+              .readFully(getBuffer(), false);
+        }
+      });
+      if (remainingBeforeRead - buffer.remaining() == 0) {
+        throw new EOFException("EOF encountered at pos: " + position +
+            " for key: " + key);
+      }
+    } finally {
+      seek(oldPos);
+    }
+    return true;
+  }
+
+  /**
+   * Stateless positioned read for the replicated (Ratis) path. Routes the read
+   * across the part {@link BlockInputStream}s using the immutable
+   * {@link #partOffsets} without seeking or mutating the shared cursor, so
+   * concurrent positioned reads run independently. Returns {@code false} (so
+   * the caller can fall back) when any part is not a {@link BlockInputStream},
+   * e.g. erasure coded parts.
+   */
+  private boolean readFullyStateless(long position, ByteBuffer buffer) throws IOException {
+    if (!buffer.hasRemaining()) {
+      return true;
+    }
+    if (!statelessPositionedReadSupported) {
+      return false;
+    }
+
+    long pos = position;
+    int bytesRead = 0;
+    while (buffer.hasRemaining()) {
+      if (pos < 0 || pos >= length) {
+        if (bytesRead > 0) {
+          return true;
+        }
+        throw new EOFException("EOF encountered at pos: " + pos +
+            " for key: " + key);
+      }
+      int idx = binarySearchOffsetIndex(partOffsets, pos);
+      BlockInputStream part = (BlockInputStream) partStreams.get(idx);
+      long partPos = pos - partOffsets[idx];
+      int n = part.readPositioned(partPos, buffer);
+      if (n <= 0) {
+        if (bytesRead > 0) {
+          return true;
+        }
+        throw new EOFException("EOF encountered at pos: " + pos +
+            " for key: " + key);
+      }
+      bytesRead += n;
+      pos += n;
+    }
+    return true;
+  }
+
+  static int binarySearchOffsetIndex(long[] offsets, long pos) {
+    final int idx = Arrays.binarySearch(offsets, pos);
+    if (idx >= 0) {
+      // exact match: pos falls exactly on the start of chunk/part idx
+      return idx;
+    }
+    // binarySearch returns n = -insertionPoint - 1;
+    // insertionPoint is -n - 1
+    // the containing index is insertionPoint - 1.
+    return -idx - 2;
+  }
+
+  public synchronized void initialize() throws IOException {
+    // Pre-check that the stream has not been intialized already
+    if (initialized) {
+      return;
+    }
+
+    for (PartInputStream partInputStream : partStreams) {
+      if (partInputStream instanceof BlockInputStream) {
+        ((BlockInputStream) partInputStream).initialize();
+      }
+    }
+
+    long streamLength = 0L;
+    for (PartInputStream partInputStream : partStreams) {
+      streamLength += partInputStream.getLength();
+    }
+    this.length = streamLength;
+    initialized = true;
   }
 
   @Override
@@ -195,6 +330,11 @@ public class MultipartInputStream extends ExtendedInputStream {
 
   @Override
   public synchronized long skip(long n) throws IOException {
+    checkOpen();
+    if (!initialized) {
+      initialize();
+    }
+
     if (n <= 0) {
       return 0;
     }

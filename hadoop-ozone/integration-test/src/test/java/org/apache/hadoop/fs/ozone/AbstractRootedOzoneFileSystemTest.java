@@ -1,14 +1,13 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,6 +17,58 @@
 
 package org.apache.hadoop.fs.ozone;
 
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.FS_TRASH_CHECKPOINT_INTERVAL_KEY;
+import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.FS_TRASH_INTERVAL_KEY;
+import static org.apache.hadoop.fs.FileSystem.TRASH_PREFIX;
+import static org.apache.hadoop.fs.ozone.Constants.LISTING_PAGE_SIZE;
+import static org.apache.hadoop.hdds.client.ECReplicationConfig.EcCodec.RS;
+import static org.apache.hadoop.ozone.OzoneAcl.AclScope.ACCESS;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_FS_ITERATE_BATCH_SIZE;
+import static org.apache.hadoop.ozone.OzoneConsts.OZONE_URI_DELIMITER;
+import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_ADDRESS_KEY;
+import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_ENABLE_OFS_SHARED_TMP_DIR;
+import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_SNAPSHOT_DIFF_REPORT_MAX_PAGE_SIZE;
+import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.BUCKET_NOT_FOUND;
+import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.KEY_NOT_FOUND;
+import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.PERMISSION_DENIED;
+import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.VOLUME_NOT_FOUND;
+import static org.apache.hadoop.ozone.security.acl.IAccessAuthorizer.ACLType.LIST;
+import static org.apache.hadoop.ozone.security.acl.IAccessAuthorizer.ACLType.READ;
+import static org.apache.hadoop.ozone.security.acl.IAccessAuthorizer.ACLType.WRITE;
+import static org.apache.hadoop.security.UserGroupInformation.createUserForTesting;
+import static org.apache.ozone.test.OzoneTestBase.uniqueObjectName;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Paths;
+import java.security.PrivilegedExceptionAction;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.UUID;
+import java.util.concurrent.TimeoutException;
+import java.util.stream.Collectors;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.lang3.RandomUtils;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
@@ -26,10 +77,9 @@ import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.InvalidPathException;
+import org.apache.hadoop.fs.FsShell;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathIsNotEmptyDirectoryException;
-import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.StreamCapabilities;
 import org.apache.hadoop.fs.Trash;
 import org.apache.hadoop.fs.TrashPolicy;
@@ -43,14 +93,16 @@ import org.apache.hadoop.hdds.client.StandaloneReplicationConfig;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.protocol.StorageType;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
+import org.apache.hadoop.hdds.scm.OzoneClientConfig;
 import org.apache.hadoop.hdds.utils.IOUtils;
 import org.apache.hadoop.hdfs.protocol.SnapshotDiffReport;
+import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.ozone.DataTestUtil;
 import org.apache.hadoop.ozone.MiniOzoneCluster;
 import org.apache.hadoop.ozone.OFSPath;
 import org.apache.hadoop.ozone.OzoneAcl;
 import org.apache.hadoop.ozone.OzoneConfigKeys;
 import org.apache.hadoop.ozone.OzoneConsts;
-import org.apache.hadoop.ozone.TestDataUtil;
 import org.apache.hadoop.ozone.client.BucketArgs;
 import org.apache.hadoop.ozone.client.ObjectStore;
 import org.apache.hadoop.ozone.client.OzoneBucket;
@@ -58,18 +110,19 @@ import org.apache.hadoop.ozone.client.OzoneClient;
 import org.apache.hadoop.ozone.client.OzoneKeyDetails;
 import org.apache.hadoop.ozone.client.OzoneVolume;
 import org.apache.hadoop.ozone.client.VolumeArgs;
-import org.apache.hadoop.ozone.client.io.OzoneOutputStream;
 import org.apache.hadoop.ozone.client.protocol.ClientProtocol;
 import org.apache.hadoop.ozone.om.OMConfigKeys;
 import org.apache.hadoop.ozone.om.OMMetrics;
-import org.apache.hadoop.ozone.om.TrashPolicyOzone;
+import org.apache.hadoop.ozone.om.OmConfig;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
 import org.apache.hadoop.ozone.om.helpers.BucketLayout;
 import org.apache.hadoop.ozone.om.helpers.QuotaUtil;
 import org.apache.hadoop.ozone.security.acl.IAccessAuthorizer.ACLIdentityType;
 import org.apache.hadoop.ozone.security.acl.IAccessAuthorizer.ACLType;
-import org.apache.hadoop.ozone.security.acl.OzoneAclConfig;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.tools.DistCp;
+import org.apache.hadoop.tools.DistCpOptions;
+import org.apache.hadoop.tools.mapred.CopyMapper;
 import org.apache.hadoop.util.ToolRunner;
 import org.apache.ozone.test.GenericTestUtils;
 import org.junit.jupiter.api.AfterAll;
@@ -78,135 +131,34 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.FileNotFoundException;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Paths;
-import java.security.PrivilegedExceptionAction;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.BitSet;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Optional;
-import java.util.Random;
-import java.util.Set;
-import java.util.TreeSet;
-import java.util.UUID;
-import java.util.concurrent.TimeoutException;
-import java.util.stream.Collectors;
-
-import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.FS_TRASH_CHECKPOINT_INTERVAL_KEY;
-import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.FS_TRASH_INTERVAL_KEY;
-import static org.apache.hadoop.fs.CommonPathCapabilities.FS_ACLS;
-import static org.apache.hadoop.fs.CommonPathCapabilities.FS_CHECKSUMS;
-import static org.apache.hadoop.fs.FileSystem.TRASH_PREFIX;
-import static org.apache.hadoop.fs.contract.ContractTestUtils.assertHasPathCapabilities;
-import static org.apache.hadoop.fs.ozone.Constants.LISTING_PAGE_SIZE;
-import static org.apache.hadoop.hdds.client.ECReplicationConfig.EcCodec.RS;
-import static org.apache.hadoop.ozone.OzoneAcl.AclScope.ACCESS;
-import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_FS_ITERATE_BATCH_SIZE;
-import static org.apache.hadoop.ozone.OzoneConsts.OZONE_URI_DELIMITER;
-import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_ADDRESS_KEY;
-import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_ENABLE_OFS_SHARED_TMP_DIR;
-import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_SNAPSHOT_DIFF_REPORT_MAX_PAGE_SIZE;
-import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.BUCKET_NOT_FOUND;
-import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.KEY_NOT_FOUND;
-import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.PERMISSION_DENIED;
-import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.VOLUME_NOT_FOUND;
-import static org.apache.hadoop.ozone.security.acl.IAccessAuthorizer.ACLType.READ;
-import static org.apache.hadoop.ozone.security.acl.IAccessAuthorizer.ACLType.WRITE;
-import static org.apache.hadoop.ozone.security.acl.IAccessAuthorizer.ACLType.DELETE;
-import static org.apache.hadoop.ozone.security.acl.IAccessAuthorizer.ACLType.LIST;
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
-import static org.junit.jupiter.api.Assumptions.assumeFalse;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Ozone file system tests that are not covered by contract tests.
  * TODO: Refactor this and TestOzoneFileSystem to reduce duplication.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-abstract class AbstractRootedOzoneFileSystemTest {
+abstract class AbstractRootedOzoneFileSystemTest extends OzoneFileSystemTestBase {
 
-  private static final Logger LOG =
-      LoggerFactory.getLogger(AbstractRootedOzoneFileSystemTest.class);
+  private static final Logger LOG = LoggerFactory.getLogger(AbstractRootedOzoneFileSystemTest.class);
 
   private static final float TRASH_INTERVAL = 0.05f; // 3 seconds
+
+  private static final String USER1 = "regularuser1";
+  private static final UserGroupInformation UGI_USER1 = createUserForTesting(USER1,  new String[] {"usergroup"});
+
   private OzoneClient client;
 
-  AbstractRootedOzoneFileSystemTest(BucketLayout bucketLayout, boolean setDefaultFs,
-      boolean enableOMRatis, boolean isAclEnabled, boolean noFlush) {
-    // Initialize the cluster before EACH set of parameters
-    this.bucketLayout = bucketLayout;
-    enabledFileSystemPaths = setDefaultFs;
-    omRatisEnabled = enableOMRatis;
-    enableAcl = isAclEnabled;
-    useOnlyCache = noFlush;
-    isBucketFSOptimized = bucketLayout.isFileSystemOptimized();
-  }
-
-  @AfterAll
-  void shutdown() {
-    IOUtils.closeQuietly(client);
-    // Tear down the cluster after EACH set of parameters
-    if (cluster != null) {
-      cluster.shutdown();
-    }
-    IOUtils.closeQuietly(fs, userOfs);
-  }
-
-  @BeforeEach
-  void createVolumeAndBucket() throws IOException {
-    // create a volume and a bucket to be used by RootedOzoneFileSystem (OFS)
-    OzoneBucket bucket =
-        TestDataUtil.createVolumeAndBucket(client, bucketLayout);
-    volumeName = bucket.getVolumeName();
-    volumePath = new Path(OZONE_URI_DELIMITER, volumeName);
-    bucketName = bucket.getName();
-    bucketPath = new Path(volumePath, bucketName);
-  }
-
-  @AfterEach
-  void cleanup() throws IOException {
-    fs.delete(bucketPath, true);
-    fs.delete(volumePath, false);
-  }
-
-  public FileSystem getFs() {
-    return fs;
-  }
-
-  public Path getBucketPath() {
-    return bucketPath;
-  }
-
   private final boolean enabledFileSystemPaths;
-  private final boolean omRatisEnabled;
   private final boolean isBucketFSOptimized;
   private final boolean enableAcl;
 
-  private final boolean useOnlyCache;
-
   private OzoneConfiguration conf;
   private MiniOzoneCluster cluster;
-  private FileSystem fs;
-  private RootedOzoneFileSystem ofs;
+  private RootedOzoneFileSystem fs;
   private ObjectStore objectStore;
   private BasicRootedOzoneClientAdapterImpl adapter;
   private Trash trash;
@@ -219,11 +171,52 @@ abstract class AbstractRootedOzoneFileSystemTest {
   private String rootPath;
   private final BucketLayout bucketLayout;
 
-  private static final String USER1 = "regularuser1";
-  private static final UserGroupInformation UGI_USER1 = UserGroupInformation
-      .createUserForTesting(USER1,  new String[] {"usergroup"});
   // Non-privileged OFS instance
   private RootedOzoneFileSystem userOfs;
+
+  AbstractRootedOzoneFileSystemTest(BucketLayout bucketLayout, boolean setDefaultFs,
+      boolean isAclEnabled) {
+    // Initialize the cluster before EACH set of parameters
+    this.bucketLayout = bucketLayout;
+    enabledFileSystemPaths = setDefaultFs;
+    enableAcl = isAclEnabled;
+    isBucketFSOptimized = bucketLayout.isFileSystemOptimized();
+  }
+
+  @AfterAll
+  void shutdown() {
+    IOUtils.closeQuietly(fs, userOfs, client);
+    // Tear down the cluster after EACH set of parameters
+    if (cluster != null) {
+      cluster.shutdown();
+    }
+  }
+
+  @BeforeEach
+  void createVolumeAndBucket() throws IOException {
+    // create a volume and a bucket to be used by RootedOzoneFileSystem (OFS)
+    OzoneBucket bucket =
+        DataTestUtil.createVolumeAndBucket(client, bucketLayout);
+    volumeName = bucket.getVolumeName();
+    volumePath = new Path(OZONE_URI_DELIMITER, volumeName);
+    bucketName = bucket.getName();
+    bucketPath = new Path(volumePath, bucketName);
+  }
+
+  @AfterEach
+  void cleanup() throws IOException {
+    fs.delete(bucketPath, true);
+    fs.delete(volumePath, false);
+  }
+
+  @Override
+  public RootedOzoneFileSystem getFs() {
+    return fs;
+  }
+
+  public Path getBucketPath() {
+    return bucketPath;
+  }
 
   @BeforeAll
   void initClusterAndEnv() throws IOException, InterruptedException, TimeoutException {
@@ -231,13 +224,15 @@ abstract class AbstractRootedOzoneFileSystemTest {
     conf.setFloat(OMConfigKeys.OZONE_FS_TRASH_INTERVAL_KEY, TRASH_INTERVAL);
     conf.setFloat(FS_TRASH_INTERVAL_KEY, TRASH_INTERVAL);
     conf.setFloat(FS_TRASH_CHECKPOINT_INTERVAL_KEY, TRASH_INTERVAL / 2);
-    conf.setBoolean(OMConfigKeys.OZONE_OM_RATIS_ENABLE_KEY, omRatisEnabled);
+    conf.setBoolean(OzoneConfigKeys.OZONE_HBASE_ENHANCEMENTS_ALLOWED, true);
+    conf.setBoolean("ozone.client.hbase.enhancements.allowed", true);
     conf.setBoolean(OzoneConfigKeys.OZONE_FS_HSYNC_ENABLED, true);
+    conf.set(OzoneConfigKeys.OZONE_OM_LEASE_SOFT_LIMIT, "0s");
     if (bucketLayout == BucketLayout.FILE_SYSTEM_OPTIMIZED) {
       conf.set(OMConfigKeys.OZONE_DEFAULT_BUCKET_LAYOUT,
           bucketLayout.name());
     } else {
-      conf.set(OzoneConfigKeys.OZONE_CLIENT_FS_DEFAULT_BUCKET_LAYOUT,
+      conf.set(OzoneClientConfig.Keys.OZONE_CLIENT_FS_DEFAULT_BUCKET_LAYOUT,
           OzoneConfigKeys.OZONE_BUCKET_LAYOUT_LEGACY);
       conf.set(OMConfigKeys.OZONE_DEFAULT_BUCKET_LAYOUT,
           bucketLayout.name());
@@ -266,26 +261,13 @@ abstract class AbstractRootedOzoneFileSystemTest {
     conf.setInt(OZONE_FS_ITERATE_BATCH_SIZE, 5);
     conf.setInt(OZONE_OM_SNAPSHOT_DIFF_REPORT_MAX_PAGE_SIZE, 4);
     // fs.ofs.impl would be loaded from META-INF, no need to manually set it
-    fs = FileSystem.get(conf);
     trash = new Trash(conf);
-    ofs = (RootedOzoneFileSystem) fs;
-    adapter = (BasicRootedOzoneClientAdapterImpl) ofs.getAdapter();
+    fs = (RootedOzoneFileSystem) FileSystem.get(conf);
+    adapter = (BasicRootedOzoneClientAdapterImpl) fs.getAdapter();
 
     userOfs = UGI_USER1.doAs(
         (PrivilegedExceptionAction<RootedOzoneFileSystem>)()
             -> (RootedOzoneFileSystem) FileSystem.get(conf));
-
-    if (useOnlyCache) {
-      if (omRatisEnabled) {
-        cluster.getOzoneManager().getOmRatisServer().getOmStateMachine()
-            .getOzoneManagerDoubleBuffer().stopDaemon();
-      } else {
-        cluster.getOzoneManager().getOmServerProtocol()
-            .getOzoneManagerDoubleBuffer().stopDaemon();
-        cluster.getOzoneManager().getOmServerProtocol()
-            .setShouldFlushCache(false);
-      }
-    }
   }
 
   protected OMMetrics getOMMetrics() {
@@ -293,40 +275,27 @@ abstract class AbstractRootedOzoneFileSystemTest {
   }
 
   @Test
-  void testOzoneFsServiceLoader() throws IOException {
-    assumeFalse(isBucketFSOptimized);
-
-    OzoneConfiguration confTestLoader = new OzoneConfiguration();
-    // fs.ofs.impl should be loaded from META-INF, no need to explicitly set it
-    assertEquals(FileSystem.getFileSystemClass(
-        OzoneConsts.OZONE_OFS_URI_SCHEME, confTestLoader), RootedOzoneFileSystem.class);
+  void testUserHomeDirectory() {
+    assertEquals(new Path(rootPath + "user/" + USER1),
+        userOfs.getHomeDirectory());
   }
 
   @Test
   void testCreateDoesNotAddParentDirKeys() throws Exception {
     Path grandparent = new Path(bucketPath,
         "testCreateDoesNotAddParentDirKeys");
-    Path parent = new Path(grandparent, "parent");
-    Path child = new Path(parent, "child");
-    ContractTestUtils.touch(fs, child);
+    createDoesNotAddParentDirKeys(grandparent);
+  }
 
-    OzoneKeyDetails key = getKey(child, false);
+  @Override
+  String getChildKeyName(Path child) {
     OFSPath childOFSPath = new OFSPath(child, conf);
-    assertEquals(key.getName(), childOFSPath.getKeyName());
+    return childOFSPath.getKeyName();
+  }
 
-    // Creating a child should not add parent keys to the bucket
-    try {
-      getKey(parent, true);
-    } catch (OMException ome) {
-      assertEquals(KEY_NOT_FOUND, ome.getResult());
-    }
-
-    // List status on the parent should show the child file
-    assertEquals(1L, fs.listStatus(parent).length, "List status of parent should include the 1 child file");
-    assertTrue(fs.getFileStatus(parent).isDirectory(), "Parent directory does not appear to be a directory");
-
-    // Cleanup
-    fs.delete(grandparent, true);
+  @Test
+  public void testCreateKeyWithECReplicationConfig() throws Exception {
+    createKeyWithECReplicationConfig(bucketPath, cluster.getConf());
   }
 
   @Test
@@ -335,12 +304,9 @@ abstract class AbstractRootedOzoneFileSystemTest {
     String key = "object-dir/object-name1";
 
     // write some test data into bucket
-    try (OzoneOutputStream outputStream = objectStore.getVolume(volumeName).
-            getBucket(bucketName).createKey(key, 1,
-                    new ECReplicationConfig("RS-3-2-1024k"),
-                    new HashMap<>())) {
-      outputStream.write(RandomUtils.nextBytes(1));
-    }
+    DataTestUtil.createKey(objectStore.getVolume(volumeName).getBucket(bucketName),
+        key, new ECReplicationConfig("RS-3-2-1024k"),
+        RandomUtils.secure().randomBytes(1));
 
     List<String> dirs = Arrays.asList(volumeName, bucketName, "object-dir",
             "object-name1");
@@ -372,69 +338,33 @@ abstract class AbstractRootedOzoneFileSystemTest {
     //  If possible, improve this to test when FS Path is enabled.
     assumeTrue(!enabledFileSystemPaths, "FS Path is enabled. Skipping this test as it is not " +
             "tuned for FS Path yet");
+    deleteCreatesFakeParentDir(bucketPath);
+  }
 
-    Path grandparent = new Path(bucketPath,
-        "testDeleteCreatesFakeParentDir");
-    Path parent = new Path(grandparent, "parent");
-    Path child = new Path(parent, "child");
-    ContractTestUtils.touch(fs, child);
-
-    // Verify that parent dir key does not exist
-    // Creating a child should not add parent keys to the bucket
-    try {
-      getKey(parent, true);
-    } catch (OMException ome) {
-      assertEquals(KEY_NOT_FOUND, ome.getResult());
-    }
-
-
-    // Delete the child key
-    assertTrue(fs.delete(child, false));
-
-    // Deleting the only child should create the parent dir key if it does
-    // not exist
+  @Override
+  void verifyDeleteCreatesFakeParentDir(Path parent) throws IOException {
     OFSPath parentOFSPath = new OFSPath(parent, conf);
     String parentKey = parentOFSPath.getKeyName() + "/";
     OzoneKeyDetails parentKeyInfo = getKey(parent, true);
     assertEquals(parentKey, parentKeyInfo.getName());
+  }
 
-    // Recursive delete with DeleteIterator
-    assertTrue(fs.delete(grandparent, true));
+  @Test
+  void testListLocatedStatusForZeroByteFile() throws Exception {
+    Path parent = new Path(bucketPath, "testListLocatedStatusForZeroByteFile");
+    Path path = new Path(parent, "key1");
+
+    try {
+      listLocatedStatusForZeroByteFile(fs, path);
+    } finally {
+      // Cleanup
+      fs.delete(parent, true);
+    }
   }
 
   @Test
   void testListStatus() throws Exception {
-    Path parent = new Path(bucketPath, "testListStatus");
-    Path file1 = new Path(parent, "key1");
-    Path file2 = new Path(parent, "key2");
-
-    FileStatus[] fileStatuses = ofs.listStatus(bucketPath);
-    assertEquals(0, fileStatuses.length, "Should be empty");
-
-    ContractTestUtils.touch(fs, file1);
-    ContractTestUtils.touch(fs, file2);
-
-    fileStatuses = ofs.listStatus(bucketPath);
-    assertEquals(1, fileStatuses.length, "Should have created parent");
-    assertEquals(fileStatuses[0].getPath().toUri().getPath(), parent.toString(), "Parent path doesn't match");
-
-    // ListStatus on a directory should return all subdirs along with
-    // files, even if there exists a file and sub-dir with the same name.
-    fileStatuses = ofs.listStatus(parent);
-    assertEquals(2, fileStatuses.length, "FileStatus did not return all children of the directory");
-
-    // ListStatus should return only the immediate children of a directory.
-    Path file3 = new Path(parent, "dir1/key3");
-    Path file4 = new Path(parent, "dir1/key4");
-    ContractTestUtils.touch(fs, file3);
-    ContractTestUtils.touch(fs, file4);
-    fileStatuses = ofs.listStatus(parent);
-    assertEquals(3, fileStatuses.length, "FileStatus did not return all children of" +
-        " the directory : Got " + Arrays.toString(
-        fileStatuses));
-
-    // Cleanup
-    fs.delete(parent, true);
+    verifyListStatus(bucketPath, null);
   }
 
   /**
@@ -442,51 +372,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
    */
   @Test
   void testListStatusIteratorWithDir() throws Exception {
-    Path parent = new Path(bucketPath, "testListStatus");
-    Path file1 = new Path(parent, "key1");
-    Path file2 = new Path(parent, "key2");
-    try {
-      // Iterator should have no items when dir is empty
-      RemoteIterator<FileStatus> it = ofs.listStatusIterator(bucketPath);
-      assertFalse(it.hasNext());
-      ContractTestUtils.touch(fs, file1);
-      ContractTestUtils.touch(fs, file2);
-      // Iterator should have an item when dir is not empty
-      it = ofs.listStatusIterator(bucketPath);
-      while (it.hasNext()) {
-        FileStatus fileStatus = it.next();
-        assertNotNull(fileStatus);
-        assertEquals(fileStatus.getPath().toUri().getPath(), parent.toString(), "Parent path doesn't match");
-      }
-      // Iterator on a directory should return all subdirs along with
-      // files.
-      it = ofs.listStatusIterator(parent);
-      int iCount = 0;
-      while (it.hasNext()) {
-        iCount++;
-        FileStatus fileStatus = it.next();
-        assertNotNull(fileStatus);
-      }
-      assertEquals(2, iCount, "Iterator did not return all the file status");
-      // Iterator should return file status for only the
-      // immediate children of a directory.
-      Path file3 = new Path(parent, "dir1/key3");
-      Path file4 = new Path(parent, "dir1/key4");
-      ContractTestUtils.touch(fs, file3);
-      ContractTestUtils.touch(fs, file4);
-      it = ofs.listStatusIterator(parent);
-      iCount = 0;
-      while (it.hasNext()) {
-        iCount++;
-        FileStatus fileStatus = it.next();
-        assertNotNull(fileStatus);
-      }
-      assertEquals(3, iCount, "Iterator did not return file status " +
-          "of all the children of the directory");
-    } finally {
-      // Cleanup
-      fs.delete(parent, true);
-    }
+    listStatusIteratorWithDir(bucketPath);
   }
 
   /**
@@ -495,40 +381,14 @@ abstract class AbstractRootedOzoneFileSystemTest {
   @Test
   void testListStatusIteratorInBucket() throws Exception {
     Path root = new Path("/" + volumeName + "/" + bucketName);
-    Path dir1 = new Path(root, "dir1");
-    Path dir12 = new Path(dir1, "dir12");
-    Path dir2 = new Path(root, "dir2");
-    try {
-      fs.mkdirs(dir12);
-      fs.mkdirs(dir2);
-
-      // ListStatus on root should return dir1 (even though /dir1 key does not
-      // exist) and dir2 only. dir12 is not an immediate child of root and
-      // hence should not be listed.
-      RemoteIterator<FileStatus> it = ofs.listStatusIterator(root);
-      // Verify that dir12 is not included in the result of the listStatus on
-      // root
-      int iCount = 0;
-      while (it.hasNext()) {
-        iCount++;
-        FileStatus fileStatus = it.next();
-        assertNotNull(fileStatus);
-        assertNotEquals(fileStatus, dir12.toString());
-      }
-      assertEquals(2, iCount, "FileStatus should return only the immediate children");
-
-    } finally {
-      // cleanup
-      fs.delete(dir1, true);
-      fs.delete(dir2, true);
-    }
+    listStatusIteratorOnRoot(root);
   }
 
   @Test
   void testListStatusIteratorWithPathNotFound() throws Exception {
     Path path = new Path("/test/test1/test2");
     try {
-      ofs.listStatusIterator(path);
+      fs.listStatusIterator(path);
       fail("Should have thrown OMException");
     } catch (OMException omEx) {
       assertEquals(VOLUME_NOT_FOUND, omEx.getResult(), "Volume test is not found");
@@ -541,7 +401,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
    */
   @Test
   void testListStatusIteratorOnPageSize() throws Exception {
-    OzoneFileSystemTests.listStatusIteratorOnPageSize(conf,
+    listStatusIteratorOnPageSize(conf,
         "/" + volumeName + "/" + bucketName);
   }
 
@@ -550,59 +410,17 @@ abstract class AbstractRootedOzoneFileSystemTest {
    */
   @Test
   void testListStatusIteratorOnSubDirs() throws Exception {
-    // Create the following key structure
-    //      /dir1/dir11/dir111
-    //      /dir1/dir12
-    //      /dir1/dir12/file121
-    //      /dir2
-    // listStatusIterator on /dir1 should return all its immediated subdirs only
-    // which are /dir1/dir11 and /dir1/dir12. Super child files/dirs
-    // (/dir1/dir12/file121 and /dir1/dir11/dir111) should not be returned by
-    // listStatusIterator.
-    Path dir1 = new Path(bucketPath, "dir1");
-    Path dir11 = new Path(dir1, "dir11");
-    Path dir111 = new Path(dir11, "dir111");
-    Path dir12 = new Path(dir1, "dir12");
-    Path file121 = new Path(dir12, "file121");
-    Path dir2 = new Path(bucketPath, "dir2");
-    try {
-      fs.mkdirs(dir111);
-      fs.mkdirs(dir12);
-      ContractTestUtils.touch(fs, file121);
-      fs.mkdirs(dir2);
-
-      RemoteIterator<FileStatus> it = ofs.listStatusIterator(dir1);
-      int iCount = 0;
-      while (it.hasNext()) {
-        iCount++;
-        FileStatus fileStatus = it.next();
-        assertNotNull(fileStatus);
-        assertNotEquals(fileStatus, dir12.toString());
-        // Verify that the two children of /dir1
-        // returned by listStatusIterator operation
-        // are /dir1/dir11 and /dir1/dir12.
-        assertTrue(fileStatus.getPath().toUri().getPath().
-            equals(dir11.toString()) ||
-            fileStatus.getPath().toUri().getPath().
-                equals(dir12.toString()));
-      }
-      assertEquals(2, iCount, "Iterator should return only the immediate children");
-    } finally {
-      // Cleanup
-      fs.delete(dir2, true);
-      fs.delete(dir1, true);
-    }
+    listStatusIteratorOnSubDirs(bucketPath);
   }
 
   /**
    * OFS: Helper function for tests. Return a volume name that doesn't exist.
    */
   protected String getRandomNonExistVolumeName() throws IOException {
-    final int numDigit = 5;
     long retriesLeft = Math.round(Math.pow(10, 5));
     String name = null;
     while (name == null && retriesLeft-- > 0) {
-      name = "volume-" + RandomStringUtils.randomNumeric(numDigit);
+      name = uniqueObjectName("volume-");
       // Check volume existence.
       Iterator<? extends OzoneVolume> iter =
           objectStore.listVolumesByUser(null, name, null);
@@ -630,7 +448,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
             "tuned for FS Path yet");
 
     String volumeNameLocal = getRandomNonExistVolumeName();
-    String bucketNameLocal = "bucket-" + RandomStringUtils.randomNumeric(5);
+    String bucketNameLocal = uniqueObjectName("bucket-");
     Path root = new Path("/" + volumeNameLocal + "/" + bucketNameLocal);
     Path dir1 = new Path(root, "dir1");
     Path dir12 = new Path(dir1, "dir12");
@@ -647,15 +465,15 @@ abstract class AbstractRootedOzoneFileSystemTest {
     assertEquals(key, ozoneKeyDetails.getName());
 
     // Verify that directories are created.
-    FileStatus[] fileStatuses = ofs.listStatus(root);
+    FileStatus[] fileStatuses = fs.listStatus(root);
     assertEquals(fileStatuses[0].getPath().toUri().getPath(), dir1.toString());
     assertEquals(fileStatuses[1].getPath().toUri().getPath(), dir2.toString());
 
-    fileStatuses = ofs.listStatus(dir1);
+    fileStatuses = fs.listStatus(dir1);
     assertEquals(fileStatuses[0].getPath().toUri().getPath(), dir12.toString());
-    fileStatuses = ofs.listStatus(dir12);
+    fileStatuses = fs.listStatus(dir12);
     assertEquals(fileStatuses.length, 0);
-    fileStatuses = ofs.listStatus(dir2);
+    fileStatuses = fs.listStatus(dir2);
     assertEquals(fileStatuses.length, 0);
 
     // Cleanup
@@ -671,7 +489,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
   @Test
   void testMkdirNonExistentVolumeBucket() throws Exception {
     String volumeNameLocal = getRandomNonExistVolumeName();
-    String bucketNameLocal = "bucket-" + RandomStringUtils.randomNumeric(5);
+    String bucketNameLocal = uniqueObjectName("bucket-");
     Path newVolBucket = new Path(
         "/" + volumeNameLocal + "/" + bucketNameLocal);
     fs.mkdirs(newVolBucket);
@@ -734,35 +552,36 @@ abstract class AbstractRootedOzoneFileSystemTest {
   }
 
   /**
+   * OFS: isFile/isDirectory are metadata-only (headOp) checks. They must report
+   * the correct entry type for files, directories and non-existent paths
+   * (HDDS-15678).
+   */
+  @Test
+  void testIsFileAndIsDirectory() throws Exception {
+    Path dir = new Path(bucketPath, "isdir-dir");
+    fs.mkdirs(dir);
+    Path file = new Path(dir, "isdir-file");
+    ContractTestUtils.touch(fs, file);
+
+    assertTrue(fs.isDirectory(dir));
+    assertFalse(fs.isFile(dir));
+    assertTrue(fs.isFile(file));
+    assertFalse(fs.isDirectory(file));
+
+    Path missing = new Path(dir, "does-not-exist");
+    assertFalse(fs.isDirectory(missing));
+    assertFalse(fs.isFile(missing));
+
+    fs.delete(dir, true);
+  }
+
+  /**
    * Test listStatus operation in a bucket.
    */
   @Test
   void testListStatusInBucket() throws Exception {
     Path root = new Path("/" + volumeName + "/" + bucketName);
-    Path dir1 = new Path(root, "dir1");
-    Path dir12 = new Path(dir1, "dir12");
-    Path dir2 = new Path(root, "dir2");
-    try {
-      fs.mkdirs(dir12);
-      fs.mkdirs(dir2);
-
-      // ListStatus on root should return dir1 (even though /dir1 key does not
-      // exist) and dir2 only. dir12 is not an immediate child of root and
-      // hence should not be listed.
-      FileStatus[] fileStatuses = ofs.listStatus(root);
-      assertEquals(2, fileStatuses.length, "FileStatus should return only the immediate children");
-
-      // Verify that dir12 is not included in the result of the listStatus on
-      // root
-      String fileStatus1 = fileStatuses[0].getPath().toUri().getPath();
-      String fileStatus2 = fileStatuses[1].getPath().toUri().getPath();
-      assertNotEquals(fileStatus1, dir12.toString());
-      assertNotEquals(fileStatus2, dir12.toString());
-    } finally {
-      // cleanup
-      fs.delete(dir1, true);
-      fs.delete(dir2, true);
-    }
+    listStatusOnRoot(root, null);
   }
 
   /**
@@ -780,11 +599,11 @@ abstract class AbstractRootedOzoneFileSystemTest {
         paths.add(p.getName());
       }
 
-      FileStatus[] fileStatuses = ofs.listStatus(root);
+      FileStatus[] fileStatuses = fs.listStatus(root);
       assertEquals(numDirs, fileStatuses.length, "Total directories listed do not match the existing directories");
 
       for (int i = 0; i < numDirs; i++) {
-        assertTrue(paths.contains(fileStatuses[i].getPath().getName()));
+        assertThat(paths).contains(fileStatuses[i].getPath().getName());
       }
     } finally {
       // Cleanup
@@ -800,69 +619,13 @@ abstract class AbstractRootedOzoneFileSystemTest {
    */
   @Test
   void testListStatusOnSubDirs() throws Exception {
-    // Create the following key structure
-    //      /dir1/dir11/dir111
-    //      /dir1/dir12
-    //      /dir1/dir12/file121
-    //      /dir2
-    // ListStatus on /dir1 should return all its immediated subdirs only
-    // which are /dir1/dir11 and /dir1/dir12. Super child files/dirs
-    // (/dir1/dir12/file121 and /dir1/dir11/dir111) should not be returned by
-    // listStatus.
-    Path dir1 = new Path(bucketPath, "dir1");
-    Path dir11 = new Path(dir1, "dir11");
-    Path dir111 = new Path(dir11, "dir111");
-    Path dir12 = new Path(dir1, "dir12");
-    Path file121 = new Path(dir12, "file121");
-    Path dir2 = new Path(bucketPath, "dir2");
-    fs.mkdirs(dir111);
-    fs.mkdirs(dir12);
-    ContractTestUtils.touch(fs, file121);
-    fs.mkdirs(dir2);
-
-    FileStatus[] fileStatuses = ofs.listStatus(dir1);
-    assertEquals(2, fileStatuses.length, "FileStatus should return only the immediate children");
-
-    // Verify that the two children of /dir1 returned by listStatus operation
-    // are /dir1/dir11 and /dir1/dir12.
-    String fileStatus1 = fileStatuses[0].getPath().toUri().getPath();
-    String fileStatus2 = fileStatuses[1].getPath().toUri().getPath();
-    assertTrue(fileStatus1.equals(dir11.toString()) ||
-        fileStatus1.equals(dir12.toString()));
-    assertTrue(fileStatus2.equals(dir11.toString()) ||
-        fileStatus2.equals(dir12.toString()));
-
-    // Cleanup
-    fs.delete(dir2, true);
-    fs.delete(dir1, true);
+    listStatusOnSubDirs(bucketPath);
   }
 
   @Test
   void testNonExplicitlyCreatedPathExistsAfterItsLeafsWereRemoved()
       throws Exception {
-    Path source = new Path(bucketPath, "source");
-    Path interimPath = new Path(source, "interimPath");
-    Path leafInsideInterimPath = new Path(interimPath, "leaf");
-    Path target = new Path(bucketPath, "target");
-    Path leafInTarget = new Path(target, "leaf");
-
-    fs.mkdirs(source);
-    fs.mkdirs(target);
-    fs.mkdirs(leafInsideInterimPath);
-
-    assertTrue(fs.rename(leafInsideInterimPath, leafInTarget));
-
-    // after rename listStatus for interimPath should succeed and
-    // interimPath should have no children
-    FileStatus[] statuses = fs.listStatus(interimPath);
-    assertNotNull(statuses, "liststatus returns a null array");
-    assertEquals(0, statuses.length, "Statuses array is not empty");
-    FileStatus fileStatus = fs.getFileStatus(interimPath);
-    assertEquals(interimPath.getName(), fileStatus.getPath().getName(), "FileStatus does not point to interimPath");
-
-    // Cleanup
-    fs.delete(target, true);
-    fs.delete(source, true);
+    nonExplicitlyCreatedPathExistsAfterItsLeafsWereRemoved(bucketPath);
   }
 
   /**
@@ -895,9 +658,10 @@ abstract class AbstractRootedOzoneFileSystemTest {
     fs.delete(source, true);
   }
 
-  private OzoneKeyDetails getKey(Path keyPath, boolean isDirectory)
+  @Override
+  protected OzoneKeyDetails getKey(Path keyPath, boolean isDirectory)
       throws IOException {
-    String key = ofs.pathToKey(keyPath);
+    String key = fs.pathToKey(keyPath);
     if (isDirectory) {
       key = key + OZONE_URI_DELIMITER;
     }
@@ -915,7 +679,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
    */
   private Path createRandomVolumeBucketWithDirs() throws IOException {
     String volume1 = getRandomNonExistVolumeName();
-    String bucket1 = "bucket-" + RandomStringUtils.randomNumeric(5);
+    String bucket1 = uniqueObjectName("bucket-");
     Path bucketPath1 = new Path(OZONE_URI_DELIMITER + volume1 +
         OZONE_URI_DELIMITER + bucket1);
 
@@ -927,7 +691,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
     fs.mkdirs(dir2);
 
     try (FSDataOutputStream stream =
-        ofs.create(new Path(dir2, "file1"))) {
+        fs.create(new Path(dir2, "file1"))) {
       stream.write(1);
     }
 
@@ -954,9 +718,9 @@ abstract class AbstractRootedOzoneFileSystemTest {
     objectStore.createVolume(volName);
     OzoneVolume ozoneVolume = objectStore.getVolume(volName);
 
-    String buckName = "bucket-" + RandomStringUtils.randomNumeric(5);
+    String buckName = uniqueObjectName("bucket-");
     UserGroupInformation currUgi = UserGroupInformation.getCurrentUser();
-    String bucketOwner = currUgi.getUserName() + RandomStringUtils.randomNumeric(5);
+    String bucketOwner = currUgi.getUserName() + RandomStringUtils.secure().nextNumeric(5);
     BucketArgs bucketArgs = BucketArgs.newBuilder()
         .setOwner(bucketOwner)
         .build();
@@ -966,7 +730,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
 
     OzoneBucket ozoneBucket = ozoneVolume.getBucket(buckName);
 
-    FileStatus[] fileStatusVolume = ofs.listStatus(volPath);
+    FileStatus[] fileStatusVolume = fs.listStatus(volPath);
     assertEquals(1, fileStatusVolume.length);
     // FileStatus owner is different from the volume owner.
     // Owner is the same as the bucket owner returned by the ObjectStore.
@@ -990,19 +754,19 @@ abstract class AbstractRootedOzoneFileSystemTest {
     Path bucketPath1 = createRandomVolumeBucketWithDirs();
     Path bucketPath2 = createRandomVolumeBucketWithDirs();
     // listStatus("/volume/bucket")
-    FileStatus[] fileStatusBucket = ofs.listStatus(bucketPath1);
+    FileStatus[] fileStatusBucket = fs.listStatus(bucketPath1);
     assertEquals(2, fileStatusBucket.length);
     // listStatus("/volume")
     Path volume = new Path(
         OZONE_URI_DELIMITER + new OFSPath(bucketPath1, conf).getVolumeName());
-    FileStatus[] fileStatusVolume = ofs.listStatus(volume);
+    FileStatus[] fileStatusVolume = fs.listStatus(volume);
     assertEquals(1, fileStatusVolume.length);
     assertEquals(ownerShort, fileStatusVolume[0].getOwner());
     assertEquals(group, fileStatusVolume[0].getGroup());
 
     // listStatus("/")
     Path root = new Path(OZONE_URI_DELIMITER);
-    FileStatus[] fileStatusRoot = ofs.listStatus(root);
+    FileStatus[] fileStatusRoot = fs.listStatus(root);
 
     // When ACL is enabled, listStatus root will see a 4th volume created by
     //  userXXXXX as the result of createVolumeAndBucket in initClusterAndEnv.
@@ -1034,9 +798,10 @@ abstract class AbstractRootedOzoneFileSystemTest {
    * Helper function to do FileSystem#listStatus recursively.
    * Simulate what FsShell does, using DFS.
    */
+  @SuppressWarnings("PMD.UseArraysAsList")
   private void listStatusRecursiveHelper(Path curPath, List<FileStatus> result)
       throws IOException {
-    FileStatus[] startList = ofs.listStatus(curPath);
+    FileStatus[] startList = fs.listStatus(curPath);
     for (FileStatus fileStatus : startList) {
       result.add(fileStatus);
       if (fileStatus.isDirectory()) {
@@ -1052,8 +817,8 @@ abstract class AbstractRootedOzoneFileSystemTest {
   private List<FileStatus> callAdapterListStatus(String pathStr,
       boolean recursive, String startPath, long numEntries) throws IOException {
     return adapter.listStatus(pathStr, recursive, startPath, numEntries,
-        ofs.getUri(), ofs.getWorkingDirectory(), ofs.getUsername())
-        .stream().map(ofs::convertFileStatus).collect(Collectors.toList());
+        fs.getUri(), fs.getWorkingDirectory(), fs.getUsername(), false)
+        .stream().map(fs::convertFileStatus).collect(Collectors.toList());
   }
 
   /**
@@ -1117,7 +882,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
    */
   private FileStatus[] customListStatus(Path f, boolean recursive,
       String startPath, int numEntries) throws IOException {
-    assertTrue(numEntries > 0);
+    assertThat(numEntries).isGreaterThan(0);
     LinkedList<FileStatus> statuses = new LinkedList<>();
     List<FileStatus> tmpStatusList;
     do {
@@ -1187,25 +952,18 @@ abstract class AbstractRootedOzoneFileSystemTest {
     // Use ClientProtocol to pass in volume ACL, ObjectStore won't do it
     ClientProtocol proxy = objectStore.getClientProxy();
     // Get default acl rights for user
-    OzoneAclConfig aclConfig = conf.getObject(OzoneAclConfig.class);
-    ACLType userRights = aclConfig.getUserDefaultRights();
+    OmConfig omConfig = cluster.getOzoneManager().getConfig();
     // Construct ACL for world access
     // ACL admin owner, world read+write
-    BitSet aclRights = new BitSet();
-    aclRights.set(READ.ordinal());
-    aclRights.set(WRITE.ordinal());
-    List<OzoneAcl> objectAcls = new ArrayList<>();
-    objectAcls.add(new OzoneAcl(ACLIdentityType.WORLD, "",
-        aclRights, ACCESS));
-    objectAcls.add(new OzoneAcl(ACLIdentityType.USER, "admin", userRights,
-        ACCESS));
+    EnumSet<ACLType> aclRights = EnumSet.of(READ, WRITE);
     // volume acls have all access to admin and read+write access to world
 
     // Construct VolumeArgs
-    VolumeArgs volumeArgs = new VolumeArgs.Builder()
+    VolumeArgs volumeArgs = VolumeArgs.newBuilder()
         .setAdmin("admin")
         .setOwner("admin")
-        .setAcls(Collections.unmodifiableList(objectAcls))
+        .addAcl(OzoneAcl.of(ACLIdentityType.WORLD, "", ACCESS, aclRights))
+        .addAcl(OzoneAcl.of(ACLIdentityType.USER, "admin", ACCESS, omConfig.getUserDefaultRights()))
         .setQuotaInNamespace(1000)
         .setQuotaInBytes(Long.MAX_VALUE).build();
     // Sanity check
@@ -1236,20 +994,11 @@ abstract class AbstractRootedOzoneFileSystemTest {
     }
 
     // set acls for shared tmp mount under the tmp volume
-    objectAcls.clear();
-    objectAcls.add(new OzoneAcl(ACLIdentityType.USER, "admin", userRights,
-        ACCESS));
-    aclRights.clear(DELETE.ordinal());
-    aclRights.set(LIST.ordinal());
-    objectAcls.add(new OzoneAcl(ACLIdentityType.WORLD, "",
-        aclRights, ACCESS));
-    objectAcls.add(new OzoneAcl(ACLIdentityType.USER, "admin", userRights,
-        ACCESS));
     // bucket acls have all access to admin and read+write+list access to world
-
     BucketArgs bucketArgs = new BucketArgs.Builder()
         .setOwner("admin")
-        .setAcls(Collections.unmodifiableList(objectAcls))
+        .addAcl(OzoneAcl.of(ACLIdentityType.WORLD, "", ACCESS, READ, WRITE, LIST))
+        .addAcl(OzoneAcl.of(ACLIdentityType.USER, "admin", ACCESS, omConfig.getUserDefaultRights()))
         .setQuotaInNamespace(1000)
         .setQuotaInBytes(Long.MAX_VALUE).build();
 
@@ -1305,14 +1054,13 @@ abstract class AbstractRootedOzoneFileSystemTest {
     // Use ClientProtocol to pass in volume ACL, ObjectStore won't do it
     ClientProtocol proxy = objectStore.getClientProxy();
     // Get default acl rights for user
-    OzoneAclConfig aclConfig = conf.getObject(OzoneAclConfig.class);
-    ACLType userRights = aclConfig.getUserDefaultRights();
+    OmConfig omConfig = cluster.getOzoneManager().getConfig();
     // Construct ACL for world access
-    OzoneAcl aclWorldAccess = new OzoneAcl(ACLIdentityType.WORLD, "",
-        userRights, ACCESS);
+    OzoneAcl aclWorldAccess = OzoneAcl.of(ACLIdentityType.WORLD, "",
+        ACCESS, omConfig.getUserDefaultRights());
     // Construct VolumeArgs
-    VolumeArgs volumeArgs = new VolumeArgs.Builder()
-        .setAcls(Collections.singletonList(aclWorldAccess))
+    VolumeArgs volumeArgs = VolumeArgs.newBuilder()
+        .addAcl(aclWorldAccess)
         .setQuotaInNamespace(1000).build();
     // Sanity check
     assertNull(volumeArgs.getOwner());
@@ -1344,7 +1092,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
     Path dir1 = new Path("/tmp/dir1");
     fs.mkdirs(dir1);
 
-    try (FSDataOutputStream stream = ofs.create(new Path("/tmp/dir1/file1"))) {
+    try (FSDataOutputStream stream = fs.create(new Path("/tmp/dir1/file1"))) {
       stream.write(1);
     }
 
@@ -1494,22 +1242,19 @@ abstract class AbstractRootedOzoneFileSystemTest {
                new GenericTestUtils.SystemOutCapturer()) {
         String linkPathStr = rootPath + destVolume;
         ToolRunner.run(shell, new String[]{"-ls", linkPathStr});
-        assertTrue(capture.getOutput().contains("drwxrwxrwx"));
-        assertTrue(capture.getOutput().contains(linkPathStr +
-            OZONE_URI_DELIMITER + srcBucket));
+        assertThat(capture.getOutput()).contains("drwxrwxrwx");
+        assertThat(capture.getOutput()).contains(linkPathStr +
+            OZONE_URI_DELIMITER + srcBucket);
       } finally {
         shell.close();
       }
 
       // add key in source bucket
       final String key = "object-dir/object-name1";
-      try (OzoneOutputStream outputStream = objectStore.getVolume(srcVolume)
-          .getBucket(srcBucket)
-          .createKey(key, 1)) {
-        outputStream.write(RandomUtils.nextBytes(1));
-      }
-      assertEquals(objectStore.getVolume(srcVolume)
-          .getBucket(srcBucket).getKey(key).getName(), key);
+      DataTestUtil.createKey(objectStore.getVolume(srcVolume).getBucket(srcBucket),
+          key, RandomUtils.secure().randomBytes(1));
+      assertEquals(key, objectStore.getVolume(srcVolume)
+          .getBucket(srcBucket).getKey(key).getName());
 
       // test ls -R /destVol/destBucket, srcBucket with key (non-empty)
       try (GenericTestUtils.SystemOutCapturer capture =
@@ -1517,12 +1262,12 @@ abstract class AbstractRootedOzoneFileSystemTest {
         String linkPathStr = rootPath + destVolume;
         ToolRunner.run(shell, new String[]{"-ls", "-R",
             linkPathStr + OZONE_URI_DELIMITER + srcBucket});
-        assertTrue(capture.getOutput().contains("drwxrwxrwx"));
-        assertTrue(capture.getOutput().contains(linkPathStr +
-            OZONE_URI_DELIMITER + srcBucket));
-        assertTrue(capture.getOutput().contains("-rw-rw-rw-"));
-        assertTrue(capture.getOutput().contains(linkPathStr +
-            OZONE_URI_DELIMITER + srcBucket + OZONE_URI_DELIMITER + key));
+        assertThat(capture.getOutput()).contains("drwxrwxrwx");
+        assertThat(capture.getOutput()).contains(linkPathStr +
+            OZONE_URI_DELIMITER + srcBucket);
+        assertThat(capture.getOutput()).contains("-rw-rw-rw-");
+        assertThat(capture.getOutput()).contains(linkPathStr +
+            OZONE_URI_DELIMITER + srcBucket + OZONE_URI_DELIMITER + key);
       } finally {
         shell.close();
       }
@@ -1554,13 +1299,10 @@ abstract class AbstractRootedOzoneFileSystemTest {
 
       // add key to srcBucket
       final String key = "object-dir/object-name1";
-      try (OzoneOutputStream outputStream = objectStore.getVolume(srcVolume)
-          .getBucket(srcBucket)
-          .createKey(key, 1)) {
-        outputStream.write(RandomUtils.nextBytes(1));
-      }
-      assertEquals(objectStore.getVolume(srcVolume)
-          .getBucket(srcBucket).getKey(key).getName(), key);
+      DataTestUtil.createKey(objectStore.getVolume(srcVolume).getBucket(srcBucket),
+          key, RandomUtils.secure().randomBytes(1));
+      assertEquals(key, objectStore.getVolume(srcVolume).
+          getBucket(srcBucket).getKey(key).getName());
 
       // test symlink -rm destVol/destBucket -> srcVol/srcBucket
       // should delete only link, srcBucket and key unaltered
@@ -1686,7 +1428,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
     // confirm link is gone
     FileNotFoundException exception = assertThrows(FileNotFoundException.class,
         () -> fs.getFileStatus(dirPathLink));
-    assertTrue(exception.getMessage().contains("File not found."));
+    assertThat(exception.getMessage()).contains("File not found.");
 
     // Cleanup
     fs.delete(bucketPath1, true);
@@ -1725,6 +1467,14 @@ abstract class AbstractRootedOzoneFileSystemTest {
       Collection<FileStatus> res) {
     assertEquals(expectedSize, res.size());
     res.forEach(e -> assertEquals(expectedOwner, e.getOwner()));
+  }
+
+  @Test
+  void testGetTrashRoot() {
+    String testKeyName = "keyToBeDeleted";
+    Path keyPath1 = new Path(bucketPath, testKeyName);
+    assertEquals(new Path(rootPath + volumeName + "/" + bucketName + "/" +
+        TRASH_PREFIX + "/" +  USER1 + "/"), userOfs.getTrashRoot(keyPath1));
   }
 
   /**
@@ -1785,7 +1535,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
 
     // Create a new volume and a new bucket
     OzoneBucket bucket3 =
-        TestDataUtil.createVolumeAndBucket(client, bucketLayout);
+        DataTestUtil.createVolumeAndBucket(client, bucketLayout);
     OzoneVolume volume3 = objectStore.getVolume(bucket3.getVolumeName());
     // Need to setOwner to current test user so it has permission to list vols
     volume3.setOwner(username);
@@ -1829,38 +1579,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
 
   @Test
   void testFileDelete() throws Exception {
-    Path grandparent = new Path(bucketPath, "testBatchDelete");
-    Path parent = new Path(grandparent, "parent");
-    Path childFolder = new Path(parent, "childFolder");
-    // BatchSize is 5, so we're going to set a number that's not a
-    // multiple of 5. In order to test the final number of keys less than
-    // batchSize can also be deleted.
-    for (int i = 0; i < 8; i++) {
-      Path childFile = new Path(parent, "child" + i);
-      Path childFolderFile = new Path(childFolder, "child" + i);
-      ContractTestUtils.touch(fs, childFile);
-      ContractTestUtils.touch(fs, childFolderFile);
-    }
-
-    assertEquals(1, fs.listStatus(grandparent).length);
-    assertEquals(9, fs.listStatus(parent).length);
-    assertEquals(8, fs.listStatus(childFolder).length);
-
-    assertTrue(fs.delete(grandparent, true));
-    assertFalse(ofs.exists(grandparent));
-    for (int i = 0; i < 8; i++) {
-      Path childFile = new Path(parent, "child" + i);
-      // Make sure all keys under testBatchDelete/parent should be deleted
-      assertFalse(ofs.exists(childFile));
-
-      // Test to recursively delete child folder, make sure all keys under
-      // testBatchDelete/parent/childFolder should be deleted.
-      Path childFolderFile = new Path(childFolder, "child" + i);
-      assertFalse(ofs.exists(childFolderFile));
-    }
-    // Will get: WARN  ozone.BasicOzoneFileSystem delete: Path does not exist.
-    // This will return false.
-    assertFalse(fs.delete(parent, true));
+    fileDelete(bucketPath);
   }
 
   /**
@@ -1877,7 +1596,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
     }
     // create second bucket and write a key in it.
     OzoneBucket bucket2 =
-        TestDataUtil.createVolumeAndBucket(client, bucketLayout);
+        DataTestUtil.createVolumeAndBucket(client, bucketLayout);
     String volumeName2 = bucket2.getVolumeName();
     Path volumePath2 = new Path(OZONE_URI_DELIMITER, volumeName2);
     String bucketName2 = bucket2.getName();
@@ -1889,7 +1608,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
 
     assertTrue(trash.getConf().getClass(
         "fs.trash.classname", TrashPolicy.class).
-        isAssignableFrom(TrashPolicyOzone.class));
+        isAssignableFrom(OzoneTrashPolicy.class));
 
     long prevNumTrashDeletes = getOMMetrics().getNumTrashDeletes();
     long prevNumTrashFileDeletes = getOMMetrics().getNumTrashFilesDeletes();
@@ -1920,14 +1639,14 @@ abstract class AbstractRootedOzoneFileSystemTest {
     trash.moveToTrash(keyPath2);
 
     // key should either be present in Current or checkpointDir
-    assertTrue(ofs.exists(trashPath)
-        || ofs.listStatus(ofs.listStatus(userTrash)[0].getPath()).length > 0);
+    assertTrue(fs.exists(trashPath)
+        || fs.listStatus(fs.listStatus(userTrash)[0].getPath()).length > 0);
 
 
     // Wait until the TrashEmptier purges the keys
     GenericTestUtils.waitFor(() -> {
       try {
-        return !ofs.exists(trashPath) && !ofs.exists(trashPath2);
+        return !fs.exists(trashPath) && !fs.exists(trashPath2);
       } catch (IOException e) {
         LOG.error("Delete from Trash Failed", e);
         fail("Delete from Trash Failed");
@@ -1936,22 +1655,22 @@ abstract class AbstractRootedOzoneFileSystemTest {
     }, 1000, 180000);
 
     if (isBucketFSOptimized) {
-      assertTrue(getOMMetrics()
-          .getNumTrashAtomicDirRenames() > prevNumTrashAtomicDirRenames);
+      assertThat(getOMMetrics().getNumTrashAtomicDirRenames())
+          .isGreaterThan(prevNumTrashAtomicDirRenames);
     } else {
       // This condition should pass after the checkpoint
-      assertTrue(getOMMetrics()
-          .getNumTrashRenames() > prevNumTrashRenames);
+      assertThat(getOMMetrics().getNumTrashRenames())
+          .isGreaterThan(prevNumTrashRenames);
       // With new layout version, file renames wouldn't be counted
-      assertTrue(getOMMetrics()
-          .getNumTrashFilesRenames() > prevNumTrashFileRenames);
+      assertThat(getOMMetrics().getNumTrashFilesRenames())
+          .isGreaterThan(prevNumTrashFileRenames);
     }
 
     // wait for deletion of checkpoint dir
     GenericTestUtils.waitFor(() -> {
       try {
-        return ofs.listStatus(userTrash).length == 0 &&
-            ofs.listStatus(userTrash2).length == 0;
+        return fs.listStatus(userTrash).length == 0 &&
+            fs.listStatus(userTrash2).length == 0;
       } catch (IOException e) {
         LOG.error("Delete from Trash Failed", e);
         fail("Delete from Trash Failed");
@@ -1971,82 +1690,49 @@ abstract class AbstractRootedOzoneFileSystemTest {
               >= prevNumTrashFileDeletes, 100, 180000);
     }
     // Cleanup
-    ofs.delete(trashRoot, true);
-    ofs.delete(trashRoot2, true);
+    fs.delete(trashRoot, true);
+    fs.delete(trashRoot2, true);
 
-  }
-
-  private Path getTrashKeyPath(Path keyPath, Path userTrash) {
-    Path userTrashCurrent = new Path(userTrash, "Current");
-    String key = keyPath.toString().substring(1);
-    return new Path(userTrashCurrent, key);
   }
 
   @Test
   void testCreateWithInvalidPaths() {
     assumeFalse(isBucketFSOptimized);
-
-    // Test for path with ..
-    Path parent = new Path("../../../../../d1/d2/");
-    Path file1 = new Path(parent, "key1");
-    checkInvalidPath(file1);
-
-    // Test for path with :
-    file1 = new Path("/:/:");
-    checkInvalidPath(file1);
-
-    // Test for path with scheme and authority.
-    file1 = new Path(fs.getUri() + "/:/:");
-    checkInvalidPath(file1);
+    createWithInvalidPaths();
   }
-
-  private void checkInvalidPath(Path path) {
-    InvalidPathException exception = assertThrows(InvalidPathException.class,
-        () -> fs.create(path, false));
-    assertTrue(exception.getMessage().contains("Invalid path Name"));
-  }
-
 
   @Test
   void testRenameFile() throws Exception {
-    final String dir = "/dir" + new Random().nextInt(1000);
-    Path dirPath = new Path(getBucketPath() + dir);
-    Path file1Source = new Path(getBucketPath() + dir
-        + "/file1_Copy");
-    Path file1Destin = new Path(getBucketPath() + dir + "/file1");
+    final String dir = "/dir" + RandomUtils.secure().randomInt(0, 1000);
+    Path dirPath = pathUnderFsRoot(dir);
     try {
-      getFs().mkdirs(dirPath);
-
-      ContractTestUtils.touch(getFs(), file1Source);
-      assertTrue(getFs().rename(file1Source, file1Destin), "Renamed failed");
-      assertTrue(getFs().exists(file1Destin), "Renamed failed: /dir/file1");
-      FileStatus[] fStatus = getFs().listStatus(dirPath);
-      assertEquals(1, fStatus.length, "Renamed failed");
+      renameFile(dir);
     } finally {
       // clean up
       fs.delete(dirPath, true);
     }
   }
 
-
+  @Override
+  void verifyRenameFile(Path workDir, Path expectedDest) throws IOException {
+    FileStatus[] fStatus = getFs().listStatus(workDir);
+    assertEquals(1, fStatus.length, "Renamed failed");
+    assertEquals(expectedDest.toString(), fStatus[0].getPath().toUri().getPath(), "Wrong path name!");
+  }
 
   /**
    * Rename file to an existed directory.
    */
   @Test
   void testRenameFileToDir() throws Exception {
-    final String dir = "/dir" + new Random().nextInt(1000);
-    Path dirPath = new Path(getBucketPath() + dir);
-    getFs().mkdirs(dirPath);
-
-    Path file1Destin = new Path(getBucketPath() + dir  + "/file1");
-    ContractTestUtils.touch(getFs(), file1Destin);
-    Path abcRootPath = new Path(getBucketPath() + "/a/b/c");
-    getFs().mkdirs(abcRootPath);
-    assertTrue(getFs().rename(file1Destin, abcRootPath), "Renamed failed");
-    assertTrue(getFs().exists(new Path(
-        abcRootPath, "file1")), "Renamed filed: /a/b/c/file1");
+    final String dir = "/dir" + RandomUtils.secure().randomInt(0, 1000);
+    renameFileToDir(dir);
     getFs().delete(getBucketPath(), true);
+  }
+
+  @Override
+  Path pathUnderFsRoot(String relativePath) {
+    return new Path(getBucketPath() + relativePath);
   }
 
   /**
@@ -2059,33 +1745,11 @@ abstract class AbstractRootedOzoneFileSystemTest {
    */
   @Test
   void testRenameToParentDir() throws Exception {
-    final String root = "/root_dir";
-    final String dir1 = root + "/dir1";
-    final String dir2 = dir1 + "/dir2";
-    final Path dir2SourcePath = new Path(getBucketPath() + dir2);
-    final Path destRootPath = new Path(getBucketPath() + root);
-    Path file1Source = new Path(getBucketPath() + dir1 + "/file2");
     try {
-      getFs().mkdirs(dir2SourcePath);
-
-      ContractTestUtils.touch(getFs(), file1Source);
-
-      // rename source directory to its parent directory(destination).
-      assertTrue(getFs().rename(dir2SourcePath, destRootPath), "Rename failed");
-      final Path expectedPathAfterRename =
-          new Path(getBucketPath() + root + "/dir2");
-      assertTrue(getFs().exists(expectedPathAfterRename), "Rename failed");
-
-      // rename source file to its parent directory(destination).
-      assertTrue(getFs().rename(file1Source, destRootPath), "Rename failed");
-      final Path expectedFilePathAfterRename =
-          new Path(getBucketPath() + root + "/file2");
-      assertTrue(getFs().exists(expectedFilePathAfterRename), "Rename failed");
+      renameToParentDir();
     } finally {
       // clean up
-      fs.delete(file1Source, true);
-      fs.delete(dir2SourcePath, true);
-      fs.delete(destRootPath, true);
+      fs.delete(pathUnderFsRoot("/root_dir"), true);
     }
   }
 
@@ -2095,22 +1759,9 @@ abstract class AbstractRootedOzoneFileSystemTest {
   @Test
   void testRenameDirToItsOwnSubDir() throws Exception {
     final String root = "/root";
-    final String dir1 = root + "/dir1";
-    final Path dir1Path = new Path(getBucketPath() + dir1);
-    // Add a sub-dir1 to the directory to be moved.
-    final Path subDir1 = new Path(dir1Path, "sub_dir1");
-    getFs().mkdirs(subDir1);
-    LOG.info("Created dir1 {}", subDir1);
-
-    final Path sourceRoot = new Path(getBucketPath() + root);
-    LOG.info("Rename op-> source:{} to destin:{}", sourceRoot, subDir1);
-    //  rename should fail and return false
+    final Path sourceRoot = pathUnderFsRoot(root);
     try {
-      getFs().rename(sourceRoot, subDir1);
-      fail("Should throw exception : Cannot rename a directory to" +
-          " its own subdirectory");
-    } catch (IllegalArgumentException e) {
-      //expected
+      renameDirToItsOwnSubDir();
     } finally {
       // clean up
       fs.delete(sourceRoot, true);
@@ -2124,33 +1775,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
    */
   @Test
   void testRenameDestinationParentDoesNotExist() throws Exception {
-    final String root = "/root_dir";
-    final String dir1 = root + "/dir1";
-    final String dir2 = dir1 + "/dir2";
-    final Path dir2SourcePath = new Path(getBucketPath() + dir2);
-    getFs().mkdirs(dir2SourcePath);
-    // (a) parent of dst does not exist.  /root_dir/b/c
-    final Path destinPath = new Path(getBucketPath()
-        + root + "/b/c");
-
-    // rename should throw exception
-    try {
-      getFs().rename(dir2SourcePath, destinPath);
-      fail("Should fail as parent of dst does not exist!");
-    } catch (FileNotFoundException fnfe) {
-      //expected
-    }
-    // (b) parent of dst is a file. /root_dir/file1/c
-    Path filePath = new Path(getBucketPath() + root + "/file1");
-    ContractTestUtils.touch(getFs(), filePath);
-    Path newDestinPath = new Path(filePath, "c");
-    // rename shouldthrow exception
-    try {
-      getFs().rename(dir2SourcePath, newDestinPath);
-      fail("Should fail as parent of dst is a file!");
-    } catch (IOException e) {
-      //expected
-    }
+    renameDestinationParentDoesNotExist();
   }
 
   @Test
@@ -2165,7 +1790,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
     BucketArgs omBucketArgs = builder.build();
     String vol = UUID.randomUUID().toString();
     String buck = UUID.randomUUID().toString();
-    final OzoneBucket bucket100 = TestDataUtil
+    final OzoneBucket bucket100 = DataTestUtil
         .createVolumeAndBucket(client, vol, buck,
             omBucketArgs);
     assertEquals(ReplicationType.STAND_ALONE.name(), bucket100.getReplicationConfig().getReplicationType().name());
@@ -2194,7 +1819,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
     BucketArgs omBucketArgs = builder.build();
     String vol = UUID.randomUUID().toString();
     String buck = UUID.randomUUID().toString();
-    final OzoneBucket bucket101 = TestDataUtil
+    final OzoneBucket bucket101 = DataTestUtil
         .createVolumeAndBucket(client, vol, buck,
             omBucketArgs);
     assertEquals(ReplicationType.EC.name(), bucket101.getReplicationConfig().getReplicationType().name());
@@ -2213,13 +1838,13 @@ abstract class AbstractRootedOzoneFileSystemTest {
   @Test
   void testGetFileStatus() throws Exception {
     String volumeNameLocal = getRandomNonExistVolumeName();
-    String bucketNameLocal = RandomStringUtils.randomNumeric(5);
+    String bucketNameLocal = RandomStringUtils.secure().nextNumeric(5);
     Path volume = new Path("/" + volumeNameLocal);
-    ofs.mkdirs(volume);
+    fs.mkdirs(volume);
     assertThrows(OMException.class,
-        () -> ofs.getFileStatus(new Path(volume, bucketNameLocal)));
+        () -> fs.getFileStatus(new Path(volume, bucketNameLocal)));
     // Cleanup
-    ofs.delete(volume, false);
+    fs.delete(volume, false);
   }
 
   @Test
@@ -2237,7 +1862,6 @@ abstract class AbstractRootedOzoneFileSystemTest {
 
   }
 
-
   @Test
   void testCreateAndCheckECFileDiskUsage() throws Exception {
     String key = "eckeytest";
@@ -2245,24 +1869,70 @@ abstract class AbstractRootedOzoneFileSystemTest {
     Path bucketPathTest = new Path(volPathTest, bucketName);
 
     // write some test data into bucket
-    try (OzoneOutputStream outputStream = objectStore.getVolume(volumeName).
-            getBucket(bucketName).createKey(key, 1,
-                    new ECReplicationConfig("RS-3-2-1024k"),
-                    new HashMap<>())) {
-      outputStream.write(RandomUtils.nextBytes(1));
-    }
+    DataTestUtil.createKey(objectStore.getVolume(volumeName).
+            getBucket(bucketName), key, new ECReplicationConfig("RS-3-2-1024k"),
+        RandomUtils.secure().randomBytes(1));
     // make sure the disk usage matches the expected value
     Path filePath = new Path(bucketPathTest, key);
-    ContentSummary contentSummary = ofs.getContentSummary(filePath);
+    ContentSummary contentSummary = fs.getContentSummary(filePath);
     long length = contentSummary.getLength();
     long spaceConsumed = contentSummary.getSpaceConsumed();
     long expectDiskUsage = QuotaUtil.getReplicatedSize(length,
         new ECReplicationConfig(3, 2, RS, (int) OzoneConsts.MB));
     assertEquals(expectDiskUsage, spaceConsumed);
     //clean up
-    ofs.delete(filePath, true);
+    fs.delete(filePath, true);
   }
 
+  @Test
+  void testContentSummaryErasureCodingPolicy() throws Exception {
+    String ratisKey = "ratis-ec-policy-key";
+    String ecKey = "ec-policy-key";
+    ECReplicationConfig ecConfig = new ECReplicationConfig("RS-3-2-1024k");
+    Path parentDir = new Path(bucketPath, "ec-policy-mixed");
+    Path ratisFile = new Path(parentDir, ratisKey);
+    Path ecFile = new Path(parentDir, ecKey);
+
+    fs.mkdirs(parentDir);
+    OzoneBucket bucket = objectStore.getVolume(volumeName).getBucket(bucketName);
+    String ratisRelKey = "ec-policy-mixed/" + ratisKey;
+    String ecRelKey = "ec-policy-mixed/" + ecKey;
+    DataTestUtil.createKey(bucket, ratisRelKey,
+        RatisReplicationConfig.getInstance(HddsProtos.ReplicationFactor.THREE),
+        new byte[]{0});
+    DataTestUtil.createKey(bucket, ecRelKey, ecConfig,
+        new byte[]{0});
+
+    try {
+      assertEquals("",
+          fs.getContentSummary(new Path(OZONE_URI_DELIMITER))
+              .getErasureCodingPolicy());
+      assertEquals("",
+          fs.getContentSummary(volumePath).getErasureCodingPolicy());
+      assertEquals("",
+          fs.getContentSummary(bucketPath).getErasureCodingPolicy());
+      assertEquals("Replicated",
+          fs.getContentSummary(ratisFile).getErasureCodingPolicy());
+      assertEquals(ecConfig.getReplication(),
+          fs.getContentSummary(ecFile).getErasureCodingPolicy());
+      assertEquals("",
+          fs.getContentSummary(parentDir).getErasureCodingPolicy());
+    } finally {
+      fs.delete(parentDir, true);
+    }
+  }
+
+  @Test
+  void testLsDashEDoesNotThrow() throws Exception {
+    FsShell shell = new FsShell(conf);
+    try {
+      int exitCode = shell.run(new String[]{"-ls", "-R", "-e",
+          OZONE_URI_DELIMITER + volumeName + OZONE_URI_DELIMITER + bucketName});
+      assertEquals(0, exitCode);
+    } finally {
+      shell.close();
+    }
+  }
 
   @Test
   void testCreateAndCheckRatisFileDiskUsage() throws Exception {
@@ -2272,15 +1942,12 @@ abstract class AbstractRootedOzoneFileSystemTest {
     Path filePathTest = new Path(bucketPathTest, key);
 
     // write some test data into bucket
-    try (OzoneOutputStream outputStream = objectStore.getVolume(volumeName).
-            getBucket(bucketName).createKey(key, 1,
-                    RatisReplicationConfig.getInstance(
-                            HddsProtos.ReplicationFactor.THREE),
-                    new HashMap<>())) {
-      outputStream.write(RandomUtils.nextBytes(1));
-    }
+    DataTestUtil.createKey(objectStore.
+        getVolume(volumeName).getBucket(bucketName), key,
+        RatisReplicationConfig.getInstance(HddsProtos.ReplicationFactor.THREE),
+        RandomUtils.secure().randomBytes(1));
     // make sure the disk usage matches the expected value
-    ContentSummary contentSummary = ofs.getContentSummary(filePathTest);
+    ContentSummary contentSummary = fs.getContentSummary(filePathTest);
     long length = contentSummary.getLength();
     long spaceConsumed = contentSummary.getSpaceConsumed();
     long expectDiskUsage = QuotaUtil.getReplicatedSize(length,
@@ -2288,7 +1955,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
                     HddsProtos.ReplicationFactor.THREE));
     assertEquals(expectDiskUsage, spaceConsumed);
     //clean up
-    ofs.delete(filePathTest, true);
+    fs.delete(filePathTest, true);
   }
 
   @Test
@@ -2306,14 +1973,13 @@ abstract class AbstractRootedOzoneFileSystemTest {
     ClientProtocol proxy = objectStore.getClientProxy();
 
     // Get default acl rights for user
-    OzoneAclConfig aclConfig = conf.getObject(OzoneAclConfig.class);
-    ACLType userRights = aclConfig.getUserDefaultRights();
+    OmConfig omConfig = cluster.getOzoneManager().getConfig();
     // Construct ACL for world access
-    OzoneAcl aclWorldAccess = new OzoneAcl(ACLIdentityType.WORLD, "",
-        userRights, ACCESS);
+    OzoneAcl aclWorldAccess = OzoneAcl.of(ACLIdentityType.WORLD, "",
+        ACCESS, omConfig.getUserDefaultRights());
     // Construct VolumeArgs, set ACL to world access
-    VolumeArgs volumeArgs = new VolumeArgs.Builder()
-        .setAcls(Collections.singletonList(aclWorldAccess))
+    VolumeArgs volumeArgs = VolumeArgs.newBuilder()
+        .addAcl(aclWorldAccess)
         .build();
     proxy.createVolume(volume, volumeArgs);
 
@@ -2344,14 +2010,25 @@ abstract class AbstractRootedOzoneFileSystemTest {
     ozoneVolume.createBucket(linkBucket, builder.build());
   }
 
+  private Path createAndGetBucketPath()
+      throws IOException {
+    BucketArgs.Builder builder = BucketArgs.newBuilder();
+    builder.setStorageType(StorageType.DISK);
+    builder.setBucketLayout(bucketLayout);
+    BucketArgs omBucketArgs = builder.build();
+    String vol = UUID.randomUUID().toString();
+    String buck = UUID.randomUUID().toString();
+    final OzoneBucket bucket =
+        DataTestUtil.createVolumeAndBucket(client, vol, buck, omBucketArgs);
+    Path volume = new Path(OZONE_URI_DELIMITER, bucket.getVolumeName());
+    return new Path(volume, bucket.getName());
+  }
+
   @Test
   void testSnapshotRead() throws Exception {
-    if (useOnlyCache) {
-      return;
-    }
     // Init data
     OzoneBucket bucket1 =
-        TestDataUtil.createVolumeAndBucket(client, bucketLayout);
+        DataTestUtil.createVolumeAndBucket(client, bucketLayout);
     Path volume1Path = new Path(OZONE_URI_DELIMITER, bucket1.getVolumeName());
     Path bucket1Path = new Path(volume1Path, bucket1.getName());
     Path file1 = new Path(bucket1Path, "key1");
@@ -2361,7 +2038,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
     ContractTestUtils.touch(fs, file2);
 
     OzoneBucket bucket2 =
-        TestDataUtil.createVolumeAndBucket(client, bucketLayout);
+        DataTestUtil.createVolumeAndBucket(client, bucketLayout);
     Path volume2Path = new Path(OZONE_URI_DELIMITER, bucket2.getVolumeName());
     Path bucket2Path = new Path(volume2Path, bucket2.getName());
 
@@ -2388,18 +2065,13 @@ abstract class AbstractRootedOzoneFileSystemTest {
 
   @Test
   void testFileSystemDeclaresCapability() throws Throwable {
-    assertHasPathCapabilities(fs, getBucketPath(), FS_ACLS);
-    assertHasPathCapabilities(fs, getBucketPath(), FS_CHECKSUMS);
+    fileSystemDeclaresCapability(getBucketPath());
   }
-
 
   @Test
   void testSnapshotDiff() throws Exception {
-    if (useOnlyCache) {
-      return;
-    }
     OzoneBucket bucket1 =
-        TestDataUtil.createVolumeAndBucket(client, bucketLayout);
+        DataTestUtil.createVolumeAndBucket(client, bucketLayout);
     Path volumePath1 = new Path(OZONE_URI_DELIMITER, bucket1.getVolumeName());
     Path bucketPath1 = new Path(volumePath1, bucket1.getName());
     Path snap1 = fs.createSnapshot(bucketPath1);
@@ -2413,7 +2085,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
     String fromSnap = fromSnapPath != null ? fromSnapPath.toString() : null;
     String toSnap = toSnapPath != null ? toSnapPath.toString() : null;
     SnapshotDiffReport diff =
-        ofs.getSnapshotDiffReport(bucketPath1, fromSnap, toSnap);
+        fs.getSnapshotDiffReport(bucketPath1, fromSnap, toSnap);
     assertEquals(2, diff.getDiffList().size());
     assertEquals(SnapshotDiffReport.DiffType.CREATE, diff.getDiffList().get(0).getType());
     assertEquals(SnapshotDiffReport.DiffType.CREATE, diff.getDiffList().get(1).getType());
@@ -2424,7 +2096,7 @@ abstract class AbstractRootedOzoneFileSystemTest {
     // page size is 4.
     for (int fileCount = 0; fileCount < 10; fileCount++) {
       Path file =
-          new Path(bucketPath1, "key" + RandomStringUtils.randomAlphabetic(5));
+          new Path(bucketPath1, "key" + RandomStringUtils.secure().nextAlphabetic(5));
       ContractTestUtils.touch(fs, file);
     }
     Path snap3 = fs.createSnapshot(bucketPath1);
@@ -2432,19 +2104,19 @@ abstract class AbstractRootedOzoneFileSystemTest {
     toSnapPath = Paths.get(snap3.toString()).getFileName();
     fromSnap = fromSnapPath != null ? fromSnapPath.toString() : null;
     toSnap = toSnapPath != null ? toSnapPath.toString() : null;
-    diff = ofs.getSnapshotDiffReport(bucketPath1, fromSnap, toSnap);
+    diff = fs.getSnapshotDiffReport(bucketPath1, fromSnap, toSnap);
     assertEquals(10, diff.getDiffList().size());
 
     Path file =
-        new Path(bucketPath1, "key" + RandomStringUtils.randomAlphabetic(5));
+        new Path(bucketPath1, "key" + RandomStringUtils.secure().nextAlphabetic(5));
     ContractTestUtils.touch(fs, file);
-    diff = ofs.getSnapshotDiffReport(bucketPath1, toSnap, "");
+    diff = fs.getSnapshotDiffReport(bucketPath1, toSnap, "");
     assertEquals(1, diff.getDiffList().size());
 
-    diff = ofs.getSnapshotDiffReport(bucketPath1, "", toSnap);
+    diff = fs.getSnapshotDiffReport(bucketPath1, "", toSnap);
     assertEquals(1, diff.getDiffList().size());
 
-    diff = ofs.getSnapshotDiffReport(bucketPath1, "", "");
+    diff = fs.getSnapshotDiffReport(bucketPath1, "", "");
     assertEquals(0, diff.getDiffList().size());
 
     // try snapDiff between non-bucket paths
@@ -2453,36 +2125,126 @@ abstract class AbstractRootedOzoneFileSystemTest {
     String finalToSnap = toSnap;
     IllegalArgumentException exception = assertThrows(
         IllegalArgumentException.class,
-        () -> ofs.getSnapshotDiffReport(volumePath1, finalFromSnap,
+        () -> fs.getSnapshotDiffReport(volumePath1, finalFromSnap,
             finalToSnap));
-    assertTrue(exception.getMessage().contains(errorMsg));
+    assertThat(exception.getMessage()).contains(errorMsg);
   }
 
   @Test
   void testSetTimes() throws Exception {
-    // Create a file
     OzoneBucket bucket1 =
-        TestDataUtil.createVolumeAndBucket(client, bucketLayout);
+        DataTestUtil.createVolumeAndBucket(client, bucketLayout);
     Path volumePath1 = new Path(OZONE_URI_DELIMITER, bucket1.getVolumeName());
     Path bucketPath1 = new Path(volumePath1, bucket1.getName());
-    Path path = new Path(bucketPath1, "key1");
+    setTimes(bucketPath1);
+  }
+
+  @Test
+  public void testSetTimesForLinkedBucketPath() throws Exception {
+    // Create a file
+    OzoneBucket sourceBucket =
+        DataTestUtil.createVolumeAndBucket(client, bucketLayout);
+    Path volumePath1 =
+        new Path(OZONE_URI_DELIMITER, sourceBucket.getVolumeName());
+    Path sourceBucketPath = new Path(volumePath1, sourceBucket.getName());
+    Path path = new Path(sourceBucketPath, "key1");
     try (FSDataOutputStream stream = fs.create(path)) {
       stream.write(1);
     }
+    OzoneVolume sourceVol = client.getObjectStore().getVolume(sourceBucket.getVolumeName());
+    String linkBucketName = UUID.randomUUID().toString();
+    createLinkBucket(sourceVol.getName(), linkBucketName,
+        sourceVol.getName(), sourceBucket.getName());
 
+    Path linkedBucketPath = new Path(volumePath1, linkBucketName);
+    Path keyInLinkedBucket = new Path(linkedBucketPath, "key1");
+
+    // test setTimes in linked bucket path
     long mtime = 1000;
-    fs.setTimes(path, mtime, 2000);
+    fs.setTimes(keyInLinkedBucket, mtime, 2000);
 
     FileStatus fileStatus = fs.getFileStatus(path);
     // verify that mtime is updated as expected.
     assertEquals(mtime, fileStatus.getModificationTime());
 
     long mtimeDontUpdate = -1;
-    fs.setTimes(path, mtimeDontUpdate, 2000);
+    fs.setTimes(keyInLinkedBucket, mtimeDontUpdate, 2000);
 
-    fileStatus = fs.getFileStatus(path);
+    fileStatus = fs.getFileStatus(keyInLinkedBucket);
     // verify that mtime is NOT updated as expected.
     assertEquals(mtime, fileStatus.getModificationTime());
   }
 
+  @ParameterizedTest(name = "Source Replication Factor = {0}")
+  @ValueSource(shorts = { 1, 3 })
+  public void testDistcp(short sourceRepFactor) throws Exception {
+    Path srcBucketPath = createAndGetBucketPath();
+    Path insideSrcBucket = new Path(srcBucketPath, "*");
+    Path dstBucketPath = createAndGetBucketPath();
+    // create 2 files on source
+    List<String> fileNames = createFiles(srcBucketPath, 2, sourceRepFactor);
+    // Create target directory/bucket
+    fs.mkdirs(dstBucketPath);
+
+    // perform distcp
+    DistCpOptions options =
+        new DistCpOptions.Builder(Collections.singletonList(insideSrcBucket),
+            dstBucketPath).build();
+    options.appendToConf(conf);
+    Job distcpJob = new DistCp(conf, options).execute();
+    verifyCopy(dstBucketPath, distcpJob, 2, 2);
+    FileStatus sourceFileStatus = fs.listStatus(srcBucketPath)[0];
+    FileStatus dstFileStatus = fs.listStatus(dstBucketPath)[0];
+    assertEquals(sourceRepFactor, sourceFileStatus.getReplication());
+    // without preserve distcp should create file with default replication
+    assertEquals(fs.getDefaultReplication(dstBucketPath),
+        dstFileStatus.getReplication());
+
+    deleteFiles(dstBucketPath, fileNames);
+
+    // test preserve option
+    options =
+        new DistCpOptions.Builder(Collections.singletonList(insideSrcBucket),
+            dstBucketPath).preserve(DistCpOptions.FileAttribute.REPLICATION)
+            .build();
+    options.appendToConf(conf);
+    distcpJob = new DistCp(conf, options).execute();
+    verifyCopy(dstBucketPath, distcpJob, 2, 2);
+    dstFileStatus = fs.listStatus(dstBucketPath)[0];
+    // src and dst should have same replication
+    assertEquals(sourceRepFactor, dstFileStatus.getReplication());
+
+    // test if copy is skipped due to matching checksums
+    assertFalse(options.shouldSkipCRC());
+    distcpJob = new DistCp(conf, options).execute();
+    verifyCopy(dstBucketPath, distcpJob, 0, 2);
+  }
+
+  private void verifyCopy(Path dstBucketPath, Job distcpJob,
+      long expectedFilesToBeCopied, long expectedTotalFilesInDest) throws IOException {
+    long filesCopied =
+        distcpJob.getCounters().findCounter(CopyMapper.Counter.COPY).getValue();
+    FileStatus[] destinationFileStatus = fs.listStatus(dstBucketPath);
+    assertEquals(expectedTotalFilesInDest, destinationFileStatus.length);
+    assertEquals(expectedFilesToBeCopied, filesCopied);
+  }
+
+  private List<String> createFiles(Path srcBucketPath, int fileCount, short factor) throws IOException {
+    List<String> createdFiles = new ArrayList<>();
+    for (int i = 1; i <= fileCount; i++) {
+      String keyName = uniqueObjectName("key");
+      Path file = new Path(srcBucketPath, keyName);
+      try (FSDataOutputStream fsDataOutputStream = fs.create(file, factor)) {
+        fsDataOutputStream.writeBytes("Hello");
+      }
+      createdFiles.add(keyName);
+    }
+    return createdFiles;
+  }
+
+  private void deleteFiles(Path base, List<String> fileNames) throws IOException {
+    for (String key : fileNames) {
+      fs.delete(new Path(base, key));
+    }
+  }
 }

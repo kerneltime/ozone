@@ -1,11 +1,10 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
  *      http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -14,15 +13,28 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- *
  */
 
 package org.apache.hadoop.hdds.security.x509.certificate.authority.profile;
 
-import com.google.common.base.Preconditions;
+import static org.bouncycastle.asn1.x509.KeyPurposeId.id_kp_clientAuth;
+import static org.bouncycastle.asn1.x509.KeyPurposeId.id_kp_serverAuth;
+
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.util.AbstractMap.SimpleEntry;
+import java.util.Arrays;
+import java.util.BitSet;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.function.BiPredicate;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import org.apache.commons.codec.DecoderException;
 import org.apache.commons.codec.binary.Hex;
-import org.apache.commons.validator.routines.DomainValidator;
+import org.apache.hadoop.hdds.security.x509.certificate.utils.DnsNames;
 import org.bouncycastle.asn1.ASN1ObjectIdentifier;
 import org.bouncycastle.asn1.x500.RDN;
 import org.bouncycastle.asn1.x509.ExtendedKeyUsage;
@@ -33,22 +45,6 @@ import org.bouncycastle.asn1.x509.KeyPurposeId;
 import org.bouncycastle.asn1.x509.KeyUsage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.net.InetAddress;
-import java.net.UnknownHostException;
-import java.util.AbstractMap.SimpleEntry;
-import java.util.Arrays;
-import java.util.BitSet;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
-import java.util.function.BiPredicate;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
-
-import static org.apache.hadoop.hdds.function.Predicates.yesBi;
-import static org.bouncycastle.asn1.x509.KeyPurposeId.id_kp_clientAuth;
-import static org.bouncycastle.asn1.x509.KeyPurposeId.id_kp_serverAuth;
 
 /**
  * Ozone PKI profile.
@@ -61,9 +57,9 @@ public class DefaultProfile implements PKIProfile {
   private static final BiPredicate<Extension, PKIProfile>
       VALIDATE_KEY_USAGE = DefaultProfile::validateKeyUsage;
   private static final BiPredicate<Extension, PKIProfile>
-      VALIDATE_AUTHORITY_KEY_IDENTIFIER = yesBi();
-  private static final BiPredicate<Extension, PKIProfile> VALIDATE_LOGO_TYPE =
-      yesBi();
+      VALIDATE_AUTHORITY_KEY_IDENTIFIER = (t, u) -> true;
+  private static final BiPredicate<Extension, PKIProfile> VALIDATE_LOGO_TYPE
+      = (t, u) -> true;
   private static final Logger LOG =
       LoggerFactory.getLogger(DefaultProfile.class);
   private static final BiPredicate<Extension, PKIProfile>
@@ -237,7 +233,7 @@ public class DefaultProfile implements PKIProfile {
         return false;
       }
     case GeneralName.dNSName:
-      return DomainValidator.getInstance().isValid(value);
+      return DnsNames.isValidDnsName(value);
     case GeneralName.otherName:
       // for other name it's a general string, nothing to validate
       return true;
@@ -265,7 +261,7 @@ public class DefaultProfile implements PKIProfile {
 
   @Override
   public boolean validateExtension(Extension extension) {
-    Preconditions.checkNotNull(extension, "Extension cannot be null");
+    Objects.requireNonNull(extension, "Extension cannot be null");
 
     if (!isSupportedExtension(extension)) {
       LOG.error("Unsupported Extension found: {} ",

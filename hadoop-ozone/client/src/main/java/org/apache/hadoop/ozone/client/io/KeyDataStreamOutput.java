@@ -1,24 +1,33 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- *  with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
  *      http://www.apache.org/licenses/LICENSE-2.0
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
+
 package org.apache.hadoop.ozone.client.io;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import jakarta.annotation.Nonnull;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
 import org.apache.hadoop.fs.FSExceptionMessages;
 import org.apache.hadoop.hdds.client.ReplicationConfig;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
@@ -30,21 +39,16 @@ import org.apache.hadoop.hdds.scm.container.common.helpers.ExcludeList;
 import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
 import org.apache.hadoop.hdds.scm.pipeline.PipelineID;
 import org.apache.hadoop.hdds.scm.storage.AbstractDataStreamOutput;
+import org.apache.hadoop.hdds.scm.storage.BlockDataStreamOutput;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfoGroup;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartCommitUploadPartInfo;
 import org.apache.hadoop.ozone.om.helpers.OpenKeySession;
 import org.apache.hadoop.ozone.om.protocol.OzoneManagerProtocol;
+import org.apache.ratis.util.function.CheckedRunnable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.util.Collection;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
 
 /**
  * Maintaining a list of BlockInputStream. Write based on offset.
@@ -56,20 +60,12 @@ import java.util.UUID;
  * TODO : currently not support multi-thread access.
  */
 public class KeyDataStreamOutput extends AbstractDataStreamOutput
-    implements KeyMetadataAware {
+    implements KeyCommitOutput {
 
-  private OzoneClientConfig config;
-
-  /**
-   * Defines stream action while calling handleFlushOrClose.
-   */
-  enum StreamAction {
-    FLUSH, CLOSE, FULL
-  }
-
-  public static final Logger LOG =
+  private static final Logger LOG =
       LoggerFactory.getLogger(KeyDataStreamOutput.class);
 
+  private OzoneClientConfig config;
   private boolean closed;
 
   // how much of data is actually written yet to underlying stream
@@ -81,13 +77,12 @@ public class KeyDataStreamOutput extends AbstractDataStreamOutput
 
   private long clientID;
 
-  /**
-   * Indicates if an atomic write is required. When set to true,
-   * the amount of data written must match the declared size during the commit.
-   * A mismatch will prevent the commit from succeeding.
-   * This is essential for operations like S3 put to ensure atomicity.
-   */
-  private boolean atomicKeyCreation;
+  private List<CheckedRunnable<IOException>> preCommits = Collections.emptyList();
+
+  @Override
+  public void setPreCommits(@Nonnull List<CheckedRunnable<IOException>> preCommits) {
+    this.preCommits = preCommits;
+  }
 
   @VisibleForTesting
   public List<BlockDataStreamOutputEntry> getStreamEntries() {
@@ -109,6 +104,26 @@ public class KeyDataStreamOutput extends AbstractDataStreamOutput
     return clientID;
   }
 
+  @VisibleForTesting
+  public KeyDataStreamOutput() {
+    super(null);
+    this.config = new OzoneClientConfig();
+    OmKeyInfo info = new OmKeyInfo.Builder().setKeyName("test").build();
+    blockDataStreamOutputEntryPool =
+        new BlockDataStreamOutputEntryPool(
+            config,
+            null,
+            null,
+            null, 0,
+            false, info,
+            false,
+            null,
+            0L);
+
+    this.writeOffset = 0;
+    this.clientID = 0L;
+  }
+
   @SuppressWarnings({"parameternumber", "squid:S00107"})
   public KeyDataStreamOutput(
       OzoneClientConfig config,
@@ -117,8 +132,7 @@ public class KeyDataStreamOutput extends AbstractDataStreamOutput
       OzoneManagerProtocol omClient, int chunkSize,
       String requestId, ReplicationConfig replicationConfig,
       String uploadID, int partNumber, boolean isMultipart,
-      boolean unsafeByteBufferConversion,
-      boolean atomicKeyCreation
+      boolean unsafeByteBufferConversion
   ) {
     super(HddsClientUtils.getRetryPolicyByException(
         config.getMaxRetryCount(), config.getRetryInterval()));
@@ -128,7 +142,7 @@ public class KeyDataStreamOutput extends AbstractDataStreamOutput
         new BlockDataStreamOutputEntryPool(
             config,
             omClient,
-            requestId, replicationConfig,
+            replicationConfig,
             uploadID, partNumber,
             isMultipart, info,
             unsafeByteBufferConversion,
@@ -139,7 +153,6 @@ public class KeyDataStreamOutput extends AbstractDataStreamOutput
     // encrypted bucket.
     this.writeOffset = 0;
     this.clientID = handler.getId();
-    this.atomicKeyCreation = atomicKeyCreation;
   }
 
   /**
@@ -233,6 +246,21 @@ public class KeyDataStreamOutput extends AbstractDataStreamOutput
     return writeLen;
   }
 
+  @Override
+  public void hflush() throws IOException {
+    hsync();
+  }
+
+  @Override
+  public void hsync() throws IOException {
+    checkNotClosed();
+    final long hsyncPos = writeOffset;
+    handleFlushOrClose(KeyDataStreamOutput.StreamAction.HSYNC);
+    Preconditions.checkState(offset >= hsyncPos,
+        "offset = %s < hsyncPos = %s", offset, hsyncPos);
+    blockDataStreamOutputEntryPool.hsyncKey(hsyncPos);
+  }
+
   /**
    * It performs following actions :
    * a. Updates the committed length at datanode for the current stream in
@@ -246,7 +274,7 @@ public class KeyDataStreamOutput extends AbstractDataStreamOutput
   private void handleException(BlockDataStreamOutputEntry streamEntry,
       IOException exception) throws IOException {
     Throwable t = HddsClientUtils.checkForException(exception);
-    Preconditions.checkNotNull(t);
+    Objects.requireNonNull(t, "t == null");
     boolean retryFailure = checkForRetryFailure(t);
     boolean containerExclusionException = false;
     if (!retryFailure) {
@@ -259,7 +287,26 @@ public class KeyDataStreamOutput extends AbstractDataStreamOutput
     streamEntry.setCurrentPosition(totalSuccessfulFlushedData);
     long containerId = streamEntry.getBlockID().getContainerID();
     Collection<DatanodeDetails> failedServers = streamEntry.getFailedServers();
-    Preconditions.checkNotNull(failedServers);
+    Objects.requireNonNull(failedServers, "failedServers == null");
+    if (!containerExclusionException) {
+      BlockDataStreamOutputEntry currentStreamEntry =
+          blockDataStreamOutputEntryPool.getCurrentStreamEntry();
+      if (currentStreamEntry != null) {
+        try {
+          BlockDataStreamOutput blockDataStreamOutput =
+              (BlockDataStreamOutput) currentStreamEntry
+                  .getByteBufStreamOutput();
+          if (blockDataStreamOutput != null) {
+            blockDataStreamOutput.executePutBlock(false, false);
+            blockDataStreamOutput.watchForCommit(false);
+          }
+        } catch (IOException e) {
+          LOG.error(
+              "Failed to execute putBlock/watchForCommit. " +
+                  "Continuing to write chunks" + "in new block", e);
+        }
+      }
+    }
     ExcludeList excludeList = blockDataStreamOutputEntryPool.getExcludeList();
     long bufferedDataLen = blockDataStreamOutputEntryPool.computeBufferData();
     if (!failedServers.isEmpty()) {
@@ -376,6 +423,9 @@ public class KeyDataStreamOutput extends AbstractDataStreamOutput
     case FLUSH:
       entry.flush();
       break;
+    case HSYNC:
+      entry.hsync();
+      break;
     default:
       throw new IOException("Invalid Operation");
     }
@@ -397,11 +447,8 @@ public class KeyDataStreamOutput extends AbstractDataStreamOutput
       if (!isException()) {
         Preconditions.checkArgument(writeOffset == offset);
       }
-      if (atomicKeyCreation) {
-        long expectedSize = blockDataStreamOutputEntryPool.getDataSize();
-        Preconditions.checkArgument(expectedSize == offset,
-            String.format("Expected: %d and actual %d write sizes do not match",
-                expectedSize, offset));
+      for (CheckedRunnable<IOException> preCommit : preCommits) {
+        preCommit.run();
       }
       blockDataStreamOutputEntryPool.commitKey(offset);
     } finally {
@@ -409,8 +456,13 @@ public class KeyDataStreamOutput extends AbstractDataStreamOutput
     }
   }
 
+  @Override
   public OmMultipartCommitUploadPartInfo getCommitUploadPartInfo() {
     return blockDataStreamOutputEntryPool.getCommitUploadPartInfo();
+  }
+
+  public long getModificationTime() {
+    return blockDataStreamOutputEntryPool.getModificationTime();
   }
 
   @VisibleForTesting
@@ -438,7 +490,6 @@ public class KeyDataStreamOutput extends AbstractDataStreamOutput
     private boolean unsafeByteBufferConversion;
     private OzoneClientConfig clientConfig;
     private ReplicationConfig replicationConfig;
-    private boolean atomicKeyCreation = false;
 
     public Builder setMultipartUploadID(String uploadID) {
       this.multipartUploadID = uploadID;
@@ -485,14 +536,8 @@ public class KeyDataStreamOutput extends AbstractDataStreamOutput
       return this;
     }
 
-
     public Builder setReplicationConfig(ReplicationConfig replConfig) {
       this.replicationConfig = replConfig;
-      return this;
-    }
-
-    public Builder setAtomicKeyCreation(boolean atomicKey) {
-      this.atomicKeyCreation = atomicKey;
       return this;
     }
 
@@ -508,8 +553,7 @@ public class KeyDataStreamOutput extends AbstractDataStreamOutput
           multipartUploadID,
           multipartNumber,
           isMultipartKey,
-          unsafeByteBufferConversion,
-          atomicKeyCreation);
+          unsafeByteBufferConversion);
     }
 
   }
@@ -525,5 +569,12 @@ public class KeyDataStreamOutput extends AbstractDataStreamOutput
           ": " + FSExceptionMessages.STREAM_IS_CLOSED + " Key: "
               + blockDataStreamOutputEntryPool.getKeyName());
     }
+  }
+
+  /**
+   * Defines stream action while calling handleFlushOrClose.
+   */
+  enum StreamAction {
+    FLUSH, HSYNC, CLOSE, FULL
   }
 }

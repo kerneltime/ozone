@@ -1,14 +1,13 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,6 +17,10 @@
 
 package org.apache.hadoop.ozone.freon;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+import java.time.Duration;
+import java.util.concurrent.TimeUnit;
 import org.apache.hadoop.hdds.HddsConfigKeys;
 import org.apache.hadoop.hdds.conf.DatanodeRatisServerConfig;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
@@ -31,13 +34,9 @@ import org.apache.hadoop.hdds.scm.pipeline.PipelineManager;
 import org.apache.hadoop.ozone.MiniOzoneCluster;
 import org.apache.hadoop.ozone.container.common.transport.server.XceiverServerSpi;
 import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import picocli.CommandLine;
-
-import java.time.Duration;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Tests Freon with Pipeline destroy.
@@ -46,21 +45,16 @@ import java.util.concurrent.TimeUnit;
 public class TestFreonWithPipelineDestroy {
 
   private static MiniOzoneCluster cluster;
-  private static OzoneConfiguration conf;
 
-  /**
-   * Create a MiniDFSCluster for testing.
-   * <p>
-   * Ozone is made active by setting OZONE_ENABLED = true
-   *
-   */
   @BeforeAll
   public static void init() throws Exception {
-    conf = new OzoneConfiguration();
+    OzoneConfiguration conf = new OzoneConfiguration();
     conf.setTimeDuration(ScmConfigKeys.OZONE_SCM_PIPELINE_DESTROY_TIMEOUT,
             1, TimeUnit.SECONDS);
     conf.setTimeDuration(HddsConfigKeys.HDDS_PIPELINE_REPORT_INTERVAL,
             1, TimeUnit.SECONDS);
+    conf.setTimeDuration(ScmConfigKeys.OZONE_SCM_HEARTBEAT_PROCESS_INTERVAL, 1000, TimeUnit.MILLISECONDS);
+    conf.setInt(ScmConfigKeys.OZONE_SCM_RATIS_PIPELINE_LIMIT, 8);
     DatanodeRatisServerConfig ratisServerConfig =
         conf.getObject(DatanodeRatisServerConfig.class);
     ratisServerConfig.setRequestTimeOut(Duration.ofSeconds(3));
@@ -74,17 +68,11 @@ public class TestFreonWithPipelineDestroy {
     conf.setFromObject(raftClientConfig);
 
     cluster = MiniOzoneCluster.newBuilder(conf)
-      .setHbProcessorInterval(1000)
-      .setHbInterval(1000)
       .setNumDatanodes(3)
-      .setTotalPipelineNumLimit(8)
       .build();
     cluster.waitForClusterToBeReady();
   }
 
-  /**
-   * Shutdown MiniDFSCluster.
-   */
   @AfterAll
   public static void shutdown() {
     if (cluster != null) {
@@ -114,11 +102,10 @@ public class TestFreonWithPipelineDestroy {
         "--validate-writes"
     );
 
-    Assertions.assertEquals(1, randomKeyGenerator.getNumberOfVolumesCreated());
-    Assertions.assertEquals(1, randomKeyGenerator.getNumberOfBucketsCreated());
-    Assertions.assertEquals(1, randomKeyGenerator.getNumberOfKeysAdded());
-    Assertions.assertEquals(0,
-        randomKeyGenerator.getUnsuccessfulValidationCount());
+    assertEquals(1, randomKeyGenerator.getNumberOfVolumesCreated());
+    assertEquals(1, randomKeyGenerator.getNumberOfBucketsCreated());
+    assertEquals(1, randomKeyGenerator.getNumberOfKeysAdded());
+    assertEquals(0, randomKeyGenerator.getUnsuccessfulValidationCount());
   }
 
   private void destroyPipeline() throws Exception {
@@ -131,6 +118,6 @@ public class TestFreonWithPipelineDestroy {
     PipelineManager pipelineManager =
         cluster.getStorageContainerManager().getPipelineManager();
     Pipeline pipeline = pipelineManager.getPipeline(id);
-    pipelineManager.closePipeline(pipeline, false);
+    pipelineManager.closePipeline(pipeline.getId());
   }
 }

@@ -1,56 +1,64 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.hadoop.ozone.container.common.statemachine;
 
+import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.BLOCK_DELETE_COMMAND_WORKER_INTERVAL;
+import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.BLOCK_DELETE_COMMAND_WORKER_INTERVAL_DEFAULT;
+import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.CONTAINER_DELETE_THREADS_DEFAULT;
+import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.CONTAINER_DELETE_THREADS_MAX_KEY;
+import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.DISK_CHECK_MIN_GAP_DEFAULT;
+import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.DISK_CHECK_MIN_GAP_KEY;
+import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.DISK_CHECK_TIMEOUT_DEFAULT;
+import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.DISK_CHECK_TIMEOUT_KEY;
+import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.FAILED_DATA_VOLUMES_TOLERATED_KEY;
+import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.FAILED_DB_VOLUMES_TOLERATED_KEY;
+import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.FAILED_METADATA_VOLUMES_TOLERATED_KEY;
+import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.FAILED_VOLUMES_TOLERATED_DEFAULT;
+import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.GRPC_SO_BACKLOG_DEFAULT;
+import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.GRPC_SO_BACKLOG_KEY;
+import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.HDDS_DATANODE_VOLUME_MIN_FREE_SPACE_HARD_LIMIT_PERCENT_DEFAULT;
+import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.HDDS_DATANODE_VOLUME_MIN_FREE_SPACE_PERCENT_DEFAULT;
+import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.PERIODIC_DISK_CHECK_INTERVAL_MINUTES_DEFAULT;
+import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.PERIODIC_DISK_CHECK_INTERVAL_MINUTES_KEY;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+import java.util.concurrent.TimeUnit;
 import org.apache.hadoop.hdds.conf.DatanodeRatisServerConfig;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
 import org.apache.hadoop.hdds.scm.pipeline.MockPipeline;
 import org.apache.hadoop.ozone.OzoneConfigKeys;
 import org.apache.hadoop.ozone.container.common.ContainerTestUtils;
+import org.apache.ozone.test.GenericTestUtils.LogCapturer;
 import org.apache.ratis.conf.RaftProperties;
 import org.apache.ratis.server.RaftServerConfigKeys;
 import org.apache.ratis.util.TimeDuration;
 import org.junit.jupiter.api.Test;
-
-import java.util.concurrent.TimeUnit;
-
-import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.CONTAINER_DELETE_THREADS_DEFAULT;
-import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.CONTAINER_DELETE_THREADS_MAX_KEY;
-import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.DISK_CHECK_MIN_GAP_KEY;
-import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.DISK_CHECK_MIN_GAP_DEFAULT;
-import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.DISK_CHECK_TIMEOUT_DEFAULT;
-import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.DISK_CHECK_TIMEOUT_KEY;
-import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.FAILED_DB_VOLUMES_TOLERATED_KEY;
-import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.PERIODIC_DISK_CHECK_INTERVAL_MINUTES_KEY;
-import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.PERIODIC_DISK_CHECK_INTERVAL_MINUTES_DEFAULT;
-import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.FAILED_DATA_VOLUMES_TOLERATED_KEY;
-import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.FAILED_METADATA_VOLUMES_TOLERATED_KEY;
-import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.FAILED_VOLUMES_TOLERATED_DEFAULT;
-import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.BLOCK_DELETE_COMMAND_WORKER_INTERVAL;
-import static org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration.BLOCK_DELETE_COMMAND_WORKER_INTERVAL_DEFAULT;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Test for {@link DatanodeConfiguration}.
  */
 public class TestDatanodeConfiguration {
+
+  private static final long[] CAPACITIES = {100_000, 1_000_000, 10_000_000};
 
   @Test
   public void acceptsValidValues() {
@@ -151,6 +159,11 @@ public class TestDatanodeConfiguration {
   public void isCreatedWitDefaultValues() {
     // GIVEN
     OzoneConfiguration conf = new OzoneConfiguration();
+    // unset over-ridding configuration from ozone-site.xml defined for the test module
+    conf.unset(DatanodeConfiguration.HDDS_DATANODE_VOLUME_MIN_FREE_SPACE); // set in ozone-site.xml
+
+    // Capture logs to verify no warnings are generated
+    LogCapturer logCapturer = LogCapturer.captureLogs(DatanodeConfiguration.class);
 
     // WHEN
     DatanodeConfiguration subject = conf.getObject(DatanodeConfiguration.class);
@@ -172,13 +185,129 @@ public class TestDatanodeConfiguration {
         subject.getDiskCheckTimeout());
     assertEquals(BLOCK_DELETE_COMMAND_WORKER_INTERVAL_DEFAULT,
         subject.getBlockDeleteCommandWorkerInterval());
+    assertEquals(DatanodeConfiguration.getDefaultFreeSpace(), subject.getMinFreeSpace());
+    assertEquals(HDDS_DATANODE_VOLUME_MIN_FREE_SPACE_PERCENT_DEFAULT, subject.getMinFreeSpaceRatio());
+    assertEquals(HDDS_DATANODE_VOLUME_MIN_FREE_SPACE_HARD_LIMIT_PERCENT_DEFAULT,
+        subject.getMinFreeSpaceHardLimitRatio());
+    final long oneGB = 1024 * 1024 * 1024;
+    // capacity is less, consider default min_free_space
+    assertEquals(DatanodeConfiguration.getDefaultFreeSpace(), subject.getMinFreeSpace(oneGB));
+    assertEquals(DatanodeConfiguration.getDefaultFreeSpace(), subject.getHardLimitMinFreeSpace(oneGB));
+    assertEquals(0L, subject.getSoftBandMinFreeSpaceWidth(oneGB));
+    // capacity is large, consider min_free_space_percent, max(min_free_space, min_free_space_percent * capacity)ß
+    assertEquals(HDDS_DATANODE_VOLUME_MIN_FREE_SPACE_PERCENT_DEFAULT * oneGB * oneGB,
+        subject.getMinFreeSpace(oneGB * oneGB));
+    assertEquals(HDDS_DATANODE_VOLUME_MIN_FREE_SPACE_HARD_LIMIT_PERCENT_DEFAULT * oneGB * oneGB,
+        subject.getHardLimitMinFreeSpace(oneGB * oneGB));
+    // e.g. 2000GB: 40GB reported − 30GB hard = 10GB soft bandwidth (derived, not configured)
+    assertEquals(
+        subject.getMinFreeSpace(oneGB * oneGB) - subject.getHardLimitMinFreeSpace(oneGB * oneGB),
+        subject.getSoftBandMinFreeSpaceWidth(oneGB * oneGB));
+
+    // Verify that no warnings were logged when using default values
+    String logOutput = logCapturer.getOutput();
+    assertThat(logOutput).doesNotContain("is invalid, should be between 0 and 1");
+  }
+
+  @Test
+  void rejectsInvalidMinFreeSpaceRatio() {
+    OzoneConfiguration conf = new OzoneConfiguration();
+    conf.setFloat(DatanodeConfiguration.HDDS_DATANODE_VOLUME_MIN_FREE_SPACE_PERCENT, 1.5f);
+
+    DatanodeConfiguration subject = conf.getObject(DatanodeConfiguration.class);
+
+    assertEquals(HDDS_DATANODE_VOLUME_MIN_FREE_SPACE_PERCENT_DEFAULT, subject.getMinFreeSpaceRatio());
+  }
+
+  @Test
+  void useMaxIfBothMinFreeSpacePropertiesSet() {
+    OzoneConfiguration conf = new OzoneConfiguration();
+    int minFreeSpace = 10000;
+    conf.setLong(DatanodeConfiguration.HDDS_DATANODE_VOLUME_MIN_FREE_SPACE, minFreeSpace);
+    conf.setFloat(DatanodeConfiguration.HDDS_DATANODE_VOLUME_MIN_FREE_SPACE_PERCENT, .5f);
+
+    DatanodeConfiguration subject = conf.getObject(DatanodeConfiguration.class);
+
+    assertEquals(minFreeSpace, subject.getMinFreeSpace());
+    assertEquals(.5f, subject.getMinFreeSpaceRatio());
+
+    for (long capacity : CAPACITIES) {
+      // disk percent is higher than minFreeSpace configured 10000 bytes
+      assertEquals((long)(capacity * 0.5f), subject.getMinFreeSpace(capacity));
+    }
+  }
+
+  /**
+   * If hard limit percent is greater than soft (reported) percent, {@link DatanodeConfiguration}
+   * uses the hard threshold for SCM-reported spare as well, so there is no negative "soft band".
+   */
+  @Test
+  void whenHardRatioExceedsSoftRatioReportedSpareMatchesHardOnly() {
+    OzoneConfiguration conf = new OzoneConfiguration();
+    conf.unset(DatanodeConfiguration.HDDS_DATANODE_VOLUME_MIN_FREE_SPACE);
+    conf.setFloat(DatanodeConfiguration.HDDS_DATANODE_VOLUME_MIN_FREE_SPACE_PERCENT, 0.01f);
+    conf.setFloat(DatanodeConfiguration.HDDS_DATANODE_VOLUME_MIN_FREE_SPACE_HARD_LIMIT_PERCENT, 0.02f);
+
+    DatanodeConfiguration subject = conf.getObject(DatanodeConfiguration.class);
+    long capacityBytes = 1000L * 1024 * 1024 * 1024;
+
+    assertEquals(subject.getHardLimitMinFreeSpace(capacityBytes),
+        subject.getMinFreeSpace(capacityBytes));
+    assertEquals(0L, subject.getSoftBandMinFreeSpaceWidth(capacityBytes));
+  }
+
+  @Test
+  void rejectsInvalidMinFreeSpaceHardLimitRatio() {
+    OzoneConfiguration conf = new OzoneConfiguration();
+    conf.setFloat(DatanodeConfiguration.HDDS_DATANODE_VOLUME_MIN_FREE_SPACE_HARD_LIMIT_PERCENT, 1.5f);
+    DatanodeConfiguration subject = conf.getObject(DatanodeConfiguration.class);
+    assertEquals(HDDS_DATANODE_VOLUME_MIN_FREE_SPACE_HARD_LIMIT_PERCENT_DEFAULT,
+        subject.getMinFreeSpaceHardLimitRatio());
+  }
+
+  @ParameterizedTest
+  @ValueSource(longs = {1_000, 10_000, 100_000})
+  void usesFixedMinFreeSpace(long bytes) {
+    OzoneConfiguration conf = new OzoneConfiguration();
+    conf.setLong(DatanodeConfiguration.HDDS_DATANODE_VOLUME_MIN_FREE_SPACE, bytes);
+    // keeping %cent low so that min free space is picked up
+    conf.setFloat(DatanodeConfiguration.HDDS_DATANODE_VOLUME_MIN_FREE_SPACE_PERCENT, 0.00001f);
+    conf.setFloat(DatanodeConfiguration.HDDS_DATANODE_VOLUME_MIN_FREE_SPACE_HARD_LIMIT_PERCENT,
+        0.00001f);
+
+    DatanodeConfiguration subject = conf.getObject(DatanodeConfiguration.class);
+
+    assertEquals(bytes, subject.getMinFreeSpace());
+
+    for (long capacity : CAPACITIES) {
+      assertEquals(bytes, subject.getMinFreeSpace(capacity));
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(ints = {1, 10, 100})
+  void calculatesMinFreeSpaceRatio(int percent) {
+    OzoneConfiguration conf = new OzoneConfiguration();
+    // keeping min free space low so that %cent is picked up after calculation
+    conf.set(DatanodeConfiguration.HDDS_DATANODE_VOLUME_MIN_FREE_SPACE, "1000"); // set in ozone-site.xml
+    float softRatio = percent / 100.0f;
+    conf.setFloat(DatanodeConfiguration.HDDS_DATANODE_VOLUME_MIN_FREE_SPACE_PERCENT, softRatio);
+    conf.setFloat(DatanodeConfiguration.HDDS_DATANODE_VOLUME_MIN_FREE_SPACE_HARD_LIMIT_PERCENT,
+        Math.min(softRatio, 0.01f));
+
+    DatanodeConfiguration subject = conf.getObject(DatanodeConfiguration.class);
+
+    assertEquals(percent / 100.0f, subject.getMinFreeSpaceRatio());
+    for (long capacity : CAPACITIES) {
+      assertEquals(capacity * percent / 100, subject.getMinFreeSpace(capacity));
+    }
   }
 
   @Test
   public void testConf() throws Exception {
     final OzoneConfiguration conf = new OzoneConfiguration();
     final String dir = "dummy/dir";
-    conf.set(OzoneConfigKeys.DFS_CONTAINER_RATIS_DATANODE_STORAGE_DIR, dir);
+    conf.set(OzoneConfigKeys.HDDS_CONTAINER_RATIS_DATANODE_STORAGE_DIR, dir);
 
     final DatanodeRatisServerConfig ratisConf = conf.getObject(
         DatanodeRatisServerConfig.class);
@@ -199,5 +328,35 @@ public class TestDatanodeConfiguration {
     final TimeDuration t = RaftServerConfigKeys.Log.Appender.waitTimeMin(p);
     assertEquals(expected, t,
         RaftServerConfigKeys.Log.Appender.WAIT_TIME_MIN_KEY);
+  }
+
+  @Test
+  void testGrpcSoBacklogDefault() {
+    OzoneConfiguration conf = new OzoneConfiguration();
+
+    DatanodeConfiguration subject = conf.getObject(DatanodeConfiguration.class);
+
+    assertEquals(GRPC_SO_BACKLOG_DEFAULT, subject.getGrpcSoBacklog());
+  }
+
+  @Test
+  void testGrpcSoBacklogCustomValue() {
+    OzoneConfiguration conf = new OzoneConfiguration();
+    int customSoBacklog = 256;
+    conf.setInt(GRPC_SO_BACKLOG_KEY, customSoBacklog);
+
+    DatanodeConfiguration subject = conf.getObject(DatanodeConfiguration.class);
+
+    assertEquals(customSoBacklog, subject.getGrpcSoBacklog());
+  }
+
+  @Test
+  void testGrpcSoBacklogSetter() {
+    OzoneConfiguration conf = new OzoneConfiguration();
+    DatanodeConfiguration subject = conf.getObject(DatanodeConfiguration.class);
+
+    subject.setGrpcSoBacklog(512);
+
+    assertEquals(512, subject.getGrpcSoBacklog());
   }
 }

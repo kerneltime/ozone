@@ -28,14 +28,6 @@
     <value>localhost</value>
   </property>
   <property>
-    <name>ozone.csi.owner</name>
-    <value>hadoop</value>
-  </property>
-  <property>
-    <name>ozone.csi.socket</name>
-    <value>/tmp/csi.sock</value>
-  </property>
-  <property>
     <name>ozone.scm.client.address</name>
     <value>localhost</value>
   </property>
@@ -74,10 +66,6 @@
   <property>
     <name>datanode.replication.port</name>
     <value>0</value>
-  </property>
-  <property>
-    <name>ozone.scm.ratis.enable</name>
-    <value>false</value>
   </property>
   <property>
     <name>hdds.container.report.interval</name>

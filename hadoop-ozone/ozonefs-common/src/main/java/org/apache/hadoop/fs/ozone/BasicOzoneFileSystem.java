@@ -1,13 +1,12 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,10 +17,41 @@
 
 package org.apache.hadoop.fs.ozone;
 
-import com.google.common.base.Preconditions;
+import static org.apache.hadoop.fs.ozone.Constants.OZONE_DEFAULT_USER;
+import static org.apache.hadoop.fs.ozone.Constants.OZONE_USER_DIR;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_FS_HSYNC_ENABLED_DEFAULT;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_FS_ITERATE_BATCH_SIZE;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_FS_ITERATE_BATCH_SIZE_DEFAULT;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_FS_LISTING_PAGE_SIZE;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_FS_LISTING_PAGE_SIZE_DEFAULT;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_FS_MAX_LISTING_PAGE_SIZE;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_SCM_BLOCK_SIZE;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_SCM_BLOCK_SIZE_DEFAULT;
+import static org.apache.hadoop.ozone.OzoneConsts.OM_SNAPSHOT_INDICATOR;
+import static org.apache.hadoop.ozone.OzoneConsts.OZONE_URI_DELIMITER;
+import static org.apache.hadoop.ozone.OzoneConsts.OZONE_URI_SCHEME;
 
+import com.google.common.base.Function;
+import com.google.common.base.Preconditions;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.EnumSet;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Objects;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.BlockLocation;
+import org.apache.hadoop.fs.ContentSummary;
 import org.apache.hadoop.fs.CreateFlag;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -44,6 +74,8 @@ import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.conf.StorageUnit;
 import org.apache.hadoop.hdds.utils.LegacyHadoopConfigurationSource;
 import org.apache.hadoop.ozone.OzoneConfigKeys;
+import org.apache.hadoop.ozone.OzoneFsServerDefaults;
+import org.apache.hadoop.ozone.client.OzoneClientUtils;
 import org.apache.hadoop.ozone.client.io.SelectorOutputStream;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
 import org.apache.hadoop.ozone.om.helpers.OzoneFSUtils;
@@ -54,37 +86,6 @@ import org.apache.http.client.utils.URIBuilder;
 import org.apache.ratis.util.function.CheckedFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.FileNotFoundException;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.URI;
-import java.net.URISyntaxException;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.EnumSet;
-import java.util.Iterator;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Objects;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-import java.util.stream.Collectors;
-
-import static org.apache.hadoop.fs.ozone.Constants.OZONE_DEFAULT_USER;
-import static org.apache.hadoop.fs.ozone.Constants.OZONE_USER_DIR;
-import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_FS_HSYNC_ENABLED_DEFAULT;
-import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_FS_ITERATE_BATCH_SIZE;
-import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_FS_ITERATE_BATCH_SIZE_DEFAULT;
-import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_FS_LISTING_PAGE_SIZE;
-import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_FS_LISTING_PAGE_SIZE_DEFAULT;
-import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_FS_MAX_LISTING_PAGE_SIZE;
-import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_SCM_BLOCK_SIZE;
-import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_SCM_BLOCK_SIZE_DEFAULT;
-import static org.apache.hadoop.ozone.OzoneConsts.OM_SNAPSHOT_INDICATOR;
-import static org.apache.hadoop.ozone.OzoneConsts.OZONE_URI_DELIMITER;
-import static org.apache.hadoop.ozone.OzoneConsts.OZONE_URI_SCHEME;
 
 /**
  * The minimal Ozone Filesystem implementation.
@@ -139,19 +140,9 @@ public class BasicOzoneFileSystem extends FileSystem {
     listingPageSize = OzoneClientUtils.limitValue(listingPageSize,
         OZONE_FS_LISTING_PAGE_SIZE,
         OZONE_FS_MAX_LISTING_PAGE_SIZE);
-    isRatisStreamingEnabled = conf.getBoolean(
-        OzoneConfigKeys.OZONE_FS_DATASTREAM_ENABLED,
-        OzoneConfigKeys.OZONE_FS_DATASTREAM_ENABLED_DEFAULT);
-    streamingAutoThreshold = (int) OzoneConfiguration.of(conf).getStorageSize(
-        OzoneConfigKeys.OZONE_FS_DATASTREAM_AUTO_THRESHOLD,
-        OzoneConfigKeys.OZONE_FS_DATASTREAM_AUTO_THRESHOLD_DEFAULT,
-        StorageUnit.BYTES);
-    hsyncEnabled = conf.getBoolean(
-        OzoneConfigKeys.OZONE_FS_HSYNC_ENABLED,
-        OZONE_FS_HSYNC_ENABLED_DEFAULT);
     setConf(conf);
-    Preconditions.checkNotNull(name.getScheme(),
-        "No scheme provided in %s", name);
+    Objects.requireNonNull(name.getScheme(),
+        () -> "No scheme provided in " + name);
     Preconditions.checkArgument(getScheme().equals(name.getScheme()),
         "Invalid scheme provided in %s", name);
 
@@ -196,6 +187,15 @@ public class BasicOzoneFileSystem extends FileSystem {
       LOG.trace("Ozone URI for ozfs initialization is {}", uri);
 
       ConfigurationSource source = getConfSource();
+      isRatisStreamingEnabled = source.getBoolean(
+          OzoneConfigKeys.OZONE_FS_DATASTREAM_ENABLED,
+          OzoneConfigKeys.OZONE_FS_DATASTREAM_ENABLED_DEFAULT);
+      streamingAutoThreshold = (int) source.getStorageSize(
+          OzoneConfigKeys.OZONE_FS_DATASTREAM_AUTO_THRESHOLD,
+          OzoneConfigKeys.OZONE_FS_DATASTREAM_AUTO_THRESHOLD_DEFAULT,
+          StorageUnit.BYTES);
+      this.hsyncEnabled = OzoneFSUtils.canEnableHsync(source, true);
+      LOG.debug("hsyncEnabled = {}", hsyncEnabled);
       this.adapter =
           createAdapter(source, bucketStr,
               volumeStr, omHost, omPort);
@@ -300,7 +300,7 @@ public class BasicOzoneFileSystem extends FileSystem {
       boolean overwrite, boolean recursive, int byteWritten)
       throws IOException {
     return isRatisStreamingEnabled && byteWritten > streamingAutoThreshold ?
-        adapter.createStreamFile(key, replication, overwrite, recursive)
+        createFSDataStreamOutput(adapter.createStreamFile(key, replication, overwrite, recursive))
         : createFSOutputStream(adapter.createFile(
         key, replication, overwrite, recursive));
   }
@@ -324,6 +324,11 @@ public class BasicOzoneFileSystem extends FileSystem {
   protected OzoneFSOutputStream createFSOutputStream(
       OzoneFSOutputStream outputStream) {
     return outputStream;
+  }
+
+  protected OzoneFSDataStreamOutput createFSDataStreamOutput(
+      OzoneFSDataStreamOutput outputDataStream) {
+    return outputDataStream;
   }
 
   @Override
@@ -474,8 +479,7 @@ public class BasicOzoneFileSystem extends FileSystem {
     }
 
     if (srcStatus.isDirectory()) {
-      if (dstPath.toString()
-          .startsWith(srcPath.toString() + OZONE_URI_DELIMITER)) {
+      if (dstPath.startsWith(srcPath + OZONE_URI_DELIMITER)) {
         LOG.trace("Cannot rename a directory to a subdirectory of self");
         return false;
       }
@@ -684,28 +688,30 @@ public class BasicOzoneFileSystem extends FileSystem {
     LinkedList<FileStatus> statuses = new LinkedList<>();
     List<FileStatus> tmpStatusList;
     String startKey = "";
-
+    int entriesAdded;
     do {
       tmpStatusList =
           adapter.listStatus(pathToKey(f), false, startKey, numEntries, uri,
-              workingDir, getUsername())
+                  workingDir, getUsername(), true)
               .stream()
               .map(this::convertFileStatus)
               .collect(Collectors.toList());
-
+      entriesAdded = 0;
       if (!tmpStatusList.isEmpty()) {
         if (startKey.isEmpty() || !statuses.getLast().getPath().toString()
             .equals(tmpStatusList.get(0).getPath().toString())) {
           statuses.addAll(tmpStatusList);
+          entriesAdded += tmpStatusList.size();
         } else {
           statuses.addAll(tmpStatusList.subList(1, tmpStatusList.size()));
+          entriesAdded += tmpStatusList.size() - 1;
         }
         startKey = pathToKey(statuses.getLast().getPath());
       }
       // listStatus returns entries numEntries in size if available.
       // Any lesser number of entries indicate that the required entries have
       // exhausted.
-    } while (tmpStatusList.size() == numEntries);
+    } while (entriesAdded > 0);
 
 
     return statuses.toArray(new FileStatus[0]);
@@ -719,6 +725,12 @@ public class BasicOzoneFileSystem extends FileSystem {
   @Override
   public Path getWorkingDirectory() {
     return workingDir;
+  }
+
+  @Override
+  public Path getHomeDirectory() {
+    return makeQualified(new Path(OZONE_USER_DIR + "/"
+        + this.userName));
   }
 
   @Override
@@ -773,8 +785,15 @@ public class BasicOzoneFileSystem extends FileSystem {
     try {
       if (!allUsers) {
         Path userTrash = new Path(trashRoot, userName);
-        if (exists(userTrash) && getFileStatus(userTrash).isDirectory()) {
-          ret.add(getFileStatus(userTrash));
+        // headOp: only the entry type is needed here. Fetch once instead of
+        // calling exists()/getFileStatus() repeatedly for the same path.
+        try {
+          FileStatus userTrashStatus = getFileStatus(userTrash, true);
+          if (userTrashStatus.isDirectory()) {
+            ret.add(userTrashStatus);
+          }
+        } catch (FileNotFoundException ignored) {
+          // No trash root for this user.
         }
       } else {
         if (exists(trashRoot)) {
@@ -822,6 +841,16 @@ public class BasicOzoneFileSystem extends FileSystem {
 
   @Override
   public FileStatus getFileStatus(Path f) throws IOException {
+    return getFileStatus(f, false);
+  }
+
+  /**
+   * @param headOp when true, requests a metadata-only (type) check so the OM
+   *               skips the pipeline refresh (SCM round-trip) and datanode
+   *               sorting. Used by {@link #isDirectory(Path)}/{@link #isFile(Path)},
+   *               which only need the entry type.
+   */
+  private FileStatus getFileStatus(Path f, boolean headOp) throws IOException {
     incrementCounter(Statistic.INVOCATION_GET_FILE_STATUS, 1);
     statistics.incrementReadOps(1);
     LOG.trace("getFileStatus() path:{}", f);
@@ -830,7 +859,7 @@ public class BasicOzoneFileSystem extends FileSystem {
     FileStatus fileStatus = null;
     try {
       fileStatus = convertFileStatus(
-          adapter.getFileStatus(key, uri, qualifiedPath, getUsername()));
+          adapter.getFileStatus(key, uri, qualifiedPath, getUsername(), headOp));
     } catch (IOException ex) {
       if (ex instanceof OMException) {
         if (((OMException) ex).getResult()
@@ -855,8 +884,98 @@ public class BasicOzoneFileSystem extends FileSystem {
   }
 
   @Override
+  public ContentSummary getContentSummary(Path f) throws IOException {
+    Path qualifiedPath = f.makeQualified(uri, workingDir);
+    String key = pathToKey(qualifiedPath);
+    FileStatusAdapter status;
+    try {
+      status = adapter.getFileStatus(key, uri, qualifiedPath, getUsername());
+    } catch (OMException ex) {
+      if (ex.getResult().equals(OMException.ResultCodes.KEY_NOT_FOUND)) {
+        throw new FileNotFoundException("File not found. path:" + f);
+      }
+      throw ex;
+    }
+
+    if (status.isFile()) {
+      long length = status.getLength();
+      long spaceConsumed = status.getDiskConsumed();
+      ContentSummary.Builder builder = new ContentSummary.Builder().length(length).
+          fileCount(1).directoryCount(0).spaceConsumed(spaceConsumed);
+      applyEcPolicy(builder, status.getErasureCodingPolicy());
+      return builder.build();
+    }
+
+    long[] summary = {0, 0, 0, 1};
+    for (FileStatusAdapter s : listStatusAdapter(f)) {
+      long length = s.getLength();
+      long spaceConsumed = s.getDiskConsumed();
+      ContentSummary c;
+      if (s.isDir()) {
+        c = getContentSummary(s.getPath());
+      } else {
+        ContentSummary.Builder childBuilder = new ContentSummary.Builder().length(length).
+            fileCount(1).directoryCount(0).spaceConsumed(spaceConsumed);
+        applyEcPolicy(childBuilder, s.getErasureCodingPolicy());
+        c = childBuilder.build();
+      }
+
+      summary[0] += c.getLength();
+      summary[1] += c.getSpaceConsumed();
+      summary[2] += c.getFileCount();
+      summary[3] += c.getDirectoryCount();
+    }
+
+    ContentSummary.Builder builder = new ContentSummary.Builder().length(summary[0]).
+        fileCount(summary[2]).directoryCount(summary[3]).
+        spaceConsumed(summary[1]);
+    applyEcPolicy(builder, status.getErasureCodingPolicy());
+    return builder.build();
+  }
+
+  /**
+   * Apply the erasure coding policy on the {@link ContentSummary.Builder}.
+   * Default implementation is a no-op so that this class can compile and run
+   * against Hadoop 2, where {@code ContentSummary.Builder.erasureCodingPolicy}
+   * does not exist. The Hadoop 3 subclass overrides this to set the policy.
+   */
+  protected void applyEcPolicy(ContentSummary.Builder builder, String ecPolicy) {
+  }
+
+  private List<FileStatusAdapter> listStatusAdapter(Path f) throws IOException {
+    int numEntries = listingPageSize;
+    LinkedList<FileStatusAdapter> statuses = new LinkedList<>();
+    List<FileStatusAdapter> tmpStatusList;
+    String startKey = "";
+    int entriesAdded;
+    do {
+      tmpStatusList = adapter.listStatus(pathToKey(f), false, startKey,
+          numEntries, uri, workingDir, getUsername(), true);
+      entriesAdded = 0;
+      if (!tmpStatusList.isEmpty()) {
+        if (startKey.isEmpty() || !statuses.getLast().getPath().toString()
+            .equals(tmpStatusList.get(0).getPath().toString())) {
+          statuses.addAll(tmpStatusList);
+          entriesAdded += tmpStatusList.size();
+        } else {
+          statuses.addAll(tmpStatusList.subList(1, tmpStatusList.size()));
+          entriesAdded += tmpStatusList.size() - 1;
+        }
+        startKey = pathToKey(statuses.getLast().getPath());
+      }
+    } while (entriesAdded > 0);
+
+    return statuses;
+  }
+
+  @Override
   public short getDefaultReplication() {
     return adapter.getDefaultReplication();
+  }
+
+  @Override
+  public OzoneFsServerDefaults getServerDefaults() throws IOException {
+    return adapter.getServerDefaults();
   }
 
   @Override
@@ -912,17 +1031,25 @@ public class BasicOzoneFileSystem extends FileSystem {
   }
 
   @Override
-  @SuppressWarnings("deprecation")
   public boolean isDirectory(Path f) throws IOException {
     incrementCounter(Statistic.INVOCATION_IS_DIRECTORY);
-    return super.isDirectory(f);
+    try {
+      // headOp: only the entry type is needed, so skip the pipeline refresh.
+      return getFileStatus(f, true).isDirectory();
+    } catch (FileNotFoundException e) {
+      return false;
+    }
   }
 
   @Override
-  @SuppressWarnings("deprecation")
   public boolean isFile(Path f) throws IOException {
     incrementCounter(Statistic.INVOCATION_IS_FILE);
-    return super.isFile(f);
+    try {
+      // headOp: only the entry type is needed, so skip the pipeline refresh.
+      return getFileStatus(f, true).isFile();
+    } catch (FileNotFoundException e) {
+      return false;
+    }
   }
 
   @Override
@@ -936,13 +1063,16 @@ public class BasicOzoneFileSystem extends FileSystem {
   public RemoteIterator<LocatedFileStatus> listLocatedStatus(Path f)
       throws IOException {
     incrementCounter(Statistic.INVOCATION_LIST_LOCATED_STATUS);
-    return super.listLocatedStatus(f);
+    return new OzoneFileStatusIterator<>(f,
+        (stat) -> stat instanceof LocatedFileStatus ? (LocatedFileStatus) stat :
+            new LocatedFileStatus(stat, stat.isFile() ? new BlockLocation[0] : null),
+        false);
   }
 
   @Override
   public RemoteIterator<FileStatus> listStatusIterator(Path f)
       throws IOException {
-    return new OzoneFileStatusIterator<>(f);
+    return new OzoneFileStatusIterator<>(f, stat -> stat, true);
   }
 
   @Override
@@ -952,6 +1082,12 @@ public class BasicOzoneFileSystem extends FileSystem {
         .createSnapshot(pathToKey(path), snapshotName);
     return new Path(OzoneFSUtils.trimPathToDepth(path, PATH_DEPTH_TO_BUCKET),
         OM_SNAPSHOT_INDICATOR + OZONE_URI_DELIMITER + snapshot);
+  }
+
+  @Override
+  public void renameSnapshot(Path path, String snapshotOldName, String snapshotNewName)
+      throws IOException {
+    getAdapter().renameSnapshot(pathToKey(path), snapshotOldName, snapshotNewName);
   }
 
   @Override
@@ -982,18 +1118,24 @@ public class BasicOzoneFileSystem extends FileSystem {
     private Path p;
     private T curStat = null;
     private String startPath = "";
+    private boolean lite;
+    private Function<FileStatus, T> transformFunc;
 
     /**
      * Constructor to initialize OzoneFileStatusIterator.
      * Get the first batch of entry for iteration.
      *
      * @param p path to file/directory.
+     * @param transformFunc function to convert FileStatus into an expected type.
+     * @param lite if true it should look into fetching a lightweight keys from server.
      * @throws IOException
      */
-    private OzoneFileStatusIterator(Path p) throws IOException {
+    private OzoneFileStatusIterator(Path p, Function<FileStatus, T> transformFunc, boolean lite) throws IOException {
       this.p = p;
+      this.lite = lite;
+      this.transformFunc = transformFunc;
       // fetch the first batch of entries in the directory
-      thisListing = listFileStatus(p, startPath);
+      thisListing = listFileStatus(p, startPath, lite);
       if (thisListing != null && !thisListing.isEmpty()) {
         startPath = pathToKey(
             thisListing.get(thisListing.size() - 1).getPath());
@@ -1012,7 +1154,7 @@ public class BasicOzoneFileSystem extends FileSystem {
       while (curStat == null && hasNextNoFilter()) {
         T next;
         FileStatus fileStat = thisListing.get(i++);
-        next = (T) (fileStat);
+        next = this.transformFunc.apply(fileStat);
         curStat = next;
       }
       return curStat != null;
@@ -1030,10 +1172,9 @@ public class BasicOzoneFileSystem extends FileSystem {
         return false;
       }
       if (i >= thisListing.size()) {
-        if (startPath != null && (thisListing.size() == listingPageSize ||
-            thisListing.size() == listingPageSize - 1)) {
+        if (startPath != null && (!thisListing.isEmpty())) {
           // current listing is exhausted & fetch a new listing
-          thisListing = listFileStatus(p, startPath);
+          thisListing = listFileStatus(p, startPath, lite);
           if (thisListing != null && !thisListing.isEmpty()) {
             startPath = pathToKey(
                 thisListing.get(thisListing.size() - 1).getPath());
@@ -1068,10 +1209,11 @@ public class BasicOzoneFileSystem extends FileSystem {
    *
    * @param f
    * @param startPath
+   * @param lite if true return lightweight keys
    * @return list of file status.
    * @throws IOException
    */
-  private List<FileStatus> listFileStatus(Path f, String startPath)
+  private List<FileStatus> listFileStatus(Path f, String startPath, boolean lite)
       throws IOException {
     incrementCounter(Statistic.INVOCATION_LIST_STATUS, 1);
     statistics.incrementReadOps(1);
@@ -1079,7 +1221,7 @@ public class BasicOzoneFileSystem extends FileSystem {
     List<FileStatus> statusList;
     statusList =
         adapter.listStatus(pathToKey(f), false, startPath,
-                listingPageSize, uri, workingDir, getUsername())
+                listingPageSize, uri, workingDir, getUsername(), lite)
             .stream()
             .map(this::convertFileStatus)
             .collect(Collectors.toList());
@@ -1210,7 +1352,7 @@ public class BasicOzoneFileSystem extends FileSystem {
             }
           }
         }
-        if (keyList.size() > 0) {
+        if (!keyList.isEmpty()) {
           if (!processKey(keyList)) {
             return false;
           }

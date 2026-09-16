@@ -1,14 +1,13 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,33 +17,8 @@
 
 package org.apache.hadoop.fs.ozone;
 
-import java.io.IOException;
-import java.io.OutputStream;
-import java.util.concurrent.ThreadLocalRandom;
-
-import org.apache.hadoop.fs.FSDataOutputStream;
-import org.apache.hadoop.hdds.utils.IOUtils;
-import org.apache.hadoop.conf.StorageUnit;
-import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
-import org.apache.hadoop.fs.FSDataInputStream;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hdds.conf.OzoneConfiguration;
-import org.apache.hadoop.ozone.MiniOzoneCluster;
-import org.apache.hadoop.ozone.TestDataUtil;
-import org.apache.hadoop.ozone.client.OzoneBucket;
-import org.apache.hadoop.ozone.client.OzoneClient;
-import org.apache.hadoop.ozone.client.io.SelectorOutputStream;
-import org.apache.hadoop.ozone.om.helpers.BucketLayout;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import static org.apache.hadoop.ozone.OzoneConfigKeys.DFS_CONTAINER_RATIS_DATASTREAM_ENABLED;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_RATIS_PIPELINE_LIMIT;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.HDDS_CONTAINER_RATIS_DATASTREAM_ENABLED;
 import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_FS_DATASTREAM_AUTO_THRESHOLD;
 import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_FS_DATASTREAM_ENABLED;
 import static org.apache.hadoop.ozone.OzoneConsts.OZONE_OFS_URI_SCHEME;
@@ -53,13 +27,38 @@ import static org.apache.hadoop.ozone.OzoneConsts.OZONE_URI_DELIMITER;
 import static org.apache.hadoop.ozone.OzoneConsts.OZONE_URI_SCHEME;
 import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_DEFAULT_BUCKET_LAYOUT;
 import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_ADDRESS_KEY;
-import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_RATIS_ENABLE_KEY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+
+import java.io.IOException;
+import java.io.OutputStream;
+import java.util.concurrent.ThreadLocalRandom;
+import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
+import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hdds.conf.OzoneConfiguration;
+import org.apache.hadoop.hdds.conf.StorageUnit;
+import org.apache.hadoop.hdds.utils.IOUtils;
+import org.apache.hadoop.ozone.ClientConfigForTesting;
+import org.apache.hadoop.ozone.DataTestUtil;
+import org.apache.hadoop.ozone.MiniOzoneCluster;
+import org.apache.hadoop.ozone.client.OzoneBucket;
+import org.apache.hadoop.ozone.client.OzoneClient;
+import org.apache.hadoop.ozone.client.io.SelectorOutputStream;
+import org.apache.hadoop.ozone.om.helpers.BucketLayout;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Ozone file system tests with Streaming.
  */
-@Timeout(value = 300)
 public class TestOzoneFileSystemWithStreaming {
   private static final Logger LOG = LoggerFactory.getLogger(
       TestOzoneFileSystemWithStreaming.class);
@@ -79,28 +78,30 @@ public class TestOzoneFileSystemWithStreaming {
     final int blockSize = 2 * maxFlushSize;
     final BucketLayout layout = BucketLayout.FILE_SYSTEM_OPTIMIZED;
 
-    CONF.setBoolean(DFS_CONTAINER_RATIS_DATASTREAM_ENABLED, true);
+    CONF.setBoolean(HDDS_CONTAINER_RATIS_DATASTREAM_ENABLED, true);
     CONF.setBoolean(OZONE_FS_DATASTREAM_ENABLED, true);
     CONF.set(OZONE_FS_DATASTREAM_AUTO_THRESHOLD, AUTO_THRESHOLD + "B");
-    CONF.setBoolean(OZONE_OM_RATIS_ENABLE_KEY, true);
     CONF.set(OZONE_DEFAULT_BUCKET_LAYOUT, layout.name());
-    cluster = MiniOzoneCluster.newBuilder(CONF)
-        .setNumDatanodes(5)
-        .setTotalPipelineNumLimit(10)
+    CONF.setInt(OZONE_SCM_RATIS_PIPELINE_LIMIT, 10);
+
+    ClientConfigForTesting.newBuilder(StorageUnit.BYTES)
         .setBlockSize(blockSize)
         .setChunkSize(chunkSize)
         .setStreamBufferFlushSize(flushSize)
         .setStreamBufferMaxSize(maxFlushSize)
-        .setDataStreamBufferFlushize(maxFlushSize)
-        .setStreamBufferSizeUnit(StorageUnit.BYTES)
+        .setDataStreamBufferFlushSize(maxFlushSize)
         .setDataStreamMinPacketSize(chunkSize)
-        .setDataStreamStreamWindowSize(5 * chunkSize)
+        .setDataStreamWindowSize(5 * chunkSize)
+        .applyTo(CONF);
+
+    cluster = MiniOzoneCluster.newBuilder(CONF)
+        .setNumDatanodes(5)
         .build();
     cluster.waitForClusterToBeReady();
     client = cluster.newClient();
 
     // create a volume and a bucket to be used by OzoneFileSystem
-    bucket = TestDataUtil.createVolumeAndBucket(client, layout);
+    bucket = DataTestUtil.createVolumeAndBucket(client, layout);
   }
 
   @AfterAll
@@ -152,7 +153,7 @@ public class TestOzoneFileSystemWithStreaming {
 
     final OutputStream wrapped = out.getWrappedStream();
     LOG.info("wrapped: {}", wrapped.getClass());
-    Assertions.assertEquals(SelectorOutputStream.class, wrapped.getClass());
+    assertEquals(SelectorOutputStream.class, wrapped.getClass());
     final SelectorOutputStream<?> selector = (SelectorOutputStream<?>) wrapped;
     final boolean belowThreshold = data.length <= AUTO_THRESHOLD;
     LOG.info("data.length={}, threshold={}, belowThreshold? {}",
@@ -161,13 +162,12 @@ public class TestOzoneFileSystemWithStreaming {
 
     out.close();
     final OutputStream underlying = selector.getUnderlying();
-    Assertions.assertNotNull(underlying);
+    assertNotNull(underlying);
     LOG.info("underlying after close: {}", underlying.getClass());
     if (belowThreshold) {
-      Assertions.assertTrue(underlying instanceof OzoneFSOutputStream);
+      assertInstanceOf(CapableOzoneFSOutputStream.class, underlying);
     } else {
-      Assertions.assertEquals(OzoneFSDataStreamOutput.class,
-          underlying.getClass());
+      assertEquals(CapableOzoneFSDataStreamOutput.class, underlying.getClass());
     }
   }
 
@@ -177,10 +177,10 @@ public class TestOzoneFileSystemWithStreaming {
     LOG.info("underlying before close: {}", underlying != null ?
         underlying.getClass() : null);
     if (belowThreshold) {
-      Assertions.assertNull(underlying);
+      assertNull(underlying);
     } else {
-      Assertions.assertNotNull(underlying);
-      Assertions.assertEquals(OzoneFSDataStreamOutput.class,
+      assertNotNull(underlying);
+      assertEquals(CapableOzoneFSDataStreamOutput.class,
           underlying.getClass());
     }
   }

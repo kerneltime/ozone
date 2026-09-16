@@ -1,14 +1,13 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,19 +17,20 @@
 
 package org.apache.hadoop.ozone.om.helpers;
 
+import static java.util.Collections.singletonMap;
+import static org.apache.hadoop.ozone.OzoneAcl.AclScope.ACCESS;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
 import com.google.protobuf.ByteString;
+import java.util.ArrayList;
+import java.util.Collections;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.ozone.OzoneAcl;
-import org.apache.hadoop.ozone.storage.proto.OzoneManagerStorageProtos;
 import org.apache.hadoop.ozone.security.acl.IAccessAuthorizer;
-import org.junit.jupiter.api.Assertions;
+import org.apache.hadoop.ozone.storage.proto.OzoneManagerStorageProtos;
 import org.junit.jupiter.api.Test;
-
-import java.util.Collections;
-import java.util.HashMap;
-
-
-import static org.apache.hadoop.ozone.OzoneAcl.AclScope.ACCESS;
 
 /**
  * Class to test OmPrefixInfo.
@@ -40,7 +40,7 @@ public class TestOmPrefixInfo {
   private static OzoneManagerStorageProtos.OzoneAclInfo buildTestOzoneAclInfo(
       String aclString) {
     OzoneAcl oacl = OzoneAcl.parseAcl(aclString);
-    ByteString rights = ByteString.copyFrom(oacl.getAclBitSet().toByteArray());
+    final ByteString rights = oacl.getAclByteString();
     return OzoneManagerStorageProtos.OzoneAclInfo.newBuilder()
         .setType(OzoneManagerStorageProtos.OzoneAclInfo.OzoneAclType.USER)
         .setName(oacl.getName())
@@ -73,12 +73,15 @@ public class TestOmPrefixInfo {
       String identityString,
       IAccessAuthorizer.ACLType aclType,
       OzoneAcl.AclScope scope) {
-    return new OmPrefixInfo(path,
-        Collections.singletonList(new OzoneAcl(
+    return OmPrefixInfo.newBuilder()
+        .setName(path)
+        .setAcls(new ArrayList<>(Collections.singletonList(OzoneAcl.of(
             identityType, identityString,
-            aclType, scope)), new HashMap<>(), 10, 100);
+            scope, aclType))))
+        .setObjectID(10)
+        .setUpdateID(100)
+        .build();
   }
-
 
   @Test
   public void testCopyObject() {
@@ -91,16 +94,31 @@ public class TestOmPrefixInfo {
         ACCESS);
     OmPrefixInfo clonePrefixInfo = omPrefixInfo.copyObject();
 
-    Assertions.assertEquals(omPrefixInfo, clonePrefixInfo);
+    assertEquals(omPrefixInfo, clonePrefixInfo);
 
+    OmPrefixInfo modifiedPrefixInfo = omPrefixInfo.toBuilder()
+        .addAcls(Collections.singletonList(OzoneAcl.of(
+            IAccessAuthorizer.ACLIdentityType.USER, username,
+            ACCESS, IAccessAuthorizer.ACLType.READ)))
+        .build();
 
-    // Change acls and check.
-    omPrefixInfo.addAcl(new OzoneAcl(
-        IAccessAuthorizer.ACLIdentityType.USER, username,
-        IAccessAuthorizer.ACLType.READ, ACCESS));
+    assertNotEquals(modifiedPrefixInfo, clonePrefixInfo);
+  }
 
-    Assertions.assertNotEquals(omPrefixInfo, clonePrefixInfo);
+  @Test
+  public void testImmutability() {
+    String testPath = "/my/custom/path";
+    String username = "myuser";
+    OmPrefixInfo omPrefixInfo = getOmPrefixInfoForTest(testPath,
+        IAccessAuthorizer.ACLIdentityType.USER,
+        username,
+        IAccessAuthorizer.ACLType.WRITE,
+        ACCESS);
 
+    assertThrows(UnsupportedOperationException.class,
+        () -> omPrefixInfo.getAcls().add(OzoneAcl.of(
+            IAccessAuthorizer.ACLIdentityType.USER, username,
+            ACCESS, IAccessAuthorizer.ACLType.READ)));
   }
 
   @Test
@@ -116,10 +134,10 @@ public class TestOmPrefixInfo {
 
     OmPrefixInfo ompri = OmPrefixInfo.getFromProtobuf(prefixInfo);
 
-    Assertions.assertEquals(prefixInfoPath, ompri.getName());
-    Assertions.assertEquals(1, ompri.getMetadata().size());
-    Assertions.assertEquals(metaval, ompri.getMetadata().get(metakey));
-    Assertions.assertEquals(1, ompri.getAcls().size());
+    assertEquals(prefixInfoPath, ompri.getName());
+    assertEquals(1, ompri.getMetadata().size());
+    assertEquals(metaval, ompri.getMetadata().get(metakey));
+    assertEquals(1, ompri.getAcls().size());
   }
 
   @Test
@@ -130,11 +148,13 @@ public class TestOmPrefixInfo {
         IAccessAuthorizer.ACLIdentityType.USER,
         username, IAccessAuthorizer.ACLType.WRITE,
         ACCESS);
-    omPrefixInfo.getMetadata().put("key", "value");
+    omPrefixInfo = omPrefixInfo.toBuilder()
+        .addAllMetadata(singletonMap("key", "value"))
+        .build();
     OzoneManagerStorageProtos.PersistedPrefixInfo pi =
         omPrefixInfo.getProtobuf();
-    Assertions.assertEquals(testPath, pi.getName());
-    Assertions.assertEquals(1, pi.getAclsCount());
-    Assertions.assertEquals(1, pi.getMetadataCount());
+    assertEquals(testPath, pi.getName());
+    assertEquals(1, pi.getAclsCount());
+    assertEquals(1, pi.getMetadataCount());
   }
 }

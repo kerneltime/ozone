@@ -1,13 +1,12 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,17 +14,27 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.hadoop.hdds.scm.node;
 
 import static org.apache.hadoop.ozone.container.upgrade.UpgradeUtils.defaultLayoutVersionProto;
 
-import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.LayoutVersionProto;
-import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.SCMCommandProto;
+import jakarta.annotation.Nullable;
+import java.io.Closeable;
+import java.io.IOException;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.BiConsumer;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
+import org.apache.hadoop.hdds.protocol.DatanodeID;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeOperationalState;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos.NodeState;
+import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.LayoutVersionProto;
 import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.NodeReportProto;
 import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.PipelineReportsProto;
+import org.apache.hadoop.hdds.protocol.proto.StorageContainerDatanodeProtocolProtos.SCMCommandProto;
 import org.apache.hadoop.hdds.scm.container.ContainerID;
 import org.apache.hadoop.hdds.scm.container.placement.metrics.SCMNodeMetric;
 import org.apache.hadoop.hdds.scm.container.placement.metrics.SCMNodeStat;
@@ -39,15 +48,6 @@ import org.apache.hadoop.ozone.protocol.StorageContainerNodeProtocol;
 import org.apache.hadoop.ozone.protocol.commands.CommandForDatanode;
 import org.apache.hadoop.ozone.protocol.commands.RegisteredCommand;
 import org.apache.hadoop.ozone.protocol.commands.SCMCommand;
-
-import javax.annotation.Nullable;
-import java.io.Closeable;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
-import java.util.Collection;
-import java.util.function.BiConsumer;
 
 /**
  * A node manager supports a simple interface for managing a datanode.
@@ -74,7 +74,6 @@ import java.util.function.BiConsumer;
 public interface NodeManager extends StorageContainerNodeProtocol,
     EventHandler<CommandForDatanode>, NodeManagerMXBean, Closeable {
 
-
   /**
    * Register API without a layout version info object passed in. Useful for
    * tests.
@@ -96,8 +95,6 @@ public interface NodeManager extends StorageContainerNodeProtocol,
    * @param type The type of the SCMCommand.
    * @param scmCommand A BiConsumer that takes a DatanodeDetails and a
    *                   SCMCommand object and performs the necessary actions.
-   * @return whatever the regular register command returns with default
-   * layout version passed in.
    */
   default void registerSendCommandNotify(SCMCommandProto.Type type,
       BiConsumer<DatanodeDetails, SCMCommand<?>> scmCommand) {
@@ -116,7 +113,7 @@ public interface NodeManager extends StorageContainerNodeProtocol,
    * @param health - The health of the node
    * @return List of Datanodes that are Heartbeating SCM.
    */
-  List<DatanodeDetails> getNodes(
+  List<DatanodeInfo> getNodes(
       NodeOperationalState opState, NodeState health);
 
   /**
@@ -137,12 +134,13 @@ public interface NodeManager extends StorageContainerNodeProtocol,
   int getNodeCount(
       NodeOperationalState opState, NodeState health);
 
-  /**
-   * Get all datanodes known to SCM.
-   *
-   * @return List of DatanodeDetails known to SCM.
-   */
-  List<DatanodeDetails> getAllNodes();
+  /** @return a shadow copied list of all datanodes, sorted by {@link DatanodeID}. */
+  List<DatanodeInfo> getAllNodes();
+
+  /** @return the number of datanodes. */
+  default int getAllNodeCount() {
+    return getAllNodes().size();
+  }
 
   /**
    * Returns the aggregated node stats.
@@ -174,6 +172,42 @@ public interface NodeManager extends StorageContainerNodeProtocol,
    * @return DatanodeUsageInfo of the specified datanode
    */
   DatanodeUsageInfo getUsageInfo(DatanodeDetails dn);
+
+  /**
+   * Atomically checks if the datanode has space for a new container and records the allocation
+   * if space is available. This prevents race conditions where multiple threads check space
+   * concurrently and over-allocate.
+   *
+   * @param datanodeInfo node info of the receiving the allocation
+   * @param containerID the container being allocated
+   * @return true if space was available and allocation was recorded, false otherwise
+   */
+  boolean checkSpaceAndRecordAllocation(DatanodeInfo datanodeInfo, ContainerID containerID);
+
+  /**
+   * Records a container allocation on the given datanode.
+   * Unlike {@link #checkSpaceAndRecordAllocation}, this does not check for
+   * available space — it is called after the placement policy has already
+   * validated space and a replication command has been committed.
+   */
+  void recordAllocationForDatanode(DatanodeInfo datanodeInfo, ContainerID containerID);
+
+  /**
+   * Returns true if the datanode has at least one available container slot considering
+   * in-flight allocations tracked by PendingContainerTracker.
+   *
+   * @param datanodeInfo the datanode to check
+   * @return true if at least one slot is free
+   */
+  boolean hasAvailableSpace(DatanodeInfo datanodeInfo);
+
+  /**
+   * Removes a pending container allocation from a datanode.
+   *
+   * @param datanodeInfo info about the datanode
+   * @param containerID the container to remove from pending
+   */
+  void removePendingAllocationForDatanode(DatanodeInfo datanodeInfo, ContainerID containerID);
 
   /**
    * Return the node stat of the specified datanode.
@@ -261,16 +295,6 @@ public interface NodeManager extends StorageContainerNodeProtocol,
       ContainerID containerId) throws NodeNotFoundException;
 
   /**
-   * Remaps datanode to containers mapping to the new set of containers.
-   * @param datanodeDetails - DatanodeDetails
-   * @param containerIds - Set of containerIDs
-   * @throws NodeNotFoundException - if datanode is not known. For new datanode
-   *                        use addDatanodeInContainerMap call.
-   */
-  void setContainers(DatanodeDetails datanodeDetails,
-      Set<ContainerID> containerIds) throws NodeNotFoundException;
-
-  /**
    * Return set of containerIDs available on a datanode.
    * @param datanodeDetails DatanodeDetails
    * @return set of containerIDs
@@ -279,13 +303,10 @@ public interface NodeManager extends StorageContainerNodeProtocol,
       throws NodeNotFoundException;
 
   /**
-   * Add a {@link SCMCommand} to the command queue, which are
-   * handled by HB thread asynchronously.
-   * @param dnId datanode uuid
-   * @param command
+   * Add a {@link SCMCommand} to the command queue of the given datanode.
+   * The command will be handled by the HB thread asynchronously.
    */
-  void addDatanodeCommand(UUID dnId, SCMCommand command);
-
+  void addDatanodeCommand(DatanodeID datanodeID, SCMCommand<?> command);
 
   /**
    * send refresh command to all the healthy datanodes to refresh
@@ -324,11 +345,11 @@ public interface NodeManager extends StorageContainerNodeProtocol,
   /**
    * Get the number of commands of the given type queued in the SCM CommandQueue
    * for the given datanode.
-   * @param dnID The UUID of the datanode.
+   * @param dnID The ID of the datanode.
    * @param cmdType The Type of command to query the current count for.
    * @return The count of commands queued, or zero if none.
    */
-  int getCommandQueueCount(UUID dnID, SCMCommandProto.Type cmdType);
+  int getCommandQueueCount(DatanodeID dnID, SCMCommandProto.Type cmdType);
 
   /**
    * Get the total number of pending commands of the given type on the given
@@ -366,23 +387,13 @@ public interface NodeManager extends StorageContainerNodeProtocol,
 
   /**
    * Get list of SCMCommands in the Command Queue for a particular Datanode.
-   * @param dnID - Datanode uuid.
    * @return list of commands
    */
   // TODO: We can give better name to this method!
-  List<SCMCommand> getCommandQueue(UUID dnID);
+  List<SCMCommand<?>> getCommandQueue(DatanodeID dnID);
 
-  /**
-   * Given datanode uuid, returns the DatanodeDetails for the node.
-   *
-   * @param uuid datanode uuid
-   * @return the given datanode, or null if not found
-   */
-  @Nullable DatanodeDetails getNodeByUuid(@Nullable String uuid);
-
-  default @Nullable DatanodeDetails getNodeByUuid(@Nullable UUID uuid) {
-    return uuid != null ? getNodeByUuid(uuid.toString()) : null;
-  };
+  /** @return the datanode of the given id if it exists; otherwise, return null. */
+  @Nullable DatanodeInfo getNode(@Nullable DatanodeID id);
 
   /**
    * Given datanode address(Ipaddress or hostname), returns a list of
@@ -407,13 +418,9 @@ public interface NodeManager extends StorageContainerNodeProtocol,
    */
   NetworkTopology getClusterNetworkTopologyMap();
 
-  int minHealthyVolumeNum(List <DatanodeDetails> dnList);
-
   int totalHealthyVolumeCount();
 
   int pipelineLimit(DatanodeDetails dn);
-
-  int minPipelineLimit(List<DatanodeDetails> dn);
 
   /**
    * Gets the peers in all the pipelines for the particular datnode.
@@ -428,4 +435,21 @@ public interface NodeManager extends StorageContainerNodeProtocol,
   }
 
   default void forceNodesToHealthyReadOnly() { }
+
+  /**
+   * This API allows removal of only DECOMMISSIONED, IN_MAINTENANCE and DEAD nodes
+   * from NodeManager data structures and cleanup memory.
+   * @param datanodeDetails
+   * @throws NodeNotFoundException
+   */
+  default void removeNode(DatanodeDetails datanodeDetails) throws NodeNotFoundException, IOException {
+
+  }
+
+  int openContainerLimit(List<DatanodeDetails> datanodes);
+
+  /**
+   * SCM-side tracker for container allocations not yet reported by datanodes.
+   */
+  PendingContainerTracker getPendingContainerTracker();
 }

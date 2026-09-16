@@ -1,39 +1,38 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.hadoop.ozone.om;
 
 import com.google.protobuf.RpcController;
 import io.grpc.Status;
-import org.apache.hadoop.hdds.conf.OzoneConfiguration;
-import org.apache.hadoop.hdds.security.SecurityConfig;
-import org.apache.hadoop.ipc.RPC;
-import org.apache.hadoop.ipc.Server;
+import java.io.IOException;
+import java.util.EnumSet;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.hadoop.ipc_.RPC;
+import org.apache.hadoop.ipc_.Server;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMResponse;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Type;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerServiceGrpc.OzoneManagerServiceImplBase;
 import org.apache.hadoop.ozone.protocolPB.OzoneManagerProtocolServerSideTranslatorPB;
-import org.apache.hadoop.ozone.security.OzoneDelegationTokenSecretManager;
-import org.apache.hadoop.util.UUIDUtil;
+import org.apache.hadoop.ozone.util.UUIDUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.IOException;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Grpc Service for handling S3 gateway OzoneManagerProtocol client requests.
@@ -45,17 +44,24 @@ public class OzoneManagerServiceGrpc extends OzoneManagerServiceImplBase {
    * RpcController is not used and hence is set to null.
    */
   private static final RpcController NULL_RPC_CONTROLLER = null;
+  /**
+   * OMRequests the S3 gateway client must issue before any per-request S3
+   * identity exists: RpcClient bootstrap (OzoneClientCache.initialize ->
+   * getServiceInfo), the background CA-cert refresher, and server-defaults
+   * lookups all fetch the ServiceList before EndpointBase has set any
+   * thread-local S3Auth. These identity-free, read-only cmdTypes stay
+   * callable without S3 authentication in secure mode.
+   */
+  private static final Set<Type> S3_AUTH_EXEMPT_CMD_TYPES =
+      EnumSet.of(Type.ServiceList);
   private final OzoneManagerProtocolServerSideTranslatorPB omTranslator;
-  private final OzoneDelegationTokenSecretManager delegationTokenMgr;
-  private final SecurityConfig secConfig;
+  private final boolean s3AuthRequired;
 
   OzoneManagerServiceGrpc(
       OzoneManagerProtocolServerSideTranslatorPB omTranslator,
-      OzoneDelegationTokenSecretManager delegationTokenMgr,
-      OzoneConfiguration configuration) {
+      boolean s3AuthRequired) {
     this.omTranslator = omTranslator;
-    this.delegationTokenMgr = delegationTokenMgr;
-    this.secConfig = new SecurityConfig(configuration);
+    this.s3AuthRequired = s3AuthRequired;
   }
 
   @Override
@@ -65,9 +71,25 @@ public class OzoneManagerServiceGrpc extends OzoneManagerServiceImplBase {
     LOG.debug("OzoneManagerServiceGrpc: OzoneManagerServiceImplBase " +
         "processing s3g client submit request - for command {}",
         request.getCmdType().name());
+
+    // This endpoint carries no channel-level client authentication, so in
+    // secure mode a request acting on behalf of a user must present S3
+    // authentication (validated downstream against the caller's S3 secret);
+    // without it the request identity would be client-asserted. Only the
+    // identity-free bootstrap reads in S3_AUTH_EXEMPT_CMD_TYPES are exempt.
+    if (s3AuthRequired && !request.hasS3Authentication()
+        && !S3_AUTH_EXEMPT_CMD_TYPES.contains(request.getCmdType())) {
+      LOG.warn("Rejecting {} OMRequest without S3 authentication received" +
+          " on the S3G gRPC endpoint", request.getCmdType().name());
+      responseObserver.onError(Status.UNAUTHENTICATED
+          .withDescription("S3 authentication is required for requests to" +
+              " this endpoint in secure mode (ozone.om.s3.grpc.auth.required)")
+          .asRuntimeException());
+      return;
+    }
     AtomicInteger callCount = new AtomicInteger(0);
 
-    org.apache.hadoop.ipc.Server.getCurCall().set(new Server.Call(1,
+    org.apache.hadoop.ipc_.Server.getCurCall().set(new Server.Call(1,
         callCount.incrementAndGet(),
         null,
         null,

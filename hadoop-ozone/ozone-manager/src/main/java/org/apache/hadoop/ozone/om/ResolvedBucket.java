@@ -1,32 +1,37 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.hadoop.ozone.om;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Objects;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.om.helpers.BucketLayout;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyArgs;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.BucketArgs;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.KeyArgs;
-
-import java.util.LinkedHashMap;
-import java.util.Map;
-import java.util.Objects;
+import org.apache.hadoop.ozone.security.acl.OzoneObj;
+import org.apache.hadoop.ozone.security.acl.OzoneObjInfo;
 
 /**
  * Bundles information about a bucket, which is possibly a symlink,
@@ -42,11 +47,18 @@ public class ResolvedBucket {
   private final String realBucket;
   private final String bucketOwner;
   private final BucketLayout bucketLayout;
+  private final Collection<Pair<String, String>> linkChain;
 
   public ResolvedBucket(String requestedVolume, String requestedBucket,
       OmBucketInfo resolved) {
+    this(requestedVolume, requestedBucket, resolved, Collections.emptyList());
+  }
+
+  public ResolvedBucket(String requestedVolume, String requestedBucket,
+      OmBucketInfo resolved, Collection<Pair<String, String>> linkChain) {
     this.requestedVolume = requestedVolume;
     this.requestedBucket = requestedBucket;
+    this.linkChain = unmodifiableLinkChain(linkChain);
     if (resolved != null) {
       this.realVolume = resolved.getVolumeName();
       this.realBucket = resolved.getBucketName();
@@ -63,12 +75,28 @@ public class ResolvedBucket {
   public ResolvedBucket(String requestedVolume, String requestedBucket,
       String realVolume, String realBucket, String bucketOwner,
       BucketLayout bucketLayout) {
+    this(requestedVolume, requestedBucket, realVolume, realBucket, bucketOwner, bucketLayout,
+        Collections.emptyList());
+  }
+
+  public ResolvedBucket(String requestedVolume, String requestedBucket,
+      String realVolume, String realBucket, String bucketOwner,
+      BucketLayout bucketLayout, Collection<Pair<String, String>> linkChain) {
     this.requestedVolume = requestedVolume;
     this.requestedBucket = requestedBucket;
     this.realVolume = realVolume;
     this.realBucket = realBucket;
     this.bucketOwner = bucketOwner;
     this.bucketLayout = bucketLayout;
+    this.linkChain = unmodifiableLinkChain(linkChain);
+  }
+
+  private static Collection<Pair<String, String>> unmodifiableLinkChain(
+      Collection<Pair<String, String>> linkChain) {
+    if (linkChain == null || linkChain.isEmpty()) {
+      return Collections.emptyList();
+    }
+    return Collections.unmodifiableList(new ArrayList<>(linkChain));
   }
 
   public ResolvedBucket(Pair<String, String> requested,
@@ -102,6 +130,14 @@ public class ResolvedBucket {
     return bucketLayout;
   }
 
+  /**
+   * Ordered link buckets followed when resolving from the requested bucket to the real bucket.
+   * Each pair is {@code (volume, bucket)}. Empty when the requested bucket is not a link.
+   */
+  public Collection<Pair<String, String>> linkChain() {
+    return linkChain;
+  }
+
   public OmKeyArgs update(OmKeyArgs args) {
     return isLink()
         ? args.toBuilder()
@@ -120,6 +156,24 @@ public class ResolvedBucket {
         : args;
   }
 
+  public BucketArgs update(BucketArgs args) {
+    return isLink()
+        ? args.toBuilder()
+            .setVolumeName(realVolume())
+            .setBucketName(realBucket())
+            .build()
+        : args;
+  }
+
+  public OzoneObj update(OzoneObj ozoneObj) {
+    return isLink()
+        ? OzoneObjInfo.Builder.fromOzoneObj(ozoneObj)
+            .setVolumeName(realVolume())
+            .setBucketName(realBucket())
+            .build()
+        : ozoneObj;
+  }
+
   public boolean isLink() {
     return !Objects.equals(requestedVolume, realVolume)
         || !Objects.equals(requestedBucket, realBucket);
@@ -128,7 +182,6 @@ public class ResolvedBucket {
   public boolean isDangling() {
     return realVolume == null || realBucket == null;
   }
-
 
   public Map<String, String> audit() {
     return audit(new LinkedHashMap<>());

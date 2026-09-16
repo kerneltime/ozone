@@ -1,46 +1,46 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- *  with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
  *      http://www.apache.org/licenses/LICENSE-2.0
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package org.apache.hadoop.ozone.container.ozoneimpl;
 
+import static org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ContainerDataProto.State.CLOSED;
+import static org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ContainerDataProto.State.DELETED;
+import static org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ContainerDataProto.State.RECOVERING;
+
 import java.io.File;
 import java.io.IOException;
-
+import java.util.Objects;
 import org.apache.hadoop.hdds.conf.ConfigurationSource;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos;
+import org.apache.hadoop.hdds.scm.container.ContainerID;
 import org.apache.hadoop.hdds.scm.container.common.helpers.StorageContainerException;
-import com.google.common.base.Preconditions;
-import org.apache.hadoop.ozone.common.Storage;
+import org.apache.hadoop.ozone.common.InconsistentStorageStateException;
 import org.apache.hadoop.ozone.container.common.helpers.ContainerUtils;
 import org.apache.hadoop.ozone.container.common.impl.ContainerData;
 import org.apache.hadoop.ozone.container.common.impl.ContainerDataYaml;
 import org.apache.hadoop.ozone.container.common.impl.ContainerSet;
+import org.apache.hadoop.ozone.container.common.utils.StorageVolumeUtil;
 import org.apache.hadoop.ozone.container.common.volume.HddsVolume;
 import org.apache.hadoop.ozone.container.common.volume.MutableVolumeSet;
 import org.apache.hadoop.ozone.container.keyvalue.KeyValueContainer;
 import org.apache.hadoop.ozone.container.keyvalue.KeyValueContainerData;
-
-import static org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ContainerDataProto.State.CLOSED;
-import static org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ContainerDataProto.State.DELETED;
-import static org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos
-    .ContainerDataProto.State.RECOVERING;
-
 import org.apache.hadoop.ozone.container.keyvalue.helpers.KeyValueContainerUtil;
+import org.apache.hadoop.ozone.container.metadata.ContainerCreateInfo;
+import org.apache.hadoop.ozone.container.metadata.WitnessedContainerMetadataStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -78,18 +78,18 @@ public class ContainerReader implements Runnable {
   private final ConfigurationSource config;
   private final File hddsVolumeDir;
   private final MutableVolumeSet volumeSet;
-  private final boolean shouldDeleteRecovering;
+  private final boolean shouldDelete;
 
   public ContainerReader(
       MutableVolumeSet volSet, HddsVolume volume, ContainerSet cset,
-      ConfigurationSource conf, boolean shouldDeleteRecovering) {
-    Preconditions.checkNotNull(volume);
+      ConfigurationSource conf, boolean shouldDelete) {
+    Objects.requireNonNull(volume,  "volume == null");
     this.hddsVolume = volume;
     this.hddsVolumeDir = hddsVolume.getHddsRootDir();
     this.containerSet = cset;
     this.config = conf;
     this.volumeSet = volSet;
-    this.shouldDeleteRecovering = shouldDeleteRecovering;
+    this.shouldDelete = shouldDelete;
   }
 
   @Override
@@ -97,15 +97,14 @@ public class ContainerReader implements Runnable {
     try {
       readVolume(hddsVolumeDir);
     } catch (Throwable t) {
-      LOG.error("Caught an exception during reading container files" +
-          " from Volume {} {}", hddsVolumeDir, t);
+      LOG.error("Could not read container files from the volume {}. " +
+          "Marking the volume as failed", hddsVolumeDir, t);
       volumeSet.failVolume(hddsVolumeDir.getPath());
     }
   }
 
   public void readVolume(File hddsVolumeRootDir) {
-    Preconditions.checkNotNull(hddsVolumeRootDir, "hddsVolumeRootDir" +
-        "cannot be null");
+    Objects.requireNonNull(hddsVolumeRootDir, "hddsVolumeRootDir == null");
 
     //filtering storage directory
     File[] storageDirs = hddsVolumeRootDir.listFiles(File::isDirectory);
@@ -121,34 +120,21 @@ public class ContainerReader implements Runnable {
     // by HddsUtil#checkVolume once we have a cluster ID from SCM. No
     // operations to perform here in that case.
     if (storageDirs.length > 0) {
-      File clusterIDDir = new File(hddsVolumeRootDir,
-          hddsVolume.getClusterID());
-      // The subdirectory we should verify containers within.
-      // If this volume was formatted pre SCM HA, this will be the SCM ID.
-      // A cluster ID symlink will exist in this case only if this cluster is
-      // finalized for SCM HA.
-      // If the volume was formatted post SCM HA, this will be the cluster ID.
-      File idDir = clusterIDDir;
-      if (storageDirs.length == 1 && !clusterIDDir.exists()) {
-        // If the one directory is not the cluster ID directory, assume it is
-        // the old SCM ID directory used before SCM HA.
-        idDir = storageDirs[0];
-      } else {
-        // There are 1 or more storage directories. We only care about the
-        // cluster ID directory.
-        if (!clusterIDDir.exists()) {
-          LOG.error("Volume {} is in an inconsistent state. Expected " +
-              "clusterID directory {} not found.", hddsVolumeRootDir,
-              clusterIDDir);
-          volumeSet.failVolume(hddsVolumeRootDir.getPath());
-          return;
-        }
+      File currentDir;
+      try {
+        currentDir = StorageVolumeUtil.resolveContainerCurrentDir(hddsVolumeRootDir, 
+            hddsVolume.getClusterID(), storageDirs);
+      } catch (InconsistentStorageStateException e) {
+        LOG.error("Volume {} is in an inconsistent state. Expected " +
+                "clusterID directory {} not found.", hddsVolumeRootDir,
+            new File(hddsVolumeRootDir, hddsVolume.getClusterID()));
+        volumeSet.failVolume(hddsVolumeRootDir.getPath());
+        return;
       }
 
       LOG.info("Start to verify containers on volume {}", hddsVolumeRootDir);
-      File currentDir = new File(idDir, Storage.STORAGE_DIR_CURRENT);
       File[] containerTopDirs = currentDir.listFiles();
-      if (containerTopDirs != null) {
+      if (containerTopDirs != null && containerTopDirs.length > 0) {
         for (File containerTopDir : containerTopDirs) {
           if (containerTopDir.isDirectory()) {
             File[] containerDirs = containerTopDir.listFiles();
@@ -206,40 +192,60 @@ public class ContainerReader implements Runnable {
       throws IOException {
     switch (containerData.getContainerType()) {
     case KeyValueContainer:
-      if (containerData instanceof KeyValueContainerData) {
-        KeyValueContainerData kvContainerData = (KeyValueContainerData)
-            containerData;
-        containerData.setVolume(hddsVolume);
-        KeyValueContainerUtil.parseKVContainerData(kvContainerData, config);
-        KeyValueContainer kvContainer = new KeyValueContainer(kvContainerData,
-            config);
-        if (kvContainer.getContainerState() == RECOVERING) {
-          if (shouldDeleteRecovering) {
+      if (!(containerData instanceof KeyValueContainerData)) {
+        throw new StorageContainerException("Container File is corrupted. " +
+            "ContainerType is KeyValueContainer but cast to " +
+            "KeyValueContainerData failed. ",
+            ContainerProtos.Result.CONTAINER_METADATA_ERROR);
+      }
+
+      KeyValueContainerData kvContainerData = (KeyValueContainerData)
+          containerData;
+      containerData.setVolume(hddsVolume);
+      KeyValueContainerUtil.parseKVContainerData(kvContainerData, config);
+      KeyValueContainer kvContainer = new KeyValueContainer(kvContainerData,
+          config);
+      if (kvContainer.getContainerState() == RECOVERING) {
+        if (shouldDelete) {
+          // delete Ratis replicated RECOVERING containers
+          if (kvContainer.getContainerData().getReplicaIndex() == 0) {
+            cleanupContainer(hddsVolume, kvContainer);
+          } else {
             kvContainer.markContainerUnhealthy();
             LOG.info("Stale recovering container {} marked UNHEALTHY",
                 kvContainerData.getContainerID());
             containerSet.addContainer(kvContainer);
           }
-          return;
         }
-        if (kvContainer.getContainerState() == DELETED) {
+        return;
+      } else if (kvContainer.getContainerState() == DELETED) {
+        if (shouldDelete) {
           cleanupContainer(hddsVolume, kvContainer);
-          return;
         }
-        try {
-          containerSet.addContainer(kvContainer);
-        } catch (StorageContainerException e) {
-          if (e.getResult() != ContainerProtos.Result.CONTAINER_EXISTS) {
-            throw e;
+        return;
+      }
+
+      if (!isMatchedLastLoadedECContainer(kvContainer, containerSet.getContainerMetadataStore())) {
+        return;
+      }
+
+      try {
+        containerSet.addContainer(kvContainer);
+        // this should be the last step of this block
+        containerData.commitSpace();
+      } catch (StorageContainerException e) {
+        if (e.getResult() != ContainerProtos.Result.CONTAINER_EXISTS) {
+          throw e;
+        }
+        if (shouldDelete) {
+          KeyValueContainer existing = (KeyValueContainer) containerSet.getContainer(
+              kvContainer.getContainerData().getContainerID());
+          boolean swapped = resolveDuplicate(existing, kvContainer);
+          if (swapped) {
+            existing.getContainerData().releaseCommitSpace();
+            kvContainer.getContainerData().commitSpace();
           }
-          resolveDuplicate((KeyValueContainer) containerSet.getContainer(
-              kvContainer.getContainerData().getContainerID()), kvContainer);
         }
-      } else {
-        throw new StorageContainerException("Container File is corrupted. " +
-            "ContainerType is KeyValueContainer but cast to " +
-            "KeyValueContainerData failed. ",
-            ContainerProtos.Result.CONTAINER_METADATA_ERROR);
       }
       break;
     default:
@@ -249,7 +255,38 @@ public class ContainerReader implements Runnable {
     }
   }
 
-  private void resolveDuplicate(KeyValueContainer existing,
+  private boolean isMatchedLastLoadedECContainer(
+      KeyValueContainer kvContainer, WitnessedContainerMetadataStore containerMetadataStore) throws IOException {
+    if (null != containerMetadataStore && kvContainer.getContainerData().getReplicaIndex() != 0) {
+      ContainerCreateInfo containerCreateInfo = containerMetadataStore.getContainerCreateInfoTable()
+          .get(ContainerID.valueOf(kvContainer.getContainerData().getContainerID()));
+      // check for EC container replica index matching if db entry is present for container as last loaded,
+      // and ignore loading container if not matched.
+      // Ignore matching container replica index -1 in db as no previous replica index
+      if (null != containerCreateInfo
+          && containerCreateInfo.getReplicaIndex() != ContainerCreateInfo.INVALID_REPLICA_INDEX
+          && containerCreateInfo.getReplicaIndex() != kvContainer.getContainerData().getReplicaIndex()) {
+        LOG.info("EC Container {} with replica index {} present at path {} is not matched with DB replica index {}," +
+                " ignoring the load of the container.",
+            kvContainer.getContainerData().getContainerID(),
+            kvContainer.getContainerData().getReplicaIndex(),
+            kvContainer.getContainerData().getContainerPath(),
+            containerCreateInfo.getReplicaIndex());
+        return false;
+      }
+    }
+    // return true if not an EC container or entry not present in db or matching replica index
+    return true;
+  }
+
+  /**
+   * Resolve duplicate containers.
+   * @param existing
+   * @param toAdd
+   * @return true if the container was swapped, false otherwise
+   * @throws IOException
+   */
+  private boolean resolveDuplicate(KeyValueContainer existing,
       KeyValueContainer toAdd) throws IOException {
     if (existing.getContainerData().getReplicaIndex() != 0 ||
         toAdd.getContainerData().getReplicaIndex() != 0) {
@@ -263,7 +300,7 @@ public class ContainerReader implements Runnable {
           existing.getContainerData().getContainerID(),
           existing.getContainerData().getContainerPath(),
           toAdd.getContainerData().getContainerPath());
-      return;
+      return false;
     }
 
     long existingBCSID = existing.getBlockCommitSequenceId();
@@ -283,7 +320,7 @@ public class ContainerReader implements Runnable {
             toAdd.getContainerData().getContainerPath(), toAddState);
         KeyValueContainerUtil.removeContainer(toAdd.getContainerData(),
             hddsVolume.getConf());
-        return;
+        return false;
       } else if (toAddState == CLOSED) {
         LOG.warn("Container {} is present at {} with state CLOSED and at " +
                 "{} with state {}. Removing the latter container.",
@@ -291,7 +328,7 @@ public class ContainerReader implements Runnable {
             toAdd.getContainerData().getContainerPath(),
             existing.getContainerData().getContainerPath(), existingState);
         swapAndRemoveContainer(existing, toAdd);
-        return;
+        return true;
       }
     }
 
@@ -304,6 +341,7 @@ public class ContainerReader implements Runnable {
           toAdd.getContainerData().getContainerPath());
       KeyValueContainerUtil.removeContainer(toAdd.getContainerData(),
           hddsVolume.getConf());
+      return false;
     } else {
       LOG.warn("Container {} is present at {} with a lesser BCSID " +
               "than at {}. Removing the former container.",
@@ -311,13 +349,13 @@ public class ContainerReader implements Runnable {
           existing.getContainerData().getContainerPath(),
           toAdd.getContainerData().getContainerPath());
       swapAndRemoveContainer(existing, toAdd);
+      return true;
     }
   }
 
   private void swapAndRemoveContainer(KeyValueContainer existing,
       KeyValueContainer toAdd) throws IOException {
-    containerSet.removeContainer(
-        existing.getContainerData().getContainerID());
+    containerSet.removeContainerOnlyFromMemory(existing.getContainerData().getContainerID());
     containerSet.addContainer(toAdd);
     KeyValueContainerUtil.removeContainer(existing.getContainerData(),
         hddsVolume.getConf());

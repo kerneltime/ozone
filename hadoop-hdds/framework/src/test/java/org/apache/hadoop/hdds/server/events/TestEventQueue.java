@@ -1,37 +1,38 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.hadoop.hdds.server.events;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicLong;
+import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-
-import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
-
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Testing the basic functionality of the event queue.
@@ -124,6 +125,34 @@ public class TestEventQueue {
     eventExecutor.close();
   }
 
+  @Test
+  public void fixedThreadPoolExecutorUsesAllQueuesWithNonPowerOfTwoQueueCount() {
+    Set<Integer> selectedQueues = new HashSet<>();
+    List<BlockingQueue<Integer>> queues = new ArrayList<>();
+    for (int i = 0; i < 10; ++i) {
+      queues.add(new TrackingQueue<>(i, selectedQueues));
+    }
+    Map<String, FixedThreadPoolWithAffinityExecutor> reportExecutorMap
+        = new ConcurrentHashMap<>();
+    FixedThreadPoolWithAffinityExecutor<Integer, Integer>
+        executor = new FixedThreadPoolWithAffinityExecutor<>(
+            "non-power-of-two-queue-count", (payload, publisher) -> { },
+            queues, queue, Integer.class,
+            FixedThreadPoolWithAffinityExecutor.initializeExecutorPool(queues),
+            reportExecutorMap);
+
+    try {
+      for (int hash = 0; hash < queues.size(); ++hash) {
+        executor.onMessage((payload, publisher) -> { }, hash, queue);
+      }
+
+      assertThat(selectedQueues).containsExactlyInAnyOrder(
+          0, 1, 2, 3, 4, 5, 6, 7, 8, 9);
+    } finally {
+      executor.close();
+    }
+  }
+
   /**
    * Event handler used in tests.
    */
@@ -136,6 +165,22 @@ public class TestEventQueue {
         Thread.currentThread().interrupt();
       }
       eventTotal.getAndAdd((long) payload);
+    }
+  }
+
+  private static class TrackingQueue<T> extends LinkedBlockingQueue<T> {
+    private final int index;
+    private final Set<Integer> selectedQueues;
+
+    TrackingQueue(int index, Set<Integer> selectedQueues) {
+      this.index = index;
+      this.selectedQueues = selectedQueues;
+    }
+
+    @Override
+    public boolean add(T payload) {
+      selectedQueues.add(index);
+      return super.add(payload);
     }
   }
 

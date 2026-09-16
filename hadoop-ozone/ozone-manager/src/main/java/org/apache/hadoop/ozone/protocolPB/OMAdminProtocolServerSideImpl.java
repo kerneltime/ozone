@@ -1,36 +1,48 @@
 /*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with this
- * work for additional information regarding copyright ownership.  The ASF
- * licenses this file to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations under
- * the License.
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
+
 package org.apache.hadoop.ozone.protocolPB;
+
+import static org.apache.hadoop.hdds.utils.HddsServerUtil.getRemoteUser;
+import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.PERMISSION_DENIED;
 
 import com.google.protobuf.RpcController;
 import com.google.protobuf.ServiceException;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import org.apache.hadoop.hdds.utils.db.managed.ManagedCompactRangeOptions;
 import org.apache.hadoop.ozone.om.OzoneManager;
+import org.apache.hadoop.ozone.om.exceptions.OMException;
 import org.apache.hadoop.ozone.om.helpers.OMNodeDetails;
 import org.apache.hadoop.ozone.om.protocolPB.OMAdminProtocolPB;
 import org.apache.hadoop.ozone.om.ratis.OzoneManagerRatisServer;
 import org.apache.hadoop.ozone.om.ratis.utils.OzoneManagerRatisUtils;
+import org.apache.hadoop.ozone.om.service.CompactDBUtil;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerAdminProtocolProtos.CompactRequest;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerAdminProtocolProtos.CompactResponse;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerAdminProtocolProtos.DecommissionOMRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerAdminProtocolProtos.DecommissionOMResponse;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerAdminProtocolProtos.OMConfigurationRequest;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerAdminProtocolProtos.OMConfigurationResponse;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerAdminProtocolProtos.OMNodeInfo;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerAdminProtocolProtos.TriggerSnapshotDefragRequest;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerAdminProtocolProtos.TriggerSnapshotDefragResponse;
+import org.apache.hadoop.util.StringUtils;
 
 /**
  * This class is the server-side translator that forwards requests received on
@@ -47,6 +59,18 @@ public class OMAdminProtocolServerSideImpl implements OMAdminProtocolPB {
   @Override
   public OMConfigurationResponse getOMConfiguration(RpcController controller,
       OMConfigurationRequest request) throws ServiceException {
+
+    try {
+      if (ozoneManager.isAdminAuthorizationEnabled() &&
+          !ozoneManager.isAdmin(getRemoteUser())) {
+        throw new OMException("Only administrators are authorized to get OM configuration.", PERMISSION_DENIED);
+      }
+    } catch (IOException ex) {
+      return OMConfigurationResponse.newBuilder()
+          .setSuccess(false)
+          .setErrorMsg(ex.getMessage() == null ? StringUtils.stringifyException(ex) : ex.getMessage())
+          .build();
+    }
 
     List<OMNodeDetails> oldOMNodesList = ozoneManager.getAllOMNodesInMemory();
     List<OMNodeDetails> newOMNodesList = ozoneManager.getAllOMNodesInNewConf();
@@ -75,13 +99,6 @@ public class OMAdminProtocolServerSideImpl implements OMAdminProtocolPB {
     if (request == null) {
       return null;
     }
-    if (!ozoneManager.isRatisEnabled()) {
-      return DecommissionOMResponse.newBuilder()
-          .setSuccess(false)
-          .setErrorMsg("OM node cannot be decommissioned as Ratis is " +
-              "not enabled.")
-          .build();
-    }
 
     OzoneManagerRatisServer omRatisServer = ozoneManager.getOmRatisServer();
     OzoneManagerRatisUtils.checkLeaderStatus(ozoneManager);
@@ -95,16 +112,58 @@ public class OMAdminProtocolServerSideImpl implements OMAdminProtocolPB {
     }
 
     try {
+      if (ozoneManager.isAdminAuthorizationEnabled() &&
+          !ozoneManager.isAdmin(getRemoteUser())) {
+        throw new OMException("Only administrators are authorized to perform decommission.", PERMISSION_DENIED);
+      }
       omRatisServer.removeOMFromRatisRing(decommNode);
     } catch (IOException ex) {
       return DecommissionOMResponse.newBuilder()
           .setSuccess(false)
-          .setErrorMsg(ex.getMessage())
+          .setErrorMsg(ex.getMessage() == null ? StringUtils.stringifyException(ex) : ex.getMessage())
           .build();
     }
 
     return DecommissionOMResponse.newBuilder()
         .setSuccess(true)
         .build();
+  }
+
+  @Override
+  public CompactResponse compactDB(RpcController controller, CompactRequest compactRequest)
+      throws ServiceException {
+    try {
+      // check if table exists. IOException is thrown if table is not found.
+      ozoneManager.getMetadataManager().getStore().getTable(compactRequest.getColumnFamily());
+      ManagedCompactRangeOptions.BottommostLevelCompaction bottommostLevelCompaction =
+          CompactDBUtil.getBottommostLevelCompaction(compactRequest.getBottommostLevelCompaction());
+      ozoneManager.compactOMDB(compactRequest.getColumnFamily(), bottommostLevelCompaction);
+    } catch (IOException ex) {
+      return CompactResponse.newBuilder()
+          .setSuccess(false)
+          .setErrorMsg(ex.getMessage() == null ? StringUtils.stringifyException(ex) : ex.getMessage())
+          .build();
+    }
+
+    return CompactResponse.newBuilder()
+        .setSuccess(true).build();
+  }
+
+  @Override
+  public TriggerSnapshotDefragResponse triggerSnapshotDefrag(
+      RpcController controller, TriggerSnapshotDefragRequest request)
+      throws ServiceException {
+    try {
+      boolean result = ozoneManager.triggerSnapshotDefrag(request.getNoWait());
+      return TriggerSnapshotDefragResponse.newBuilder()
+          .setSuccess(true)
+          .setResult(result)
+          .build();
+    } catch (IOException ex) {
+      return TriggerSnapshotDefragResponse.newBuilder()
+          .setSuccess(false)
+          .setErrorMsg(ex.getMessage() == null ? StringUtils.stringifyException(ex) : ex.getMessage())
+          .build();
+    }
   }
 }

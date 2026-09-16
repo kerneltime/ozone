@@ -1,14 +1,13 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,6 +17,18 @@
 
 package org.apache.hadoop.fs.ozone;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.util.ArrayList;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.LeaseRecoverable;
@@ -27,12 +38,13 @@ import org.apache.hadoop.fs.RemoteIterator;
 import org.apache.hadoop.fs.contract.ContractTestUtils;
 import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.om.OMMetadataManager;
-import org.apache.hadoop.ozone.om.exceptions.OMException;
 import org.apache.hadoop.ozone.om.helpers.BucketLayout;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.helpers.OmDirectoryInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
+import org.apache.hadoop.ozone.om.ratis.OzoneManagerDoubleBuffer;
 import org.apache.ozone.test.GenericTestUtils;
+import org.apache.ozone.test.GenericTestUtils.LogCapturer;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -40,17 +52,6 @@ import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.FileNotFoundException;
-import java.io.IOException;
-import java.util.ArrayList;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * Ozone file system tests that are not covered by contract tests,
@@ -64,8 +65,8 @@ abstract class AbstractOzoneFileSystemTestWithFSO extends AbstractOzoneFileSyste
   private static final Logger LOG =
       LoggerFactory.getLogger(AbstractOzoneFileSystemTestWithFSO.class);
 
-  AbstractOzoneFileSystemTestWithFSO(boolean enableOMRatis) {
-    super(true, enableOMRatis, BucketLayout.FILE_SYSTEM_OPTIMIZED);
+  AbstractOzoneFileSystemTestWithFSO() {
+    super(true, BucketLayout.FILE_SYSTEM_OPTIMIZED);
   }
 
   @Test
@@ -242,6 +243,7 @@ abstract class AbstractOzoneFileSystemTestWithFSO extends AbstractOzoneFileSyste
   /**
    * Case-2) Cannot rename a directory to its own subdirectory.
    */
+  @Override
   @Test
   public void testRenameDirToItsOwnSubDir() throws Exception {
     final String root = "/root";
@@ -263,6 +265,7 @@ abstract class AbstractOzoneFileSystemTestWithFSO extends AbstractOzoneFileSyste
    * is not yet supported.
    * Fails if the (a) parent of dst does not exist or (b) parent is a file.
    */
+  @Override
   @Test
   public void testRenameDestinationParentDoesntExist() throws Exception {
     final String root = "/root_dir";
@@ -305,8 +308,8 @@ abstract class AbstractOzoneFileSystemTestWithFSO extends AbstractOzoneFileSyste
         .getModificationTime();
     // rename should change the parent directory of source and object files
     // modification time but not change modification time of the renamed file
-    assertTrue(dir1BeforeMTime < dir1AfterMTime);
-    assertTrue(dir2BeforeMTime < dir2AfterMTime);
+    assertThat(dir1BeforeMTime).isLessThan(dir1AfterMTime);
+    assertThat(dir2BeforeMTime).isLessThan(dir2AfterMTime);
     assertEquals(file1BeforeMTime, file1AfterMTime);
 
     // mv "/dir1/subdir1/" to "/dir2/subdir1/"
@@ -323,8 +326,8 @@ abstract class AbstractOzoneFileSystemTestWithFSO extends AbstractOzoneFileSyste
     dir2AfterMTime = getFs().getFileStatus(dir2).getModificationTime();
     long subdir1AfterMTime = getFs().getFileStatus(renamedSubdir1)
         .getModificationTime();
-    assertTrue(dir1BeforeMTime < dir1AfterMTime);
-    assertTrue(dir2BeforeMTime < dir2AfterMTime);
+    assertThat(dir1BeforeMTime).isLessThan(dir1AfterMTime);
+    assertThat(dir2BeforeMTime).isLessThan(dir2AfterMTime);
     assertEquals(subdir1BeforeMTime, subdir1AfterMTime);
   }
 
@@ -379,7 +382,7 @@ abstract class AbstractOzoneFileSystemTestWithFSO extends AbstractOzoneFileSyste
     long bucketAfterMTime = omBucketInfo.getModificationTime();
     long fileAfterMTime = getFs().getFileStatus(to).getModificationTime();
     if (exceptChangeMtime) {
-      assertTrue(bucketBeforeMTime < bucketAfterMTime);
+      assertThat(bucketBeforeMTime).isLessThan(bucketAfterMTime);
     } else {
       assertEquals(bucketBeforeMTime, bucketAfterMTime);
     }
@@ -434,7 +437,7 @@ abstract class AbstractOzoneFileSystemTestWithFSO extends AbstractOzoneFileSyste
     long d6ObjectID =
         verifyDirKey(volumeId, bucketId, d4ObjectID,
                 "d6", "/d1/d2/d3/d4/d6", dirKeys, omMgr);
-    assertTrue(d5ObjectID != d6ObjectID, "Wrong objectIds for sub-dirs[" + d5ObjectID + "/d5, " + d6ObjectID
+    assertNotEquals(d5ObjectID, d6ObjectID, "Wrong objectIds for sub-dirs[" + d5ObjectID + "/d5, " + d6ObjectID
         + "/d6] of same parent!");
 
     assertEquals(6, getCluster().getOzoneManager().getMetrics().getNumKeys(), "Wrong OM numKeys metrics");
@@ -495,14 +498,14 @@ abstract class AbstractOzoneFileSystemTestWithFSO extends AbstractOzoneFileSyste
   @Test
   public void testLeaseRecoverable() throws Exception {
     // Create a file
-    Path parent = new Path("/d1/d2/");
+    Path parent = new Path("/d1");
     Path source = new Path(parent, "file1");
 
     LeaseRecoverable fs = (LeaseRecoverable)getFs();
     FSDataOutputStream stream = getFs().create(source);
     try {
       // file not visible yet
-      assertThrows(OMException.class, () -> fs.isFileClosed(source));
+      assertThrows(FileNotFoundException.class, () -> fs.isFileClosed(source));
       stream.write(1);
       stream.hsync();
       // file is visible and open
@@ -517,13 +520,12 @@ abstract class AbstractOzoneFileSystemTestWithFSO extends AbstractOzoneFileSyste
 
   @Test
   public void testFSDeleteLogWarnNoExist() throws Exception {
-    GenericTestUtils.LogCapturer logCapture = GenericTestUtils.LogCapturer
-        .captureLogs(BasicOzoneClientAdapterImpl.LOG);
+    LogCapturer logCapture = LogCapturer.captureLogs(BasicOzoneClientAdapterImpl.class);
     getFs().delete(new Path("/d1/d3/noexist/"), true);
-    assertTrue(logCapture.getOutput().contains(
-        "delete key failed Unable to get file status"));
-    assertTrue(logCapture.getOutput().contains(
-        "WARN  ozone.BasicOzoneClientAdapterImpl"));
+    assertThat(logCapture.getOutput()).contains(
+        "delete key failed Unable to get file status");
+    assertThat(logCapture.getOutput()).contains(
+        "WARN  ozone.BasicOzoneClientAdapterImpl");
   }
 
   private void verifyOMFileInfoFormat(OmKeyInfo omKeyInfo, String fileName,
@@ -546,9 +548,49 @@ abstract class AbstractOzoneFileSystemTestWithFSO extends AbstractOzoneFileSyste
         " using dbKey: " + dbKey);
     assertEquals(parentId, dirInfo.getParentObjectID(), "Parent Id mismatches");
     assertEquals(dirKey, dirInfo.getName(), "Mismatches directory name");
-    assertTrue(dirInfo.getCreationTime() > 0, "Mismatches directory creation time param");
+    assertThat(dirInfo.getCreationTime()).isGreaterThan(0);
     assertEquals(dirInfo.getCreationTime(), dirInfo.getModificationTime());
     return dirInfo.getObjectID();
+  }
+
+  /**
+   * Test to reproduce "Directory Not Empty" bug using public FileSystem API.
+   * Tests both checkSubDirectoryExists() and checkSubFileExists() paths.
+   * Creates child directory and file, deletes them, then tries to delete parent.
+   */
+  @Test
+  public void testDeleteParentAfterChildDeleted() throws Exception {
+    Path parent = new Path("/parent");
+    Path childDir = new Path(parent, "childDir");
+    Path childFile = new Path(parent, "childFile");
+
+    // Create parent directory
+    assertTrue(getFs().mkdirs(parent));
+    // Create child directory (tests checkSubDirectoryExists path)
+    assertTrue(getFs().mkdirs(childDir));
+    // Create child file (tests checkSubFileExists path)
+    ContractTestUtils.touch(getFs(), childFile);
+
+    // Pause double buffer to prevent flushing deleted entries to DB
+    // This makes the bug reproduce deterministically
+    OzoneManagerDoubleBuffer doubleBuffer = getCluster().getOzoneManager()
+        .getOmRatisServer().getOmStateMachine().getOzoneManagerDoubleBuffer();
+    doubleBuffer.pause();
+
+    try {
+      // Delete child directory
+      assertTrue(getFs().delete(childDir, false), "Child directory delete should succeed");
+      // Delete child file
+      assertTrue(getFs().delete(childFile, false), "Child file delete should succeed");
+
+      // Try to delete parent directory (should succeed but may fail with the bug)
+      // Without the fix, this fails because deleted children are still in DB
+      boolean parentDeleted = getFs().delete(parent, false);
+      assertTrue(parentDeleted, "Parent delete should succeed after children deleted");
+    } finally {
+      // Unpause double buffer to avoid affecting other tests
+      doubleBuffer.unpause();
+    }
   }
 
 }

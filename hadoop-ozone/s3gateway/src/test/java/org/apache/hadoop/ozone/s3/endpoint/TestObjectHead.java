@@ -1,49 +1,76 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
+
 package org.apache.hadoop.ozone.s3.endpoint;
 
-import javax.ws.rs.core.Response;
-import java.io.IOException;
-import java.time.format.DateTimeFormatter;
-import java.util.HashMap;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.hadoop.ozone.s3.S3GatewayConfigKeys.OZONE_S3G_FSO_DIRECTORY_CREATION_ENABLED;
+import static org.apache.hadoop.ozone.s3.endpoint.EndpointBase.CACHE_CONTROL_CUSTOM;
+import static org.apache.hadoop.ozone.s3.endpoint.EndpointBase.CONTENT_DISPOSITION_CUSTOM;
+import static org.apache.hadoop.ozone.s3.endpoint.EndpointBase.CONTENT_ENCODING_CUSTOM;
+import static org.apache.hadoop.ozone.s3.endpoint.EndpointBase.CONTENT_LANGUAGE_CUSTOM;
+import static org.apache.hadoop.ozone.s3.endpoint.EndpointBase.CONTENT_TYPE_CUSTOM;
+import static org.apache.hadoop.ozone.s3.endpoint.EndpointBase.EXPIRES_CUSTOM;
+import static org.apache.hadoop.ozone.s3.endpoint.EndpointTestUtils.assertErrorResponse;
+import static org.apache.hadoop.ozone.s3.endpoint.EndpointTestUtils.assertStatus;
+import static org.apache.hadoop.ozone.s3.endpoint.EndpointTestUtils.assertSucceeds;
+import static org.apache.hadoop.ozone.s3.endpoint.EndpointTestUtils.put;
+import static org.apache.hadoop.ozone.s3.endpoint.TestObjectGet.EXPIRES1;
+import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.INVALID_ARGUMENT;
+import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.PRECOND_FAILED;
+import static org.apache.hadoop.ozone.s3.util.S3Consts.CUSTOM_METADATA_HEADER_PREFIX;
+import static org.apache.hadoop.ozone.s3.util.S3Consts.IF_MATCH_HEADER;
+import static org.apache.hadoop.ozone.s3.util.S3Consts.IF_NONE_MATCH_HEADER;
+import static org.apache.hadoop.ozone.s3.util.S3Consts.IF_UNMODIFIED_SINCE_HEADER;
+import static org.apache.hadoop.ozone.s3.util.S3Consts.TAG_COUNT_HEADER;
+import static org.apache.hadoop.ozone.s3.util.S3Consts.TAG_HEADER;
+import static org.apache.hadoop.ozone.s3.util.S3Consts.X_AMZ_CONTENT_SHA256;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
-import org.apache.hadoop.hdds.client.ReplicationConfig;
-import org.apache.hadoop.hdds.client.ReplicationFactor;
-import org.apache.hadoop.hdds.client.ReplicationType;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.stream.Stream;
+import javax.ws.rs.core.HttpHeaders;
+import javax.ws.rs.core.MultivaluedHashMap;
+import javax.ws.rs.core.MultivaluedMap;
+import javax.ws.rs.core.Response;
+import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
+import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.client.OzoneBucket;
 import org.apache.hadoop.ozone.client.OzoneClient;
 import org.apache.hadoop.ozone.client.OzoneClientStub;
-import org.apache.hadoop.ozone.client.io.OzoneOutputStream;
+import org.apache.hadoop.ozone.s3.HeaderPreprocessor;
 import org.apache.hadoop.ozone.s3.exception.OS3Exception;
-
-import static java.net.HttpURLConnection.HTTP_NOT_FOUND;
-import static java.nio.charset.StandardCharsets.UTF_8;
-import static org.apache.hadoop.ozone.s3.S3GatewayConfigKeys.OZONE_S3G_FSO_DIRECTORY_CREATION_ENABLED;
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-
-import org.apache.commons.lang3.RandomStringUtils;
+import org.apache.hadoop.ozone.s3.util.RFC1123Util;
+import org.apache.hadoop.ozone.s3.util.S3Consts;
 import org.apache.http.HttpStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 /**
  * Test head object.
@@ -52,58 +79,114 @@ public class TestObjectHead {
   private String bucketName = "b1";
   private ObjectEndpoint keyEndpoint;
   private OzoneBucket bucket;
+  private HttpHeaders headers;
 
   @BeforeEach
   public void setup() throws IOException {
-    //Create client stub and object store stub.
     OzoneClient clientStub = new OzoneClientStub();
-
-    // Create volume and bucket
     clientStub.getObjectStore().createS3Bucket(bucketName);
-
     bucket = clientStub.getObjectStore().getS3Bucket(bucketName);
+    headers = mock(HttpHeaders.class);
+    when(headers.getHeaderString(X_AMZ_CONTENT_SHA256))
+        .thenReturn("UNSIGNED-PAYLOAD");
 
-    // Create HeadBucket and setClient to OzoneClientStub
-    keyEndpoint = new ObjectEndpoint();
-    keyEndpoint.setClient(clientStub);
-    keyEndpoint.setOzoneConfiguration(new OzoneConfiguration());
+    keyEndpoint = EndpointBuilder.newObjectEndpointBuilder()
+        .setClient(clientStub)
+        .setHeaders(headers)
+        .build();
   }
 
   @Test
   public void testHeadObject() throws Exception {
     //GIVEN
-    String value = RandomStringUtils.randomAlphanumeric(32);
-    OzoneOutputStream out = bucket.createKey("key1",
-        value.getBytes(UTF_8).length,
-        ReplicationConfig.fromTypeAndFactor(ReplicationType.RATIS,
-        ReplicationFactor.ONE), new HashMap<>());
-    out.write(value.getBytes(UTF_8));
-    out.close();
+    byte[] bytes = createKey("key1");
 
     //WHEN
     Response response = keyEndpoint.head(bucketName, "key1");
 
     //THEN
-    assertEquals(200, response.getStatus());
-    assertEquals(value.getBytes(UTF_8).length,
+    assertEquals(HttpStatus.SC_OK, response.getStatus());
+    assertEquals(bytes.length,
         Long.parseLong(response.getHeaderString("Content-Length")));
 
     DateTimeFormatter.RFC_1123_DATE_TIME
         .parse(response.getHeaderString("Last-Modified"));
 
+    assertNull(response.getHeaderString(TAG_COUNT_HEADER),
+        "HeadObject must omit x-amz-tagging-count (AWS TagCount) when object has no tags");
   }
 
   @Test
   public void testHeadFailByBadName() throws Exception {
-    //Head an object that doesn't exist.
-    try {
-      Response response =  keyEndpoint.head(bucketName, "badKeyName");
-      assertEquals(404, response.getStatus());
-    } catch (OS3Exception ex) {
-      assertThat(ex.getCode()).contains("NoSuchObject");
-      assertThat(ex.getErrorMessage()).contains("object does not exist");
-      assertEquals(HTTP_NOT_FOUND, ex.getHttpCode());
-    }
+    assertStatus(HttpStatus.SC_NOT_FOUND, () -> keyEndpoint.head(bucketName, "badKeyName"));
+  }
+
+  @Test
+  public void testHeadWithNegativePartNumber() throws Exception {
+    keyEndpoint.queryParamsForTest()
+        .setInt(S3Consts.QueryParams.PART_NUMBER, -1);
+    assertErrorResponse(INVALID_ARGUMENT,
+        () -> keyEndpoint.head(bucketName, "key1"));
+  }
+
+  @Test
+  public void testHeadIfMatch() throws Exception {
+    assertSucceeds(() -> put(keyEndpoint, bucketName, "etag-key", "head-content"));
+
+    Response response = keyEndpoint.head(bucketName, "etag-key");
+    String eTag = response.getHeaderString(HttpHeaders.ETAG);
+    assertNotNull(eTag);
+
+    when(headers.getHeaderString(IF_MATCH_HEADER)).thenReturn(eTag);
+
+    response = keyEndpoint.head(bucketName, "etag-key");
+    assertEquals(HttpStatus.SC_OK, response.getStatus());
+  }
+
+  @Test
+  public void testHeadIfNoneMatchReturnsNotModified() throws Exception {
+    assertSucceeds(() -> put(keyEndpoint, bucketName, "etag-key", "head-content"));
+
+    Response response = keyEndpoint.head(bucketName, "etag-key");
+    String eTag = response.getHeaderString(HttpHeaders.ETAG);
+    assertNotNull(eTag);
+
+    when(headers.getHeaderString(IF_NONE_MATCH_HEADER)).thenReturn(eTag);
+
+    response = keyEndpoint.head(bucketName, "etag-key");
+    assertEquals(Response.Status.NOT_MODIFIED.getStatusCode(),
+        response.getStatus());
+  }
+
+  @Test
+  public void testHeadIfUnmodifiedSinceFailure() throws Exception {
+    assertSucceeds(() -> put(keyEndpoint, bucketName, "etag-key", "head-content"));
+
+    when(headers.getHeaderString(IF_UNMODIFIED_SINCE_HEADER))
+        .thenReturn(formatHttpDate(bucket.getKey("etag-key")
+            .getModificationTime().minusSeconds(60)));
+
+    OS3Exception ex = assertErrorResponse(PRECOND_FAILED,
+        () -> keyEndpoint.head(bucketName, "etag-key"));
+    assertNotNull(ex);
+  }
+
+  @Test
+  public void testHeadIgnoresIfUnmodifiedSinceAfterMatchingIfMatch()
+      throws Exception {
+    assertSucceeds(() -> put(keyEndpoint, bucketName, "etag-key", "head-content"));
+
+    Response response = keyEndpoint.head(bucketName, "etag-key");
+    String eTag = response.getHeaderString(HttpHeaders.ETAG);
+    assertNotNull(eTag);
+
+    when(headers.getHeaderString(IF_MATCH_HEADER)).thenReturn(eTag);
+    when(headers.getHeaderString(IF_UNMODIFIED_SINCE_HEADER))
+        .thenReturn(formatHttpDate(bucket.getKey("etag-key")
+            .getModificationTime().minusSeconds(60)));
+
+    response = keyEndpoint.head(bucketName, "etag-key");
+    assertEquals(HttpStatus.SC_OK, response.getStatus());
   }
 
   @Test
@@ -114,20 +197,9 @@ public class TestObjectHead {
     OzoneConfiguration config = new OzoneConfiguration();
     config.set(OZONE_S3G_FSO_DIRECTORY_CREATION_ENABLED, "true");
     keyEndpoint.setOzoneConfiguration(config);
-    String keyContent = "content";
-    OzoneOutputStream out = bucket.createKey(keyPath,
-        keyContent.getBytes(UTF_8).length,
-        ReplicationConfig.fromTypeAndFactor(ReplicationType.RATIS,
-            ReplicationFactor.ONE), new HashMap<>());
-    out.write(keyContent.getBytes(UTF_8));
-    out.close();
+    createKey(keyPath);
 
-    // WHEN
-    final Response response = keyEndpoint.head(bucketName, keyPath);
-
-    // THEN
-    assertEquals(HttpStatus.SC_OK, response.getStatus());
-    bucket.deleteKey(keyPath);
+    assertSucceeds(() -> keyEndpoint.head(bucketName, keyPath));
   }
 
   @Test
@@ -140,12 +212,7 @@ public class TestObjectHead {
     keyEndpoint.setOzoneConfiguration(config);
     bucket.createDirectory(keyPath);
 
-    // WHEN
-    final Response response = keyEndpoint.head(bucketName, keyPath);
-
-    // THEN
-    assertEquals(HttpStatus.SC_NOT_FOUND, response.getStatus());
-    bucket.deleteKey(keyPath);
+    assertStatus(HttpStatus.SC_NOT_FOUND, () -> keyEndpoint.head(bucketName, keyPath));
   }
 
   @Test
@@ -158,35 +225,112 @@ public class TestObjectHead {
     keyEndpoint.setOzoneConfiguration(config);
     bucket.createDirectory(keyPath);
 
-    // WHEN
-    final Response response = keyEndpoint.head(bucketName, keyPath);
-
     // THEN
-    assertEquals(HttpStatus.SC_OK, response.getStatus());
-    bucket.deleteKey(keyPath);
+    assertSucceeds(() -> keyEndpoint.head(bucketName, keyPath));
   }
 
   @Test
   public void testHeadWhenKeyIsAFileAndKeyPathEndsWithASlash()
       throws IOException, OS3Exception {
-    // GIVEN
     final String keyPath = "keyFile";
     OzoneConfiguration config = new OzoneConfiguration();
     config.set(OZONE_S3G_FSO_DIRECTORY_CREATION_ENABLED, "true");
     keyEndpoint.setOzoneConfiguration(config);
-    String keyContent = "content";
-    OzoneOutputStream out = bucket.createKey(keyPath,
-        keyContent.getBytes(UTF_8).length,
-        ReplicationConfig.fromTypeAndFactor(ReplicationType.RATIS,
-            ReplicationFactor.ONE), new HashMap<>());
-    out.write(keyContent.getBytes(UTF_8));
-    out.close();
+    createKey(keyPath);
 
-    // WHEN
-    final Response response = keyEndpoint.head(bucketName, keyPath + "/");
+    assertStatus(HttpStatus.SC_NOT_FOUND, () -> keyEndpoint.head(bucketName, keyPath + "/"));
+  }
 
-    // THEN
-    assertEquals(HttpStatus.SC_NOT_FOUND, response.getStatus());
-    bucket.deleteKey(keyPath);
+  @Test
+  public void testHeadObjectIncludesTagCount()
+      throws Exception {
+    String keyName = "head-with-tags";
+    when(headers.getHeaderString(TAG_HEADER)).thenReturn("tag1=value1&tag2=value2");
+    assertSucceeds(() -> put(keyEndpoint, bucketName, keyName, "c"));
+
+    Response response = keyEndpoint.head(bucketName, keyName);
+    assertEquals(HttpStatus.SC_OK, response.getStatus());
+    // S3 HeadObject TagCount in the AWS API is driven by x-amz-tagging-count
+    assertNotNull(response.getHeaderString(TAG_COUNT_HEADER),
+        "HeadObject must include x-amz-tagging-count when object has tags (AWS TagCount)");
+    assertEquals("2", response.getHeaderString(TAG_COUNT_HEADER));
+  }
+
+  @ParameterizedTest
+  @MethodSource("reservedMetadataCollisionCases")
+  public void testHeadSeparatesUserMetadataFromSystemHeader(
+      String headerName, String customKey, String systemValue, String userValue)
+      throws Exception {
+    String keyName = "reserved-" + customKey;
+    MultivaluedMap<String, String> requestHeaders = new MultivaluedHashMap<>();
+    requestHeaders.putSingle(CUSTOM_METADATA_HEADER_PREFIX + headerName.toLowerCase(), userValue);
+    when(headers.getRequestHeaders()).thenReturn(requestHeaders);
+    if (HttpHeaders.CONTENT_TYPE.equals(headerName)) {
+      when(headers.getHeaderString(HeaderPreprocessor.ORIGINAL_CONTENT_TYPE))
+          .thenReturn(systemValue);
+    } else {
+      when(headers.getHeaderString(headerName)).thenReturn(systemValue);
+    }
+
+    assertSucceeds(() -> put(keyEndpoint, bucketName, keyName, "body"));
+
+    assertEquals(systemValue, bucket.getKey(keyName).getMetadata().get(headerName));
+    assertEquals(userValue,
+        bucket.getKey(keyName).getMetadata().get(customKey));
+
+    Response response = keyEndpoint.head(bucketName, keyName);
+    assertEquals(HttpStatus.SC_OK, response.getStatus());
+    assertEquals(systemValue, response.getHeaderString(headerName));
+    assertEquals(userValue,
+        response.getHeaderString(CUSTOM_METADATA_HEADER_PREFIX + headerName.toLowerCase()));
+  }
+
+  @Test
+  public void testUserMetadataSuffixDoesNotCollideWithInternalKey() throws Exception {
+    String keyName = "reserved-cache-control-suffix";
+    MultivaluedMap<String, String> requestHeaders = new MultivaluedHashMap<>();
+    requestHeaders.putSingle(CUSTOM_METADATA_HEADER_PREFIX + "cache-control", "user-cache");
+    requestHeaders.putSingle(CUSTOM_METADATA_HEADER_PREFIX + "cache-control-custom", "suffix-value");
+    when(headers.getRequestHeaders()).thenReturn(requestHeaders);
+    when(headers.getHeaderString(HttpHeaders.CACHE_CONTROL)).thenReturn("no-cache");
+
+    assertSucceeds(() -> put(keyEndpoint, bucketName, keyName, "body"));
+
+    assertEquals("no-cache",
+        bucket.getKey(keyName).getMetadata().get(HttpHeaders.CACHE_CONTROL));
+    assertEquals("user-cache",
+        bucket.getKey(keyName).getMetadata().get(CACHE_CONTROL_CUSTOM));
+    assertEquals("suffix-value",
+        bucket.getKey(keyName).getMetadata().get("cache-control-custom"));
+
+    Response response = keyEndpoint.head(bucketName, keyName);
+    assertEquals("no-cache", response.getHeaderString(HttpHeaders.CACHE_CONTROL));
+    assertEquals("user-cache",
+        response.getHeaderString(CUSTOM_METADATA_HEADER_PREFIX + "cache-control"));
+    assertEquals("suffix-value",
+        response.getHeaderString(CUSTOM_METADATA_HEADER_PREFIX + "cache-control-custom"));
+  }
+
+  private static Stream<Arguments> reservedMetadataCollisionCases() {
+    return Stream.of(
+        Arguments.of(HttpHeaders.CONTENT_TYPE, CONTENT_TYPE_CUSTOM, "image/jpeg", "user/custom-type"),
+        Arguments.of(HttpHeaders.CACHE_CONTROL, CACHE_CONTROL_CUSTOM, "no-cache", "user-cache"),
+        Arguments.of(HttpHeaders.EXPIRES, EXPIRES_CUSTOM, EXPIRES1, "user-expires"),
+        Arguments.of(HttpHeaders.CONTENT_ENCODING, CONTENT_ENCODING_CUSTOM, "gzip", "user-encoding"),
+        Arguments.of(HttpHeaders.CONTENT_LANGUAGE, CONTENT_LANGUAGE_CUSTOM, "en-CA", "user-lang"),
+        Arguments.of(HttpHeaders.CONTENT_DISPOSITION, CONTENT_DISPOSITION_CUSTOM, "inline", "user-disp"));
+  }
+
+  private byte[] createKey(String keyPath) throws IOException {
+    byte[] bytes = RandomStringUtils.secure().nextAlphanumeric(32).getBytes(UTF_8);
+    try (OutputStream out = bucket.createKey(keyPath, bytes.length)) {
+      out.write(bytes);
+    }
+    return bytes;
+  }
+
+  private static String formatHttpDate(Instant instant) {
+    return RFC1123Util.FORMAT.format(
+        instant.atZone(ZoneId.of(OzoneConsts.OZONE_TIME_ZONE)));
   }
 }

@@ -1,27 +1,64 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.hadoop.ozone.recon.api;
 
+import static org.apache.hadoop.ozone.recon.ReconConstants.DEFAULT_FETCH_COUNT;
+import static org.apache.hadoop.ozone.recon.ReconConstants.DEFAULT_FILTER_FOR_MISSING_CONTAINERS;
+import static org.apache.hadoop.ozone.recon.ReconConstants.PREV_CONTAINER_ID_DEFAULT_VALUE;
+import static org.apache.hadoop.ozone.recon.ReconConstants.RECON_QUERY_FILTER;
+import static org.apache.hadoop.ozone.recon.ReconConstants.RECON_QUERY_LIMIT;
+import static org.apache.hadoop.ozone.recon.ReconConstants.RECON_QUERY_MAX_CONTAINER_ID;
+import static org.apache.hadoop.ozone.recon.ReconConstants.RECON_QUERY_MIN_CONTAINER_ID;
+import static org.apache.hadoop.ozone.recon.ReconConstants.RECON_QUERY_PREVKEY;
+
+import java.io.BufferedOutputStream;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.stream.Collectors;
+import javax.inject.Inject;
+import javax.ws.rs.DELETE;
+import javax.ws.rs.DefaultValue;
+import javax.ws.rs.GET;
+import javax.ws.rs.POST;
+import javax.ws.rs.Path;
+import javax.ws.rs.PathParam;
+import javax.ws.rs.Produces;
+import javax.ws.rs.QueryParam;
+import javax.ws.rs.WebApplicationException;
+import javax.ws.rs.core.MediaType;
+import javax.ws.rs.core.Response;
+import javax.ws.rs.core.StreamingOutput;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
 import org.apache.hadoop.hdds.scm.container.ContainerID;
 import org.apache.hadoop.hdds.scm.container.ContainerInfo;
-import org.apache.hadoop.hdds.scm.container.ContainerNotFoundException;
 import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
 import org.apache.hadoop.hdds.scm.pipeline.PipelineID;
 import org.apache.hadoop.hdds.scm.pipeline.PipelineManager;
@@ -31,16 +68,20 @@ import org.apache.hadoop.ozone.om.helpers.BucketLayout;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfoGroup;
+import org.apache.hadoop.ozone.recon.ReconUtils;
 import org.apache.hadoop.ozone.recon.api.types.ContainerDiscrepancyInfo;
 import org.apache.hadoop.ozone.recon.api.types.ContainerKeyPrefix;
 import org.apache.hadoop.ozone.recon.api.types.ContainerMetadata;
 import org.apache.hadoop.ozone.recon.api.types.ContainersResponse;
 import org.apache.hadoop.ozone.recon.api.types.DeletedContainerInfo;
+import org.apache.hadoop.ozone.recon.api.types.ExportJob;
 import org.apache.hadoop.ozone.recon.api.types.KeyMetadata;
 import org.apache.hadoop.ozone.recon.api.types.KeyMetadata.ContainerBlockMetadata;
 import org.apache.hadoop.ozone.recon.api.types.KeysResponse;
 import org.apache.hadoop.ozone.recon.api.types.MissingContainerMetadata;
 import org.apache.hadoop.ozone.recon.api.types.MissingContainersResponse;
+import org.apache.hadoop.ozone.recon.api.types.QuasiClosedContainerMetadata;
+import org.apache.hadoop.ozone.recon.api.types.QuasiClosedContainersResponse;
 import org.apache.hadoop.ozone.recon.api.types.UnhealthyContainerMetadata;
 import org.apache.hadoop.ozone.recon.api.types.UnhealthyContainersResponse;
 import org.apache.hadoop.ozone.recon.api.types.UnhealthyContainersSummary;
@@ -50,40 +91,11 @@ import org.apache.hadoop.ozone.recon.recovery.ReconOMMetadataManager;
 import org.apache.hadoop.ozone.recon.scm.ReconContainerManager;
 import org.apache.hadoop.ozone.recon.spi.ReconContainerMetadataManager;
 import org.apache.hadoop.ozone.recon.spi.ReconNamespaceSummaryManager;
-import org.hadoop.ozone.recon.schema.ContainerSchemaDefinition.UnHealthyContainerStates;
-import org.hadoop.ozone.recon.schema.tables.pojos.UnhealthyContainers;
+import org.apache.hadoop.ozone.util.SeekableIterator;
+import org.apache.ozone.recon.schema.ContainerSchemaDefinition;
+import org.apache.ozone.recon.schema.generated.tables.pojos.UnhealthyContainers;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import javax.inject.Inject;
-import javax.ws.rs.DefaultValue;
-import javax.ws.rs.GET;
-import javax.ws.rs.Path;
-import javax.ws.rs.PathParam;
-import javax.ws.rs.Produces;
-import javax.ws.rs.QueryParam;
-import javax.ws.rs.WebApplicationException;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
-import java.io.IOException;
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.stream.Collectors;
-
-import static org.apache.hadoop.ozone.recon.ReconConstants.DEFAULT_FILTER_FOR_MISSING_CONTAINERS;
-import static org.apache.hadoop.ozone.recon.ReconConstants.RECON_QUERY_FILTER;
-import static org.apache.hadoop.ozone.recon.ReconConstants.DEFAULT_BATCH_NUMBER;
-import static org.apache.hadoop.ozone.recon.ReconConstants.DEFAULT_FETCH_COUNT;
-import static org.apache.hadoop.ozone.recon.ReconConstants.PREV_CONTAINER_ID_DEFAULT_VALUE;
-import static org.apache.hadoop.ozone.recon.ReconConstants.RECON_QUERY_BATCH_PARAM;
-import static org.apache.hadoop.ozone.recon.ReconConstants.RECON_QUERY_LIMIT;
-import static org.apache.hadoop.ozone.recon.ReconConstants.RECON_QUERY_PREVKEY;
 
 
 /**
@@ -91,13 +103,9 @@ import static org.apache.hadoop.ozone.recon.ReconConstants.RECON_QUERY_PREVKEY;
  */
 @Path("/containers")
 @Produces(MediaType.APPLICATION_JSON)
-@AdminOnly
 public class ContainerEndpoint {
 
-  @Inject
   private ReconContainerMetadataManager reconContainerMetadataManager;
-
-  @Inject
   private ReconOMMetadataManager omMetadataManager;
 
   private final ReconContainerManager containerManager;
@@ -105,6 +113,7 @@ public class ContainerEndpoint {
   private final ContainerHealthSchemaManager containerHealthSchemaManager;
   private final ReconNamespaceSummaryManager reconNamespaceSummaryManager;
   private final OzoneStorageContainerManager reconSCM;
+  private final ExportJobManager exportJobManager;
   private static final Logger LOG =
       LoggerFactory.getLogger(ContainerEndpoint.class);
   private BucketLayout layout = BucketLayout.DEFAULT;
@@ -141,36 +150,42 @@ public class ContainerEndpoint {
     }
   }
 
-
   @Inject
   public ContainerEndpoint(OzoneStorageContainerManager reconSCM,
-               ContainerHealthSchemaManager containerHealthSchemaManager,
-               ReconNamespaceSummaryManager reconNamespaceSummaryManager) {
+                           ContainerHealthSchemaManager containerHealthSchemaManager,
+                           ReconNamespaceSummaryManager reconNamespaceSummaryManager,
+                           ReconContainerMetadataManager reconContainerMetadataManager,
+                           ReconOMMetadataManager omMetadataManager,
+                           ExportJobManager exportJobManager) {
     this.containerManager =
         (ReconContainerManager) reconSCM.getContainerManager();
     this.pipelineManager = reconSCM.getPipelineManager();
     this.containerHealthSchemaManager = containerHealthSchemaManager;
     this.reconNamespaceSummaryManager = reconNamespaceSummaryManager;
     this.reconSCM = reconSCM;
+    this.reconContainerMetadataManager = reconContainerMetadataManager;
+    this.omMetadataManager = omMetadataManager;
+    this.exportJobManager = exportJobManager;
   }
 
   /**
-   * Return @{@link org.apache.hadoop.hdds.scm.container}
+   * Return {@code org.apache.hadoop.hdds.scm.container}
    * for the containers starting from the given "prev-key" query param for the
    * given "limit". The given "prev-key" is skipped from the results returned.
+   *
    * @param prevKey the containerID after which results are returned.
-   *                start containerID, >=0,
+   *                start containerID, &gt;=0,
    *                start searching at the head if 0.
-   * @param limit max no. of containers to get.
-   *              count must be >= 0
-   *              Usually the count will be replace with a very big
-   *              value instead of being unlimited in case the db is very big.
+   * @param limit   max no. of containers to get.
+   *                count must be &gt;= 0
+   *                Usually the count will be replace with a very big
+   *                value instead of being unlimited in case the db is very big.
    * @return {@link Response}
    */
   @GET
   public Response getContainers(
       @DefaultValue(DEFAULT_FETCH_COUNT) @QueryParam(RECON_QUERY_LIMIT)
-          int limit,
+      int limit,
       @DefaultValue(PREV_CONTAINER_ID_DEFAULT_VALUE)
       @QueryParam(RECON_QUERY_PREVKEY) long prevKey) {
     if (limit < 0 || prevKey < 0) {
@@ -212,8 +227,8 @@ public class ContainerEndpoint {
    * starting from the given "prev-key" query param for the given "limit".
    * The given prevKeyPrefix is skipped from the results returned.
    *
-   * @param containerID the given containerID.
-   * @param limit max no. of keys to get.
+   * @param containerID   the given containerID.
+   * @param limit         max no. of keys to get.
    * @param prevKeyPrefix the key prefix after which results are returned.
    * @return {@link Response}
    */
@@ -226,11 +241,20 @@ public class ContainerEndpoint {
       @DefaultValue(StringUtils.EMPTY) @QueryParam(RECON_QUERY_PREVKEY)
           String prevKeyPrefix) {
     Map<String, KeyMetadata> keyMetadataMap = new LinkedHashMap<>();
+
+    // Total count of keys in the container.
     long totalCount;
+    // Last key prefix to be used for pagination. It will be exposed in the response.
+    String lastKey = "";
+
+    // If -1 is passed, set limit to the maximum integer value to retrieve all records
+    if (limit == -1) {
+      limit = Integer.MAX_VALUE;
+    }
+
     try {
       Map<ContainerKeyPrefix, Integer> containerKeyPrefixMap =
-          reconContainerMetadataManager.getKeyPrefixesForContainer(containerID,
-              prevKeyPrefix);
+          reconContainerMetadataManager.getKeyPrefixesForContainer(containerID, prevKeyPrefix, limit);
       // Get set of Container-Key mappings for given containerId.
       for (ContainerKeyPrefix containerKeyPrefix : containerKeyPrefixMap
           .keySet()) {
@@ -259,10 +283,8 @@ public class ContainerEndpoint {
           List<ContainerBlockMetadata> blockIds =
               getBlocks(matchedKeys, containerID);
 
-          String ozoneKey = omMetadataManager.getOzoneKey(
-              omKeyInfo.getVolumeName(),
-              omKeyInfo.getBucketName(),
-              omKeyInfo.getKeyName());
+          String ozoneKey = containerKeyPrefix.getKeyPrefix();
+          lastKey = ozoneKey;
           if (keyMetadataMap.containsKey(ozoneKey)) {
             keyMetadataMap.get(ozoneKey).getVersions()
                 .add(containerKeyPrefix.getKeyVersion());
@@ -270,14 +292,12 @@ public class ContainerEndpoint {
             keyMetadataMap.get(ozoneKey).getBlockIds()
                 .put(containerKeyPrefix.getKeyVersion(), blockIds);
           } else {
-            // break the for loop if limit has been reached
-            if (keyMetadataMap.size() == limit) {
-              break;
-            }
             KeyMetadata keyMetadata = new KeyMetadata();
             keyMetadata.setBucket(omKeyInfo.getBucketName());
             keyMetadata.setVolume(omKeyInfo.getVolumeName());
             keyMetadata.setKey(omKeyInfo.getKeyName());
+            keyMetadata.setCompletePath(ReconUtils.constructFullPath(omKeyInfo,
+                reconNamespaceSummaryManager));
             keyMetadata.setCreationTime(
                 Instant.ofEpochMilli(omKeyInfo.getCreationTime()));
             keyMetadata.setModificationTime(
@@ -294,11 +314,9 @@ public class ContainerEndpoint {
       totalCount =
           reconContainerMetadataManager.getKeyCountForContainer(containerID);
     } catch (IOException ioEx) {
-      throw new WebApplicationException(ioEx,
-          Response.Status.INTERNAL_SERVER_ERROR);
+      throw new WebApplicationException(ioEx, Response.Status.INTERNAL_SERVER_ERROR);
     }
-    KeysResponse keysResponse =
-        new KeysResponse(totalCount, keyMetadataMap.values());
+    KeysResponse keysResponse = new KeysResponse(totalCount, keyMetadataMap.values(), lastKey);
     return Response.ok(keysResponse).build();
   }
 
@@ -334,7 +352,8 @@ public class ContainerEndpoint {
   ) {
     List<MissingContainerMetadata> missingContainers = new ArrayList<>();
     containerHealthSchemaManager.getUnhealthyContainers(
-        UnHealthyContainerStates.MISSING, 0, limit)
+            ContainerSchemaDefinition.UnHealthyContainerStates.MISSING,
+            0L, 0L, limit)
         .forEach(container -> {
           long containerID = container.getContainerId();
           try {
@@ -368,9 +387,12 @@ public class ContainerEndpoint {
    *              eg UNDER_REPLICATED, MIS_REPLICATED, OVER_REPLICATED or
    *              MISSING. Passing null returns all containers.
    * @param limit The limit of unhealthy containers to return.
-   * @param batchNum The batch number (like "page number") of results to return.
-   *                 Passing 1, will return records 1 to limit. 2 will return
-   *                 limit + 1 to 2 * limit, etc.
+   * @param maxContainerId Upper bound for container IDs to include (exclusive).
+   *                       When specified, returns containers with IDs less than this value
+   *                       in descending order. Use for backward pagination.
+   * @param minContainerId Lower bound for container IDs to include (exclusive).
+   *                       When maxContainerId is not specified, returns containers with IDs
+   *                       greater than this value in ascending order. Use for forward pagination.
    * @return {@link Response}
    */
   @GET
@@ -378,39 +400,49 @@ public class ContainerEndpoint {
   public Response getUnhealthyContainers(
       @PathParam("state") String state,
       @DefaultValue(DEFAULT_FETCH_COUNT) @QueryParam(RECON_QUERY_LIMIT)
-          int limit,
-      @DefaultValue(DEFAULT_BATCH_NUMBER)
-      @QueryParam(RECON_QUERY_BATCH_PARAM) int batchNum) {
-    int offset = Math.max(((batchNum - 1) * limit), 0);
+      int limit,
+      @DefaultValue(PREV_CONTAINER_ID_DEFAULT_VALUE)
+      @QueryParam(RECON_QUERY_MAX_CONTAINER_ID) long maxContainerId,
+      @DefaultValue(PREV_CONTAINER_ID_DEFAULT_VALUE)
+      @QueryParam(RECON_QUERY_MIN_CONTAINER_ID) long minContainerId) {
+    return getUnhealthyContainersFromSchema(state, limit, maxContainerId,
+        minContainerId);
+  }
 
-    List<UnhealthyContainerMetadata> unhealthyMeta = new ArrayList<>();
-    List<UnhealthyContainersSummary> summary;
+  /**
+   * New implementation - reads from UNHEALTHY_CONTAINERS table.
+   */
+  private Response getUnhealthyContainersFromSchema(
+      String state,
+      int limit,
+      long maxContainerId,
+      long minContainerId) {
+    List<UnhealthyContainerMetadata> unhealthyMeta;
+    List<UnhealthyContainersSummary> summary = new ArrayList<>();
+
     try {
-      UnHealthyContainerStates internalState = null;
+      ContainerSchemaDefinition.UnHealthyContainerStates containerState = null;
 
       if (state != null) {
-        // If an invalid state is passed in, this will throw
-        // illegalArgumentException and fail the request
-        internalState = UnHealthyContainerStates.valueOf(state);
+        containerState = ContainerSchemaDefinition.UnHealthyContainerStates.valueOf(state);
       }
 
-      summary = containerHealthSchemaManager.getUnhealthyContainersSummary();
-      List<UnhealthyContainers> containers = containerHealthSchemaManager
-          .getUnhealthyContainers(internalState, offset, limit);
-      for (UnhealthyContainers c : containers) {
-        long containerID = c.getContainerId();
-        ContainerInfo containerInfo =
-            containerManager.getContainer(ContainerID.valueOf(containerID));
-        long keyCount = containerInfo.getNumberOfKeys();
-        UUID pipelineID = containerInfo.getPipelineID().getId();
-        List<ContainerHistory> datanodes =
-            containerManager.getLatestContainerHistory(containerID,
-                containerInfo.getReplicationConfig().getRequiredNodes());
-        unhealthyMeta.add(new UnhealthyContainerMetadata(
-            c, datanodes, pipelineID, keyCount));
+      // Get summary from UNHEALTHY_CONTAINERS table and convert to V1 format
+      List<ContainerHealthSchemaManager.UnhealthyContainersSummary> unhealthyContainersSummary =
+          containerHealthSchemaManager.getUnhealthyContainersSummary();
+      for (ContainerHealthSchemaManager.UnhealthyContainersSummary s : unhealthyContainersSummary) {
+        summary.add(new UnhealthyContainersSummary(s.getContainerState(), s.getCount()));
       }
-    } catch (IOException ex) {
-      throw new WebApplicationException(ex,
+
+      // Get containers from UNHEALTHY_CONTAINERS table
+      List<ContainerHealthSchemaManager.UnhealthyContainerRecord> unhealthyContainers =
+          containerHealthSchemaManager.getUnhealthyContainers(containerState, minContainerId, maxContainerId, limit);
+
+      unhealthyMeta = unhealthyContainers.stream()
+          .map(this::toUnhealthyMetadata)
+          .collect(Collectors.toList());
+    } catch (UncheckedIOException ex) {
+      throw new WebApplicationException(ex.getCause(),
           Response.Status.INTERNAL_SERVER_ERROR);
     } catch (IllegalArgumentException e) {
       throw new WebApplicationException(e, Response.Status.BAD_REQUEST);
@@ -418,31 +450,221 @@ public class ContainerEndpoint {
 
     UnhealthyContainersResponse response =
         new UnhealthyContainersResponse(unhealthyMeta);
+    if (!unhealthyMeta.isEmpty()) {
+      response.setFirstKey(unhealthyMeta.stream().map(UnhealthyContainerMetadata::getContainerID)
+          .min(Long::compareTo).orElse(0L));
+      response.setLastKey(unhealthyMeta.stream().map(UnhealthyContainerMetadata::getContainerID)
+          .max(Long::compareTo).orElse(0L));
+    }
     for (UnhealthyContainersSummary s : summary) {
       response.setSummaryCount(s.getContainerState(), s.getCount());
     }
     return Response.ok(response).build();
   }
 
+  private UnhealthyContainerMetadata toUnhealthyMetadata(
+      ContainerHealthSchemaManager.UnhealthyContainerRecord record) {
+    try {
+      long containerID = record.getContainerId();
+      ContainerInfo containerInfo =
+          containerManager.getContainer(ContainerID.valueOf(containerID));
+      long keyCount = containerInfo.getNumberOfKeys();
+      UUID pipelineID = containerInfo.getPipelineID().getId();
+      List<ContainerHistory> datanodes =
+          containerManager.getLatestContainerHistory(containerID,
+              containerInfo.getReplicationConfig().getRequiredNodes());
+      UnhealthyContainers unhealthyContainers = new UnhealthyContainers(
+          record.getContainerId(),
+          record.getContainerState(),
+          record.getInStateSince(),
+          record.getExpectedReplicaCount(),
+          record.getActualReplicaCount(),
+          record.getReplicaDelta(),
+          record.getReason());
+      return new UnhealthyContainerMetadata(unhealthyContainers, datanodes,
+          pipelineID, keyCount);
+    } catch (IOException ioEx) {
+      throw new UncheckedIOException(ioEx);
+    }
+  }
+
   /**
    * Return
    * {@link org.apache.hadoop.ozone.recon.api.types.UnhealthyContainerMetadata}
    * for all unhealthy containers.
-
    * @param limit The limit of unhealthy containers to return.
-   * @param batchNum The batch number (like "page number") of results to return.
-   *                 Passing 1, will return records 1 to limit. 2 will return
-   *                 limit + 1 to 2 * limit, etc.
+   * @param maxContainerId Upper bound for container IDs to include (exclusive).
+   *                       When specified, returns containers with IDs less than this value
+   *                       in descending order. Use for backward pagination.
+   * @param minContainerId Lower bound for container IDs to include (exclusive).
+   *                       When maxContainerId is not specified, returns containers with IDs
+   *                       greater than this value in ascending order. Use for forward pagination.
    * @return {@link Response}
    */
   @GET
   @Path("/unhealthy")
   public Response getUnhealthyContainers(
       @DefaultValue(DEFAULT_FETCH_COUNT) @QueryParam(RECON_QUERY_LIMIT)
-          int limit,
-      @DefaultValue(DEFAULT_BATCH_NUMBER)
-      @QueryParam(RECON_QUERY_BATCH_PARAM) int batchNum) {
-    return getUnhealthyContainers(null, limit, batchNum);
+      int limit,
+      @DefaultValue(PREV_CONTAINER_ID_DEFAULT_VALUE)
+      @QueryParam(RECON_QUERY_MAX_CONTAINER_ID) long maxContainerId,
+      @DefaultValue(PREV_CONTAINER_ID_DEFAULT_VALUE)
+      @QueryParam(RECON_QUERY_MIN_CONTAINER_ID) long minContainerId) {
+    return getUnhealthyContainersFromSchema(null, limit, maxContainerId,
+        minContainerId);
+  }
+
+  /**
+   * List all export jobs tracked by the server (any status).
+   *
+   * @return Response containing a list of ExportJob objects
+   */
+  @GET
+  @Path("/unhealthy/export")
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response listExportJobs() {
+    List<ExportJob> jobs = exportJobManager.getAllJobs();
+    for (ExportJob job : jobs) {
+      if (job.getStatus() == ExportJob.JobStatus.QUEUED) {
+        job.setQueuePosition(exportJobManager.getQueuePosition(job.getJobId()));
+      }
+    }
+    return Response.ok(jobs).build();
+  }
+
+  /**
+   * Start an async CSV export job for unhealthy containers.
+   * Returns immediately with a job ID that the client can poll.
+   *
+   * @param state The container state (required: MISSING, UNDER_REPLICATED, etc.)
+   * @return Response containing ExportJob with jobId
+   */
+  @POST
+  @Path("/unhealthy/export")
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response startExport(@QueryParam("state") String state) {
+
+    if (StringUtils.isEmpty(state)) {
+      throw new WebApplicationException("state query parameter is required",
+          Response.Status.BAD_REQUEST);
+    }
+
+    // Validate state parameter
+    try {
+      ContainerSchemaDefinition.UnHealthyContainerStates.valueOf(state);
+    } catch (IllegalArgumentException e) {
+      throw new WebApplicationException("Invalid state: " + state, Response.Status.BAD_REQUEST);
+    }
+
+    try {
+      String jobId = exportJobManager.submitJob(state);
+      ExportJob job = exportJobManager.getJob(jobId);
+      return Response.ok(job).build();
+    } catch (IllegalStateException e) {
+      // Return JSON error response instead of HTML
+      Map<String, String> errorResponse = new HashMap<>();
+      errorResponse.put("error", "Too Many Requests");
+      errorResponse.put("message", e.getMessage());
+      return Response.status(Response.Status.TOO_MANY_REQUESTS)
+          .entity(errorResponse)
+          .type(MediaType.APPLICATION_JSON)
+          .build();
+    }
+  }
+
+  /**
+   * Get the status of an export job.
+   *
+   * @param jobId The job ID returned by startExport
+   * @return Response containing the ExportJob with current status/progress
+   */
+  @GET
+  @Path("/unhealthy/export/{jobId}")
+  @Produces(MediaType.APPLICATION_JSON)
+  public Response getExportStatus(@PathParam("jobId") String jobId) {
+    ExportJob job = exportJobManager.getJob(jobId);
+    if (job == null) {
+      throw new WebApplicationException("Job not found", Response.Status.NOT_FOUND);
+    }
+    
+    // Calculate and set queue position if QUEUED
+    if (job.getStatus() == ExportJob.JobStatus.QUEUED) {
+      int position = exportJobManager.getQueuePosition(jobId);
+      job.setQueuePosition(position);
+    }
+    
+    return Response.ok(job).build();
+  }
+
+  /**
+   * Download a completed export TAR file.
+   *
+   * @param jobId The job ID
+   * @return Response with TAR file stream
+   */
+  @GET
+  @Path("/unhealthy/export/{jobId}/download")
+  @Produces("application/x-tar")
+  public Response downloadExport(@PathParam("jobId") String jobId) {
+    ExportJob job = exportJobManager.getJob(jobId);
+    if (job == null) {
+      throw new WebApplicationException("Job not found", Response.Status.NOT_FOUND);
+    }
+    if (job.getStatus() != ExportJob.JobStatus.COMPLETED) {
+      throw new WebApplicationException("Job not completed yet", Response.Status.CONFLICT);
+    }
+
+    File file = new File(job.getFilePath());
+    if (!file.exists()) {
+      throw new WebApplicationException("Export file not found", Response.Status.NOT_FOUND);
+    }
+
+    if (!job.tryReserveDownload()) {
+      Map<String, String> errorResponse = new java.util.HashMap<>();
+      errorResponse.put("error", "Download limit reached");
+      errorResponse.put("message", "This export has reached its maximum download limit of "
+          + job.getMaxDownloads() + ".");
+      return Response.status(Response.Status.TOO_MANY_REQUESTS)
+          .entity(errorResponse)
+          .type(MediaType.APPLICATION_JSON)
+          .build();
+    }
+
+    LOG.info("Download {} of {} for job {}", job.getDownloadCount(), job.getMaxDownloads(), jobId);
+
+    StreamingOutput stream = outputStream -> {
+      try (InputStream fis = Files.newInputStream(file.toPath());
+           BufferedOutputStream bos = new BufferedOutputStream(outputStream, 256 * 1024)) {
+        byte[] buffer = new byte[8192];
+        int bytesRead;
+        while ((bytesRead = fis.read(buffer)) != -1) {
+          bos.write(buffer, 0, bytesRead);
+        }
+        bos.flush();
+      }
+    };
+
+    return Response.ok(stream)
+        .header("Content-Disposition", "attachment; filename=\"" + job.getFileName() + "\"")
+        .header("Content-Type", "application/x-tar")
+        .build();
+  }
+
+  /**
+   * Cancel a running export job.
+   *
+   * @param jobId The job ID
+   * @return Response with 200 if successful
+   */
+  @DELETE
+  @Path("/unhealthy/export/{jobId}")
+  public Response cancelExport(@PathParam("jobId") String jobId) {
+    try {
+      exportJobManager.cancelJob(jobId);
+      return Response.ok().build();
+    } catch (IllegalStateException e) {
+      throw new WebApplicationException(e.getMessage(), Response.Status.NOT_FOUND);
+    }
   }
 
   /**
@@ -514,6 +736,7 @@ public class ContainerEndpoint {
   /**
    * Helper function to extract the blocks for a given container from a given
    * OM Key.
+   *
    * @param matchedKeys List of OM Key Info locations
    * @param containerID containerId.
    * @return List of blocks.
@@ -522,14 +745,15 @@ public class ContainerEndpoint {
       List<OmKeyLocationInfoGroup> matchedKeys, long containerID) {
     List<ContainerBlockMetadata> blockIds = new ArrayList<>();
     for (OmKeyLocationInfoGroup omKeyLocationInfoGroup : matchedKeys) {
-      List<OmKeyLocationInfo> omKeyLocationInfos = omKeyLocationInfoGroup
-          .getLocationList()
-          .stream()
-          .filter(c -> c.getContainerID() == containerID)
-          .collect(Collectors.toList());
-      for (OmKeyLocationInfo omKeyLocationInfo : omKeyLocationInfos) {
-        blockIds.add(new ContainerBlockMetadata(omKeyLocationInfo
-            .getContainerID(), omKeyLocationInfo.getLocalID()));
+      for (List<OmKeyLocationInfo> omKeyLocationInfos :
+          omKeyLocationInfoGroup.getLocationLists()) {
+        for (OmKeyLocationInfo omKeyLocationInfo : omKeyLocationInfos) {
+          if (omKeyLocationInfo.getContainerID() == containerID) {
+            blockIds.add(new ContainerBlockMetadata(
+                omKeyLocationInfo.getContainerID(),
+                omKeyLocationInfo.getLocalID()));
+          }
+        }
       }
     }
     return blockIds;
@@ -565,109 +789,87 @@ public class ContainerEndpoint {
 
     List<ContainerDiscrepancyInfo> containerDiscrepancyInfoList =
         new ArrayList<>();
-    try {
-      Map<Long, ContainerMetadata> omContainers =
-          reconContainerMetadataManager.getContainers(-1, -1);
-      List<Long> scmNonDeletedContainers =
-          containerManager.getContainers().stream()
-              .filter(containerInfo -> containerInfo.getState() !=
-                  HddsProtos.LifeCycleState.DELETED)
-              .map(containerInfo -> containerInfo.getContainerID())
-              .collect(Collectors.toList());
-      DataFilter dataFilter = DataFilter.fromValue(missingIn.toUpperCase());
-
+    Long minContainerID = prevKey + 1;
+    Iterator<ContainerInfo> scmNonDeletedContainers =
+            containerManager.getContainers().stream()
+                    .filter(containerInfo -> (containerInfo.getContainerID() >= minContainerID))
+                    .filter(containerInfo -> containerInfo.getState() != HddsProtos.LifeCycleState.DELETED)
+                    .sorted(Comparator.comparingLong(ContainerInfo::getContainerID)).iterator();
+    ContainerInfo scmContainerInfo = scmNonDeletedContainers.hasNext() ?
+            scmNonDeletedContainers.next() : null;
+    DataFilter dataFilter = DataFilter.fromValue(missingIn.toUpperCase());
+    try (SeekableIterator<Long, ContainerMetadata> omContainers =
+                 reconContainerMetadataManager.getContainersIterator()) {
+      omContainers.seek(minContainerID);
+      ContainerMetadata containerMetadata = omContainers.hasNext() ? omContainers.next() : null;
       switch (dataFilter) {
-
       case SCM:
-        List<Map.Entry<Long, ContainerMetadata>> notSCMContainers =
-            omContainers.entrySet().stream()
-                .filter(
-                    containerMetadataEntry -> !scmNonDeletedContainers.contains(
-                        containerMetadataEntry.getKey()))
-                .collect(Collectors.toList());
-
-        if (prevKey > 0) {
-          int index = 0;
-          while (index < notSCMContainers.size() &&
-              notSCMContainers.get(index).getKey() <= prevKey) {
-            index++;
-          }
-          if (index < notSCMContainers.size()) {
-            notSCMContainers = notSCMContainers.subList(index,
-                Math.min(index + limit, notSCMContainers.size()));
+        List<ContainerMetadata> notSCMContainers = new ArrayList<>();
+        while (containerMetadata != null && notSCMContainers.size() < limit) {
+          Long omContainerID = containerMetadata.getContainerID();
+          Long scmContainerID = scmContainerInfo == null ? null : scmContainerInfo.getContainerID();
+          if (omContainerID.equals(scmContainerID)) {
+            containerMetadata = omContainers.hasNext() ? omContainers.next() : null;
+            scmContainerInfo = scmNonDeletedContainers.hasNext() ? scmNonDeletedContainers.next() : null;
+          } else if (scmContainerID == null || omContainerID.compareTo(scmContainerID) < 0) {
+            notSCMContainers.add(containerMetadata);
+            containerMetadata = omContainers.hasNext() ? omContainers.next() : null;
           } else {
-            notSCMContainers = Collections.emptyList();
+            scmContainerInfo = scmNonDeletedContainers.hasNext() ? scmNonDeletedContainers.next() : null;
           }
-        } else {
-          notSCMContainers = notSCMContainers.subList(0,
-              Math.min(limit, notSCMContainers.size()));
         }
 
         notSCMContainers.forEach(nonSCMContainer -> {
           ContainerDiscrepancyInfo containerDiscrepancyInfo =
               new ContainerDiscrepancyInfo();
-          containerDiscrepancyInfo.setContainerID(nonSCMContainer.getKey());
+          containerDiscrepancyInfo.setContainerID(nonSCMContainer.getContainerID());
           containerDiscrepancyInfo.setNumberOfKeys(
-              nonSCMContainer.getValue().getNumberOfKeys());
+              nonSCMContainer.getNumberOfKeys());
           containerDiscrepancyInfo.setPipelines(
-              nonSCMContainer.getValue().getPipelines());
+              nonSCMContainer.getPipelines());
           containerDiscrepancyInfo.setExistsAt("OM");
           containerDiscrepancyInfoList.add(containerDiscrepancyInfo);
         });
         break;
 
       case OM:
-        List<Long> nonOMContainers = scmNonDeletedContainers.stream()
-            .filter(containerId -> !omContainers.containsKey(containerId))
-            .collect(Collectors.toList());
-
-        if (prevKey > 0) {
-          int index = 0;
-          while (index < nonOMContainers.size() &&
-              nonOMContainers.get(index) <= prevKey) {
-            index++;
-          }
-          if (index < nonOMContainers.size()) {
-            nonOMContainers = nonOMContainers.subList(index,
-                Math.min(index + limit, nonOMContainers.size()));
+        List<ContainerInfo> nonOMContainers = new ArrayList<>();
+        while (scmContainerInfo != null && nonOMContainers.size() < limit) {
+          Long omContainerID = containerMetadata == null ? null : containerMetadata.getContainerID();
+          Long scmContainerID = scmContainerInfo.getContainerID();
+          if (scmContainerID.equals(omContainerID)) {
+            scmContainerInfo = scmNonDeletedContainers.hasNext() ? scmNonDeletedContainers.next() : null;
+            containerMetadata = omContainers.hasNext() ? omContainers.next() : null;
+          } else if (omContainerID == null || scmContainerID.compareTo(omContainerID) < 0) {
+            nonOMContainers.add(scmContainerInfo);
+            scmContainerInfo = scmNonDeletedContainers.hasNext() ? scmNonDeletedContainers.next() : null;
           } else {
-            nonOMContainers = Collections.emptyList();
+            //Seeking directly to SCM containerId sequential read is just wasteful here if there are too many values
+            // to be read in b/w omContainerID & scmContainerID since (omContainerId<scmContainerID)
+            omContainers.seek(scmContainerID);
+            containerMetadata = omContainers.hasNext() ? omContainers.next() : null;
           }
-        } else {
-          nonOMContainers = nonOMContainers.subList(0,
-              Math.min(limit, nonOMContainers.size()));
         }
 
-        List<Pipeline> pipelines = new ArrayList<>();
-        nonOMContainers.forEach(nonOMContainerId -> {
-          boolean containerExistsInScm = true;
-          ContainerDiscrepancyInfo containerDiscrepancyInfo =
-              new ContainerDiscrepancyInfo();
-          containerDiscrepancyInfo.setContainerID(nonOMContainerId);
+        nonOMContainers.forEach(containerInfo -> {
+          ContainerDiscrepancyInfo containerDiscrepancyInfo = new ContainerDiscrepancyInfo();
+          containerDiscrepancyInfo.setContainerID(containerInfo.getContainerID());
           containerDiscrepancyInfo.setNumberOfKeys(0);
+          List<Pipeline> pipelines = new ArrayList<>();
           PipelineID pipelineID = null;
           try {
-            pipelineID = containerManager.getContainer(
-                ContainerID.valueOf(nonOMContainerId)).getPipelineID();
+            pipelineID = containerInfo.getPipelineID();
             if (pipelineID != null) {
               pipelines.add(pipelineManager.getPipeline(pipelineID));
             }
-          } catch (ContainerNotFoundException e) {
-            containerExistsInScm = false;
-            LOG.warn("Container {} not found in SCM: {}", nonOMContainerId,
-                e);
           } catch (PipelineNotFoundException e) {
             LOG.debug(
                 "Pipeline not found for container: {} and pipelineId: {}",
-                nonOMContainerId, pipelineID, e);
+                containerInfo, pipelineID, e);
           }
-          // The container might have been deleted in SCM after the call to
-          // get the list of containers
-          if (containerExistsInScm) {
-            containerDiscrepancyInfo.setPipelines(pipelines);
-            containerDiscrepancyInfo.setExistsAt("SCM");
-            containerDiscrepancyInfoList.add(containerDiscrepancyInfo);
-          }
+          containerDiscrepancyInfo.setPipelines(pipelines);
+          containerDiscrepancyInfo.setExistsAt("SCM");
+          containerDiscrepancyInfoList.add(containerDiscrepancyInfo);
         });
         break;
 
@@ -675,9 +877,6 @@ public class ContainerEndpoint {
         // Invalid filter parameter value
         return Response.status(Response.Status.BAD_REQUEST).build();
       }
-    } catch (IOException ex) {
-      throw new WebApplicationException(ex,
-          Response.Status.INTERNAL_SERVER_ERROR);
     } catch (IllegalArgumentException e) {
       throw new WebApplicationException(e, Response.Status.BAD_REQUEST);
     } catch (Exception ex) {
@@ -698,7 +897,8 @@ public class ContainerEndpoint {
   }
 
 
-  /** This API retrieves set of deleted containers in SCM which are present
+  /**
+   * This API retrieves set of deleted containers in SCM which are present
    * in OM to find out list of keys mapped to such DELETED state containers.
    *
    * limit - limits the number of such SCM DELETED containers present in OM.
@@ -724,43 +924,44 @@ public class ContainerEndpoint {
       // Send back an empty response
       return Response.status(Response.Status.NOT_ACCEPTABLE).build();
     }
-    List<ContainerDiscrepancyInfo> containerDiscrepancyInfoList =
-        new ArrayList<>();
-    try {
-      Map<Long, ContainerMetadata> omContainers =
-          reconContainerMetadataManager.getContainers(limit, prevKey);
+    if (limit <= 0) {
+      limit = Integer.MAX_VALUE;
+    }
+    long minContainerID = prevKey + 1;
+    Iterator<ContainerInfo> deletedStateSCMContainers = containerManager.getContainers().stream()
+        .filter(containerInfo -> containerInfo.getContainerID() >= minContainerID)
+        .filter(containerInfo -> containerInfo.getState() == HddsProtos.LifeCycleState.DELETED)
+        .sorted(Comparator.comparingLong(ContainerInfo::getContainerID)).iterator();
+    List<ContainerDiscrepancyInfo> containerDiscrepancyInfoList;
+    try (SeekableIterator<Long, ContainerMetadata> omContainers =
+           reconContainerMetadataManager.getContainersIterator()) {
+      ContainerInfo scmContainerInfo = deletedStateSCMContainers.hasNext() ? deletedStateSCMContainers.next() : null;
+      ContainerMetadata containerMetadata = omContainers.hasNext() ? omContainers.next() : null;
+      List<ContainerMetadata> omContainersDeletedInSCM = new ArrayList<>();
+      while (containerMetadata != null && scmContainerInfo != null
+        && omContainersDeletedInSCM.size() < limit) {
+        Long omContainerID = containerMetadata.getContainerID();
+        Long scmContainerID = scmContainerInfo.getContainerID();
+        if (scmContainerID.equals(omContainerID)) {
+          omContainersDeletedInSCM.add(containerMetadata);
+          scmContainerInfo = deletedStateSCMContainers.hasNext() ? deletedStateSCMContainers.next() : null;
+          containerMetadata = omContainers.hasNext() ? omContainers.next() : null;
+        } else if (scmContainerID.compareTo(omContainerID) < 0) {
+          scmContainerInfo = deletedStateSCMContainers.hasNext() ? deletedStateSCMContainers.next() : null;
+        } else {
+          // Seek directly to scmContainerId iterating sequentially is very wasteful here.
+          omContainers.seek(scmContainerID);
+          containerMetadata = omContainers.hasNext() ? omContainers.next() : null;
+        }
+      }
 
-      List<Long> deletedStateSCMContainerIds =
-          containerManager.getContainers().stream()
-              .filter(containerInfo -> (containerInfo.getState() ==
-                  HddsProtos.LifeCycleState.DELETED))
-              .map(containerInfo -> containerInfo.getContainerID()).collect(
-                  Collectors.toList());
-
-      List<Map.Entry<Long, ContainerMetadata>>
-          omContainersDeletedInSCM =
-          omContainers.entrySet().stream().filter(containerMetadataEntry ->
-                  (deletedStateSCMContainerIds.contains(
-                      containerMetadataEntry.getKey())))
-              .collect(
-                  Collectors.toList());
-
-      omContainersDeletedInSCM.forEach(
-          containerMetadataEntry -> {
-            ContainerDiscrepancyInfo containerDiscrepancyInfo =
-                new ContainerDiscrepancyInfo();
-            containerDiscrepancyInfo.setContainerID(
-                containerMetadataEntry.getKey());
-            containerDiscrepancyInfo.setNumberOfKeys(
-                containerMetadataEntry.getValue().getNumberOfKeys());
-            containerDiscrepancyInfo.setPipelines(
-                containerMetadataEntry.getValue()
-                    .getPipelines());
-            containerDiscrepancyInfoList.add(containerDiscrepancyInfo);
-          });
-    } catch (IOException ex) {
-      throw new WebApplicationException(ex,
-          Response.Status.INTERNAL_SERVER_ERROR);
+      containerDiscrepancyInfoList = omContainersDeletedInSCM.stream().map(containerMetadataEntry -> {
+        ContainerDiscrepancyInfo containerDiscrepancyInfo = new ContainerDiscrepancyInfo();
+        containerDiscrepancyInfo.setContainerID(containerMetadataEntry.getContainerID());
+        containerDiscrepancyInfo.setNumberOfKeys(containerMetadataEntry.getNumberOfKeys());
+        containerDiscrepancyInfo.setPipelines(containerMetadataEntry.getPipelines());
+        return containerDiscrepancyInfo;
+      }).collect(Collectors.toList());
     } catch (IllegalArgumentException e) {
       throw new WebApplicationException(e, Response.Status.BAD_REQUEST);
     } catch (Exception ex) {
@@ -776,5 +977,65 @@ public class ContainerEndpoint {
     }
     response.put("containerDiscrepancyInfo", containerDiscrepancyInfoList);
     return Response.ok(response).build();
+  }
+
+  /**
+   * Return all containers in QUASI_CLOSED state.
+   *
+   * @param limit          max no. of containers to get.
+   * @param minContainerId cursor — return containers with ID &gt; minContainerId.
+   * @return {@link Response}
+   */
+  @GET
+  @Path("/quasiClosed")
+  public Response getQuasiClosedContainers(
+      @DefaultValue(DEFAULT_FETCH_COUNT) @QueryParam(RECON_QUERY_LIMIT) int limit,
+      @DefaultValue(PREV_CONTAINER_ID_DEFAULT_VALUE)
+      @QueryParam(RECON_QUERY_MIN_CONTAINER_ID) long minContainerId) {
+
+    if (minContainerId < 0) {
+      return Response.status(Response.Status.BAD_REQUEST)
+          .entity("minContainerId must be >= 0").build();
+    }
+    if (limit < 0) {
+      return Response.status(Response.Status.BAD_REQUEST)
+          .entity("limit must be >= 0").build();
+    }
+
+    List<ContainerInfo> containers = containerManager.getContainers(
+        ContainerID.valueOf(minContainerId + 1), limit, HddsProtos.LifeCycleState.QUASI_CLOSED);
+
+    List<QuasiClosedContainerMetadata> metaList = containers.stream()
+        .map(this::toQuasiClosedMetadata)
+        .collect(Collectors.toList());
+
+    long firstKey = metaList.isEmpty() ? minContainerId : metaList.get(0).getContainerID();
+    long lastKey  = metaList.isEmpty() ? minContainerId : metaList.get(metaList.size() - 1).getContainerID();
+    int total     = containerManager.getContainerStateCount(HddsProtos.LifeCycleState.QUASI_CLOSED);
+
+    return Response.ok(new QuasiClosedContainersResponse(total, firstKey, lastKey, metaList)).build();
+  }
+
+  private QuasiClosedContainerMetadata toQuasiClosedMetadata(ContainerInfo ci) {
+    try {
+      long containerID = ci.getContainerID();
+      int requiredNodes = ci.getReplicationConfig().getRequiredNodes();
+      List<ContainerHistory> replicas =
+          containerManager.getLatestContainerHistory(containerID, requiredNodes);
+      long stateEnterTime = ci.getStateEnterTime() != null
+          ? ci.getStateEnterTime().toEpochMilli() : 0L;
+      String pipelineID = ci.getPipelineID() != null
+          ? ci.getPipelineID().getId().toString() : null;
+      return new QuasiClosedContainerMetadata(
+          containerID,
+          pipelineID,
+          ci.getNumberOfKeys(),
+          stateEnterTime,
+          requiredNodes,
+          replicas.size(),
+          replicas);
+    } catch (Exception e) {
+      throw new WebApplicationException(e, Response.Status.INTERNAL_SERVER_ERROR);
+    }
   }
 }

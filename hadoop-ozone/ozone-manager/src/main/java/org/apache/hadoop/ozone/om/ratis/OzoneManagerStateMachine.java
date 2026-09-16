@@ -1,85 +1,89 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with this
- * work for additional information regarding copyright ownership.  The ASF
- * licenses this file to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations under
- * the License.
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package org.apache.hadoop.ozone.om.ratis;
 
+import static org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Status.INTERNAL_ERROR;
+import static org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Status.METADATA_ERROR;
+
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
-import com.google.protobuf.ServiceException;
 import java.io.IOException;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
-
-import org.apache.hadoop.hdds.utils.db.Table;
+import org.apache.hadoop.hdds.utils.NettyMetrics;
 import org.apache.hadoop.hdds.utils.TransactionInfo;
+import org.apache.hadoop.ozone.audit.AuditLogger;
+import org.apache.hadoop.ozone.audit.AuditLoggerType;
+import org.apache.hadoop.ozone.audit.OMSystemAction;
 import org.apache.hadoop.ozone.om.OMConfigKeys;
+import org.apache.hadoop.ozone.om.OMMetrics;
 import org.apache.hadoop.ozone.om.OzoneManager;
 import org.apache.hadoop.ozone.om.OzoneManagerPrepareState;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
+import org.apache.hadoop.ozone.om.execution.flowcontrol.ExecutionContext;
 import org.apache.hadoop.ozone.om.helpers.OMRatisHelper;
-import org.apache.hadoop.ozone.om.ratis.metrics.OzoneManagerStateMachineMetrics;
-import org.apache.hadoop.ozone.om.ratis.utils.OzoneManagerRatisUtils;
 import org.apache.hadoop.ozone.om.lock.OMLockDetails;
+import org.apache.hadoop.ozone.om.ratis.utils.OzoneManagerRatisUtils;
 import org.apache.hadoop.ozone.om.response.DummyOMClientResponse;
 import org.apache.hadoop.ozone.om.response.OMClientResponse;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos;
-import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos
-    .OMRequest;
-import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos
-    .OMResponse;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMRequest;
+import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMResponse;
 import org.apache.hadoop.ozone.protocolPB.OzoneManagerRequestHandler;
 import org.apache.hadoop.ozone.protocolPB.RequestHandler;
+import org.apache.hadoop.ozone.security.STSSecurityUtil;
+import org.apache.hadoop.ozone.security.STSTokenIdentifier;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.util.Time;
 import org.apache.hadoop.util.concurrent.HadoopExecutors;
 import org.apache.ratis.proto.RaftProtos;
 import org.apache.ratis.proto.RaftProtos.StateMachineLogEntryProto;
 import org.apache.ratis.protocol.Message;
 import org.apache.ratis.protocol.RaftClientRequest;
 import org.apache.ratis.protocol.RaftGroupId;
-import org.apache.ratis.protocol.RaftPeer;
 import org.apache.ratis.protocol.RaftGroupMemberId;
+import org.apache.ratis.protocol.RaftPeer;
 import org.apache.ratis.protocol.RaftPeerId;
 import org.apache.ratis.protocol.exceptions.StateMachineException;
 import org.apache.ratis.server.RaftServer;
 import org.apache.ratis.server.protocol.TermIndex;
+import org.apache.ratis.server.raftlog.RaftLog;
 import org.apache.ratis.server.storage.RaftStorage;
 import org.apache.ratis.statemachine.SnapshotInfo;
 import org.apache.ratis.statemachine.TransactionContext;
 import org.apache.ratis.statemachine.impl.BaseStateMachine;
-import org.apache.ratis.statemachine.impl.SimpleStateMachineStorage;
 import org.apache.ratis.thirdparty.com.google.protobuf.ByteString;
 import org.apache.ratis.util.ExitUtils;
+import org.apache.ratis.util.IOUtils;
 import org.apache.ratis.util.LifeCycle;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import static org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Status.INTERNAL_ERROR;
-import static org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Status.METADATA_ERROR;
-import static org.apache.hadoop.ozone.OzoneConsts.TRANSACTION_INFO_KEY;
 
 /**
  * The OM StateMachine is the state machine for OM Ratis server. It is
@@ -88,46 +92,44 @@ import static org.apache.hadoop.ozone.OzoneConsts.TRANSACTION_INFO_KEY;
  */
 public class OzoneManagerStateMachine extends BaseStateMachine {
 
-  public static final Logger LOG =
+  private static final Logger LOG =
       LoggerFactory.getLogger(OzoneManagerStateMachine.class);
-  private final SimpleStateMachineStorage storage =
-      new SimpleStateMachineStorage();
-  private final OzoneManagerRatisServer omRatisServer;
+  private static final AuditLogger AUDIT = new AuditLogger(AuditLoggerType.OMSYSTEMLOGGER);
+  private static final String AUDIT_PARAM_PREVIOUS_LEADER = "previousLeader";
+  private static final String AUDIT_PARAM_NEW_LEADER = "newLeader";
+  private RaftPeerId previousLeaderId = null;
   private final OzoneManager ozoneManager;
   private RequestHandler handler;
-  private RaftGroupId raftGroupId;
-  private OzoneManagerDoubleBuffer ozoneManagerDoubleBuffer;
+  private volatile OzoneManagerDoubleBuffer ozoneManagerDoubleBuffer;
   private final ExecutorService executorService;
   private final ExecutorService installSnapshotExecutor;
   private final boolean isTracingEnabled;
   private final AtomicInteger statePausedCount = new AtomicInteger(0);
   private final String threadPrefix;
 
-  // Map which contains index and term for the ratis transactions which are
-  // stateMachine entries which are received through applyTransaction.
-  private ConcurrentMap<Long, Long> applyTransactionMap =
-      new ConcurrentSkipListMap<>();
+  /**
+   * Guards updates to notified, skipped and applied term-index state.
+   * When both locks are needed, acquire the state-machine monitor first.
+   */
+  private final Object termIndexLock = new Object();
 
-  // Map which contains index and term for the ratis transactions which are
-  // conf/metadata entries which are received through notifyIndexUpdate.
-  private ConcurrentMap<Long, Long> ratisTransactionMap =
-      new ConcurrentSkipListMap<>();
-  private OzoneManagerStateMachineMetrics metrics;
+  /** The last {@link TermIndex} received from {@link #notifyTermIndexUpdated(long, long)}. */
+  private volatile TermIndex lastNotifiedTermIndex = TermIndex.valueOf(0, RaftLog.INVALID_LOG_INDEX);
+  /** The last index skipped by {@link #notifyTermIndexUpdated(long, long)}. */
+  private volatile long lastSkippedIndex = RaftLog.INVALID_LOG_INDEX;
 
+  private final NettyMetrics nettyMetrics;
 
   public OzoneManagerStateMachine(OzoneManagerRatisServer ratisServer,
       boolean isTracingEnabled) throws IOException {
-    this.omRatisServer = ratisServer;
     this.isTracingEnabled = isTracingEnabled;
-    this.ozoneManager = omRatisServer.getOzoneManager();
+    this.ozoneManager = ratisServer.getOzoneManager();
 
     loadSnapshotInfoFromDB();
     this.threadPrefix = ozoneManager.getThreadNamePrefix();
 
     this.ozoneManagerDoubleBuffer = buildDoubleBufferForRatis();
-
-    this.handler = new OzoneManagerRequestHandler(ozoneManager,
-        ozoneManagerDoubleBuffer);
+    this.handler = new OzoneManagerRequestHandler(ozoneManager);
 
     ThreadFactory build = new ThreadFactoryBuilder().setDaemon(true)
         .setNameFormat(threadPrefix +
@@ -138,19 +140,36 @@ public class OzoneManagerStateMachine extends BaseStateMachine {
         .setNameFormat(threadPrefix + "InstallSnapshotThread").build();
     this.installSnapshotExecutor =
         HadoopExecutors.newSingleThreadExecutor(installSnapshotThreadFactory);
-    this.metrics = OzoneManagerStateMachineMetrics.create();
+    this.nettyMetrics = NettyMetrics.create();
+  }
+
+  @VisibleForTesting
+  OzoneManagerStateMachine(OzoneManager ozoneManager,
+      OzoneManagerDoubleBuffer doubleBuffer,
+      RequestHandler handler,
+      ExecutorService executorService,
+      NettyMetrics nettyMetrics) {
+    this.isTracingEnabled = false;
+    this.ozoneManager = ozoneManager;
+    this.threadPrefix = "";
+    this.ozoneManagerDoubleBuffer = doubleBuffer;
+    this.handler = handler;
+    this.executorService = executorService;
+    ThreadFactory installSnapshotThreadFactory = new ThreadFactoryBuilder()
+        .setNameFormat("TestInstallSnapshotThread").build();
+    this.installSnapshotExecutor =
+        HadoopExecutors.newSingleThreadExecutor(installSnapshotThreadFactory);
+    this.nettyMetrics = nettyMetrics;
   }
 
   /**
    * Initializes the State Machine with the given server, group and storage.
    */
   @Override
-  public void initialize(RaftServer server, RaftGroupId id,
-      RaftStorage raftStorage) throws IOException {
+  public void initialize(RaftServer server, RaftGroupId id, RaftStorage raftStorage) throws IOException {
     getLifeCycle().startAndTransition(() -> {
       super.initialize(server, id, raftStorage);
-      this.raftGroupId = id;
-      storage.init(raftStorage);
+      LOG.info("{}: initialize {} with {}", getId(), id, getLastAppliedTermIndex());
     });
   }
 
@@ -158,8 +177,13 @@ public class OzoneManagerStateMachine extends BaseStateMachine {
   public synchronized void reinitialize() throws IOException {
     loadSnapshotInfoFromDB();
     if (getLifeCycleState() == LifeCycle.State.PAUSED) {
-      unpause(getLastAppliedTermIndex().getIndex(),
-          getLastAppliedTermIndex().getTerm());
+      final TermIndex lastApplied = getLastAppliedTermIndex();
+      unpause(lastApplied.getIndex(), lastApplied.getTerm());
+      LOG.info("{}: reinitialize {} with {}", getId(), getGroupId(), lastApplied);
+      OMMetrics metrics = ozoneManager.getMetrics();
+      if (metrics != null) {
+        metrics.addRatisEvent("reinitialize: " + lastApplied);
+      }
     }
   }
 
@@ -171,34 +195,107 @@ public class OzoneManagerStateMachine extends BaseStateMachine {
   }
 
   @Override
-  public void notifyLeaderChanged(RaftGroupMemberId groupMemberId,
-                                  RaftPeerId newLeaderId) {
-    // Initialize OMHAMetrics
-    ozoneManager.omHAMetricsInit(newLeaderId.toString());
+  public void notifyLeaderReady() {
+    ozoneManager.getOmSnapshotManager().resetInFlightSnapshotCount();
+    OMMetrics metrics = ozoneManager.getMetrics();
+    if (metrics != null) {
+      metrics.addRatisEvent("Ready to serve requests as the leader");
+    }
+    ozoneManager.getOMServiceManager().notifyStatusChanged();
   }
 
-  /**
-   * Called to notify state machine about indexes which are processed
-   * internally by Raft Server, this currently happens when conf entries are
-   * processed in raft Server. This keep state machine to keep a track of index
-   * updates.
-   * @param currentTerm term of the current log entry
-   * @param index index which is being updated
-   */
   @Override
-  public void notifyTermIndexUpdated(long currentTerm, long index) {
-    // SnapshotInfo should be updated when the term changes.
-    // The index here refers to the log entry index and the index in
-    // SnapshotInfo represents the snapshotIndex i.e. the index of the last
-    // transaction included in the snapshot. Hence, snaphsotInfo#index is not
-    // updated here.
+  public void notifyNotLeader(Collection<TransactionContext> pendingEntries) {
+    LOG.info("current leader OM steps down.");
+    OMMetrics metrics = ozoneManager.getMetrics();
+    if (metrics != null) {
+      metrics.addRatisEvent("current leader OM steps down.");
+    }
+    ozoneManager.getOMServiceManager().notifyStatusChanged();
+  }
 
-    // We need to call updateLastApplied here because now in ratis when a
-    // node becomes leader, it is checking stateMachineIndex >=
-    // placeHolderIndex (when a node becomes leader, it writes a conf entry
-    // with some information like its peers and termIndex). So, calling
-    // updateLastApplied updates lastAppliedTermIndex.
-    computeAndUpdateLastAppliedIndex(index, currentTerm, null, false);
+  @Override
+  public void notifyLeaderChanged(RaftGroupMemberId groupMemberId,
+                                  RaftPeerId newLeaderId) {
+    RaftPeerId currentPeerId = groupMemberId.getPeerId();
+    if (newLeaderId.equals(currentPeerId)) {
+      // warmup cache
+      ozoneManager.initializeEdekCache(ozoneManager.getConfiguration());
+    }
+    // Store the previous leader before updating
+    RaftPeerId actualPreviousLeader = previousLeaderId;
+
+    // Update the previous leader for next time
+    previousLeaderId = newLeaderId;
+    // Initialize OMHAMetrics
+    ozoneManager.omHAMetricsInit(newLeaderId.toString());
+    // Notify OM service of leader change
+    ozoneManager.getOMServiceManager().notifyStatusChanged();
+
+    Map<String, String> auditParams = new LinkedHashMap<>();
+    auditParams.put(AUDIT_PARAM_PREVIOUS_LEADER,
+        actualPreviousLeader != null ? String.valueOf(actualPreviousLeader) : "NONE");
+    auditParams.put(AUDIT_PARAM_NEW_LEADER, String.valueOf(newLeaderId));
+    AUDIT.logWriteSuccess(ozoneManager.buildAuditMessageForSuccess(OMSystemAction.LEADER_CHANGE, auditParams));
+
+    LOG.info("{}: leader changed to {}", groupMemberId, newLeaderId);
+    OMMetrics metrics = ozoneManager.getMetrics();
+    if (metrics != null) {
+      metrics.addRatisEvent("Leader changed to " + newLeaderId);
+    }
+  }
+
+  /** Notified by Ratis for non-StateMachine term-index update. */
+  @Override
+  public void notifyTermIndexUpdated(long currentTerm, long newIndex) {
+    synchronized (termIndexLock) {
+      // lastSkippedIndex is start of sequence (one less) of continuous notification from ratis
+      // if there is any applyTransaction (double buffer index), then this gap is handled during double buffer
+      // notification and lastSkippedIndex will be the start of last continuous sequence.
+      final long oldIndex = lastNotifiedTermIndex.getIndex();
+      if (newIndex - oldIndex > 1) {
+        lastSkippedIndex = newIndex - 1;
+      }
+      final TermIndex newTermIndex = TermIndex.valueOf(currentTerm, newIndex);
+      lastNotifiedTermIndex = assertUpdateIncreasingly("lastNotified", lastNotifiedTermIndex, newTermIndex);
+      if (lastNotifiedTermIndex.getIndex() - getLastAppliedTermIndex().getIndex() == 1) {
+        updateLastAppliedTermIndex(lastNotifiedTermIndex);
+      }
+    }
+  }
+
+  public TermIndex getLastNotifiedTermIndex() {
+    return lastNotifiedTermIndex;
+  }
+
+  @Override
+  protected boolean updateLastAppliedTermIndex(TermIndex newTermIndex) {
+    synchronized (termIndexLock) {
+      TermIndex lastApplied = getLastAppliedTermIndex();
+      assertUpdateIncreasingly("lastApplied", lastApplied, newTermIndex);
+      // if newTermIndex getting updated is within sequence of notifiedTermIndex (i.e. from lastSkippedIndex and
+      // notifiedTermIndex), then can update directly to lastNotifiedTermIndex as it ensure previous double buffer's
+      // Index is notified or getting notified matching lastSkippedIndex
+      if (newTermIndex.getIndex() < getLastNotifiedTermIndex().getIndex()
+          && newTermIndex.getIndex() >= lastSkippedIndex) {
+        newTermIndex = getLastNotifiedTermIndex();
+      }
+      return super.updateLastAppliedTermIndex(newTermIndex);
+    }
+  }
+
+  /** Restore the applied term index when loading persisted state. */
+  private void restoreLastAppliedTermIndex(TermIndex termIndex) {
+    synchronized (termIndexLock) {
+      setLastAppliedTermIndex(termIndex);
+    }
+  }
+
+  /** Assert if the given {@link TermIndex} is updated increasingly. */
+  private TermIndex assertUpdateIncreasingly(String name, TermIndex oldTermIndex, TermIndex newTermIndex) {
+    Preconditions.checkArgument(newTermIndex.compareTo(oldTermIndex) >= 0,
+        "%s: newTermIndex = %s < oldTermIndex = %s", name, newTermIndex, oldTermIndex);
+    return newTermIndex;
   }
 
   /**
@@ -210,14 +307,43 @@ public class OzoneManagerStateMachine extends BaseStateMachine {
       RaftProtos.RaftConfigurationProto newRaftConfiguration) {
     List<RaftProtos.RaftPeerProto> newPeers =
         newRaftConfiguration.getPeersList();
-    LOG.info("Received Configuration change notification from Ratis. New Peer" +
-        " list:\n{}", newPeers);
+    List<RaftProtos.RaftPeerProto> newListeners =
+        newRaftConfiguration.getListenersList();
+    final StringBuilder logBuilder = new StringBuilder(1024)
+        .append("notifyConfigurationChanged from Ratis: term=").append(term)
+        .append(", index=").append(index)
+        .append(", New Peer list: ");
+    newPeers.forEach(peer -> logBuilder.append(peer.getId().toStringUtf8())
+        .append('(')
+        .append(peer.getAddress())
+        .append("), "));
+    logBuilder.append("New Listener list: ");
+    newListeners.forEach(peer -> logBuilder.append(peer.getId().toStringUtf8())
+        .append('(')
+        .append(peer.getAddress())
+        .append("), "));
+    LOG.info(logBuilder.substring(0, logBuilder.length() - 2));
 
     List<String> newPeerIds = new ArrayList<>();
     for (RaftProtos.RaftPeerProto raftPeerProto : newPeers) {
       newPeerIds.add(RaftPeerId.valueOf(raftPeerProto.getId()).toString());
     }
+    List<String> newListenersIds = new ArrayList<>();
+    for (RaftProtos.RaftPeerProto raftListenerProto : newListeners) {
+      newListenersIds.add(RaftPeerId.valueOf(raftListenerProto.getId()).toString());
+    }
+
+    OMMetrics metrics = ozoneManager.getMetrics();
+    if (metrics != null) {
+      metrics.addRatisEvent(
+          "New peers " + newPeerIds +
+              (newListenersIds.isEmpty() ? "" : ", new listeners " + newListenersIds) +
+              " added at term index (" +
+              term + ", " + index + ")");
+    }
+
     // Check and update the peer list in OzoneManager
+    newPeerIds.addAll(newListenersIds);
     ozoneManager.updatePeerList(newPeerIds);
   }
 
@@ -233,6 +359,11 @@ public class OzoneManagerStateMachine extends BaseStateMachine {
                                       long snapshotIndex, RaftPeer peer) {
     LOG.info("Receive notifySnapshotInstalled event {} for the peer: {}" +
         " snapshotIndex: {}.", result, peer.getId(), snapshotIndex);
+    OMMetrics metrics = ozoneManager.getMetrics();
+    if (metrics != null) {
+      metrics.addRatisEvent("Install snapshot " +
+          result + ", snapshotIndex=" + snapshotIndex + ", peer=" + peer.getId());
+    }
     switch (result) {
     case SUCCESS:
     case SNAPSHOT_UNAVAILABLE:
@@ -260,7 +391,7 @@ public class OzoneManagerStateMachine extends BaseStateMachine {
         messageContent);
 
     Preconditions.checkArgument(raftClientRequest.getRaftGroupId().equals(
-        raftGroupId));
+        getGroupId()));
     try {
       handler.validateRequest(omRequest);
     } catch (IOException ioe) {
@@ -272,7 +403,14 @@ public class OzoneManagerStateMachine extends BaseStateMachine {
       ctxt.setException(ioe);
       return ctxt;
     }
-    return handleStartTransactionRequests(raftClientRequest, omRequest);
+
+    return TransactionContext.newBuilder()
+        .setClientRequest(raftClientRequest)
+        .setStateMachine(this)
+        .setServerRole(RaftProtos.RaftPeerRole.LEADER)
+        .setLogData(raftClientRequest.getMessage().getContent())
+        .setStateMachineContext(omRequest)
+        .build();
   }
 
   @Override
@@ -283,6 +421,10 @@ public class OzoneManagerStateMachine extends BaseStateMachine {
 
     OzoneManagerPrepareState prepareState = ozoneManager.getPrepareState();
 
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("{}: preAppendTransaction {}", getId(), TermIndex.valueOf(trx.getLogEntry()));
+    }
+
     if (cmdType == OzoneManagerProtocolProtos.Type.Prepare) {
       // Must authenticate prepare requests here, since we must determine
       // whether or not to apply the prepare gate before proceeding with the
@@ -290,11 +432,10 @@ public class OzoneManagerStateMachine extends BaseStateMachine {
       UserGroupInformation userGroupInformation =
           UserGroupInformation.createRemoteUser(
           request.getUserInfo().getUserName());
-      if (ozoneManager.getAclsEnabled()
+      if (ozoneManager.isAdminAuthorizationEnabled()
           && !ozoneManager.isAdmin(userGroupInformation)) {
         String message = "Access denied for user " + userGroupInformation
-            + ". "
-            + "Superuser privilege is required to prepare ozone managers.";
+            + ". Superuser privilege is required to prepare upgrade/downgrade.";
         OMException cause =
             new OMException(message, OMException.ResultCodes.ACCESS_DENIED);
         // Leader should not step down because of this failure.
@@ -331,7 +472,7 @@ public class OzoneManagerStateMachine extends BaseStateMachine {
           : OMRatisHelper.convertByteStringToOMRequest(
           trx.getStateMachineLogEntry().getLogData());
       final TermIndex termIndex = TermIndex.valueOf(trx.getLogEntry());
-      final long trxLogIndex = termIndex.getIndex();
+      LOG.debug("{}: applyTransaction {}", getId(), termIndex);
       // In the current approach we have one single global thread executor.
       // with single thread. Right now this is being done for correctness, as
       // applyTransaction will be run on multiple OM's we want to execute the
@@ -346,72 +487,34 @@ public class OzoneManagerStateMachine extends BaseStateMachine {
       // lastAppliedIndex in OzoneManager StateMachine, even if other
       // executor has completed the transactions with id more.
 
-      // We have 300 transactions, And for each volume we have transactions
-      // of 150. Volume1 transactions 0 - 149 and Volume2 transactions 150 -
-      // 299.
-      // Example: Executor1 - Volume1 - 100 (current completed transaction)
-      // Example: Executor2 - Volume2 - 299 (current completed transaction)
-
-      // Now we have applied transactions of 0 - 100 and 149 - 299. We
-      // cannot update lastAppliedIndex to 299. We need to update it to 100,
-      // since 101 - 149 are not applied. When OM restarts it will
-      // applyTransactions from lastAppliedIndex.
-      // We can update the lastAppliedIndex to 100, and update it to 299,
-      // only after completing 101 - 149. In initial stage, we are starting
-      // with single global executor. Will revisit this when needed.
-
-      // Add the term index and transaction log index to applyTransaction map
-      // . This map will be used to update lastAppliedIndex.
-
-      CompletableFuture<Message> ratisFuture =
-          new CompletableFuture<>();
-      applyTransactionMap.put(trxLogIndex, trx.getLogEntry().getTerm());
-
       //if there are too many pending requests, wait for doubleBuffer flushing
       ozoneManagerDoubleBuffer.acquireUnFlushedTransactions(1);
 
-      CompletableFuture<OMResponse> future = CompletableFuture.supplyAsync(
-          () -> runCommand(request, termIndex), executorService);
-      future.thenApply(omResponse -> {
-        if (!omResponse.getSuccess()) {
-          // When INTERNAL_ERROR or METADATA_ERROR it is considered as
-          // critical error and terminate the OM. Considering INTERNAL_ERROR
-          // also for now because INTERNAL_ERROR is thrown for any error
-          // which is not type OMException.
-
-          // Not done future with completeExceptionally because if we do
-          // that OM will still continue applying transaction until next
-          // snapshot. So in OM case if a transaction failed with un
-          // recoverable error and if we wait till snapshot to terminate
-          // OM, then if some client requested the read transaction of the
-          // failed request, there is a chance we shall give wrong result.
-          // So, to avoid these kind of issue, we should terminate OM here.
-          if (omResponse.getStatus() == INTERNAL_ERROR) {
-            terminate(omResponse, OMException.ResultCodes.INTERNAL_ERROR);
-          } else if (omResponse.getStatus() == METADATA_ERROR) {
-            terminate(omResponse, OMException.ResultCodes.METADATA_ERROR);
-          }
-        }
-
-        // For successful response and for all other errors which are not
-        // critical, we can complete future normally.
-        ratisFuture.complete(OMRatisHelper.convertResponseToMessage(
-            omResponse));
-        return ratisFuture;
-      });
-      return ratisFuture;
+      return CompletableFuture.supplyAsync(() -> runCommand(request, termIndex), executorService)
+          .thenApply(this::processResponse);
     } catch (Exception e) {
       return completeExceptionally(e);
     }
   }
 
-  /**
-   * Terminate OM.
-   * @param omResponse
-   * @param resultCode
-   */
-  private void terminate(OMResponse omResponse,
-      OMException.ResultCodes resultCode) {
+  @VisibleForTesting
+  Message processResponse(OMResponse omResponse) {
+    if (!omResponse.getSuccess()) {
+      // INTERNAL_ERROR or METADATA_ERROR are considered as critical errors.
+      // In such cases, OM must be terminated instead of completing the future exceptionally,
+      // Otherwise, OM may continue applying transactions which leads to an inconsistent state.
+      if (omResponse.getStatus() == INTERNAL_ERROR) {
+        terminate(omResponse, OMException.ResultCodes.INTERNAL_ERROR);
+      } else if (omResponse.getStatus() == METADATA_ERROR) {
+        terminate(omResponse, OMException.ResultCodes.METADATA_ERROR);
+      }
+    }
+
+    // For successful response and non-critical errors, convert the response.
+    return OMRatisHelper.convertResponseToMessage(omResponse);
+  }
+
+  private static void terminate(OMResponse omResponse, OMException.ResultCodes resultCode) {
     OMException exception = new OMException(omResponse.getMessage(),
         resultCode);
     String errorMessage = "OM Ratis Server has received unrecoverable " +
@@ -438,11 +541,11 @@ public class OzoneManagerStateMachine extends BaseStateMachine {
   public synchronized void pause() {
     LOG.info("OzoneManagerStateMachine is pausing");
     statePausedCount.incrementAndGet();
-    if (getLifeCycleState() == LifeCycle.State.PAUSED) {
+    final LifeCycle.State state = getLifeCycleState();
+    if (state == LifeCycle.State.PAUSED) {
       return;
     }
-    final LifeCycle lc = getLifeCycle();
-    if (lc.getCurrentState() != LifeCycle.State.NEW) {
+    if (state != LifeCycle.State.NEW) {
       getLifeCycle().transition(LifeCycle.State.PAUSING);
       getLifeCycle().transition(LifeCycle.State.PAUSED);
     }
@@ -457,30 +560,31 @@ public class OzoneManagerStateMachine extends BaseStateMachine {
    */
   public synchronized void unpause(long newLastAppliedSnaphsotIndex,
       long newLastAppliedSnapShotTermIndex) {
-    LOG.info("OzoneManagerStateMachine is un-pausing");
     if (statePausedCount.decrementAndGet() == 0) {
       getLifeCycle().startAndTransition(() -> {
         this.ozoneManagerDoubleBuffer = buildDoubleBufferForRatis();
-        handler.updateDoubleBuffer(ozoneManagerDoubleBuffer);
-        this.setLastAppliedTermIndex(TermIndex.valueOf(
+        restoreLastAppliedTermIndex(TermIndex.valueOf(
             newLastAppliedSnapShotTermIndex, newLastAppliedSnaphsotIndex));
+        LOG.info("{}: OzoneManagerStateMachine un-pause completed. " +
+            "newLastAppliedSnapshotIndex: {}, newLastAppliedSnapShotTermIndex: {}",
+                getId(), newLastAppliedSnaphsotIndex, newLastAppliedSnapShotTermIndex);
       });
     }
   }
 
   public OzoneManagerDoubleBuffer buildDoubleBufferForRatis() {
-    int maxUnflushedTransactionSize = ozoneManager.getConfiguration()
+    final int maxUnFlushedTransactionCount = ozoneManager.getConfiguration()
         .getInt(OMConfigKeys.OZONE_OM_UNFLUSHED_TRANSACTION_MAX_COUNT,
             OMConfigKeys.OZONE_OM_UNFLUSHED_TRANSACTION_MAX_COUNT_DEFAULT);
-    return new OzoneManagerDoubleBuffer.Builder()
+    return OzoneManagerDoubleBuffer.newBuilder()
         .setOmMetadataManager(ozoneManager.getMetadataManager())
-        .setOzoneManagerRatisSnapShot(this::updateLastAppliedIndex)
-        .setmaxUnFlushedTransactionCount(maxUnflushedTransactionSize)
+        .setUpdateLastAppliedIndex(this::updateLastAppliedTermIndex)
+        .setMaxUnFlushedTransactionCount(maxUnFlushedTransactionCount)
         .setThreadPrefix(threadPrefix)
         .setS3SecretManager(ozoneManager.getS3SecretManager())
-        .enableRatis(true)
         .enableTracing(isTracingEnabled)
-        .build();
+        .build()
+        .start();
   }
 
   /**
@@ -493,15 +597,48 @@ public class OzoneManagerStateMachine extends BaseStateMachine {
    */
   @Override
   public long takeSnapshot() throws IOException {
-    LOG.info("Current Snapshot Index {}", getLastAppliedTermIndex());
-    TermIndex lastTermIndex = getLastAppliedTermIndex();
-    final TransactionInfo build = TransactionInfo.valueOf(lastTermIndex);
-    ozoneManager.setTransactionInfo(build);
-    Table<String, TransactionInfo> txnInfoTable =
-        ozoneManager.getMetadataManager().getTransactionInfoTable();
-    txnInfoTable.put(TRANSACTION_INFO_KEY, build);
-    ozoneManager.getMetadataManager().getStore().flushDB();
-    return lastTermIndex.getIndex();
+    // wait until applied == skipped
+    while (getLastAppliedTermIndex().getIndex() < lastSkippedIndex) {
+      if (ozoneManager.isStopped()) {
+        throw new IOException("OzoneManager is already stopped: " + ozoneManager.getNodeDetails());
+      }
+      try {
+        ozoneManagerDoubleBuffer.awaitFlush();
+      } catch (InterruptedException e) {
+        throw IOUtils.toInterruptedIOException("Interrupted ozoneManagerDoubleBuffer.awaitFlush", e);
+      }
+    }
+
+    return takeSnapshotImpl();
+  }
+
+  /**
+   * Keep this synchronized on the state-machine monitor so an in-progress
+   * snapshot finishes before checkpoint pause returns and installation can
+   * replace the metadata store. The nested term-index lock provides a
+   * consistent index to persist.
+   */
+  private synchronized long takeSnapshotImpl() throws IOException {
+    synchronized (termIndexLock) {
+      final TermIndex applied = getLastAppliedTermIndex();
+      final TermIndex notified = getLastNotifiedTermIndex();
+      final TermIndex snapshot = applied.compareTo(notified) > 0 ? applied : notified;
+
+      long startTime = Time.monotonicNow();
+      // The double buffer may have committed transactions past the index computed above, since it
+      // advances lastAppliedTermIndex only after its batch commit returns. Persisting through it
+      // keeps the stored index from moving backwards over that data, and yields whichever value is
+      // actually stored so the in-memory copy Ratis reads cannot disagree with the DB.
+      final TransactionInfo transactionInfo =
+          ozoneManagerDoubleBuffer.persistIfNewer(TransactionInfo.valueOf(snapshot));
+      ozoneManager.setTransactionInfo(transactionInfo);
+      ozoneManager.getMetadataManager().getStore().flushDB();
+      LOG.info("{}: taking snapshot. applied = {}, skipped = {}, " +
+          "notified = {}, current snapshot index = {}, took {} ms",
+              getId(), applied, lastSkippedIndex, notified, transactionInfo.getTermIndex(),
+              Time.monotonicNow() - startTime);
+      return transactionInfo.getTermIndex().getIndex();
+    }
   }
 
   /**
@@ -520,19 +657,21 @@ public class OzoneManagerStateMachine extends BaseStateMachine {
         .getLeaderInfo().getId().getId()).toString();
     LOG.info("Received install snapshot notification from OM leader: {} with " +
             "term index: {}", leaderNodeId, firstTermIndexInLog);
+    OMMetrics metrics = ozoneManager.getMetrics();
+    if (metrics != null) {
+      metrics.addRatisEvent("Installing snapshot from " +
+          "OM leader " + leaderNodeId + ", term index: " + firstTermIndexInLog);
+    }
 
-    CompletableFuture<TermIndex> future = CompletableFuture.supplyAsync(
-        () -> ozoneManager.installSnapshotFromLeader(leaderNodeId),
+    return CompletableFuture.supplyAsync(
+        () -> {
+          try {
+            return ozoneManager.installSnapshotFromLeader(leaderNodeId);
+          } catch (IOException e) {
+            throw new CompletionException(e);
+          }
+        },
         installSnapshotExecutor);
-    return future;
-  }
-
-  /**
-   * Notifies the state machine that the raft peer is no longer leader.
-   */
-  @Override
-  public void notifyNotLeader(Collection<TransactionContext> pendingEntries)
-      throws IOException {
   }
 
   @Override
@@ -541,44 +680,62 @@ public class OzoneManagerStateMachine extends BaseStateMachine {
   }
 
   @Override
-  public void close() throws IOException {
+  public void close() {
     // OM should be shutdown as the StateMachine has shutdown.
-    LOG.info("StateMachine has shutdown. Shutdown OzoneManager if not " +
-        "already shutdown.");
     if (!ozoneManager.isStopped()) {
+      LOG.info("Stopping {}. Shutdown also OzoneManager {}.", this, ozoneManager);
       ozoneManager.shutDown("OM state machine is shutdown by Ratis server");
     } else {
+      LOG.info("Stopping {}.", this);
       stop();
     }
-  }
-
-  /**
-   * Handle the RaftClientRequest and return TransactionContext object.
-   * @param raftClientRequest
-   * @param omRequest
-   * @return TransactionContext
-   */
-  private TransactionContext handleStartTransactionRequests(
-      RaftClientRequest raftClientRequest, OMRequest omRequest) {
-
-    return TransactionContext.newBuilder()
-        .setClientRequest(raftClientRequest)
-        .setStateMachine(this)
-        .setServerRole(RaftProtos.RaftPeerRole.LEADER)
-        .setLogData(raftClientRequest.getMessage().getContent())
-        .setStateMachineContext(omRequest)
-        .build();
   }
 
   /**
    * Submits write request to OM and returns the response Message.
    * @param request OMRequest
    * @return response from OM
-   * @throws ServiceException
    */
-  private OMResponse runCommand(OMRequest request, TermIndex termIndex) {
+  @VisibleForTesting
+  OMResponse runCommand(OMRequest request, TermIndex termIndex) {
+    boolean isS3AuthThreadLocalSet = false;
+    boolean isStsThreadLocalSet = false;
     try {
-      OMClientResponse omClientResponse = handler.handleWriteRequest(request, termIndex);
+      if (ozoneManager.isSecurityEnabled() && request.hasS3Authentication()) {
+        // STS token verification runs on the leader RPC path so we don't need to recheck here on the apply
+        // after the log is committed
+        STSSecurityUtil.ensureResolvedStsFieldsInvariants(request);
+
+        final OzoneManagerProtocolProtos.S3Authentication s3Auth = request.getS3Authentication();
+        // ThreadLocal carries S3 action for OmMetadataReader.
+        OzoneManager.setS3Auth(s3Auth);
+        isS3AuthThreadLocalSet = true;
+
+        if (s3Auth.hasSessionToken() && !s3Auth.getSessionToken().isEmpty()) {
+          // ThreadLocal carries session policy for OmMetadataReader
+          // Use Instant.MAX for creationTime so a future revocation check on this ThreadLocal
+          // identifier never treats the token as issued before a stored cutoff.
+          final STSTokenIdentifier rehydratedTokenIdentifier = new STSTokenIdentifier(
+              STSTokenIdentifier.Params.newBuilder()
+                  .setTempAccessKeyId(
+                      s3Auth.hasResolvedStsTempAccessKeyId() ? s3Auth.getResolvedStsTempAccessKeyId() : "")
+                  .setOriginalAccessKeyId(
+                      s3Auth.hasResolvedStsOriginalAccessKeyId() ? s3Auth.getResolvedStsOriginalAccessKeyId() : "")
+                  .setRoleArn(s3Auth.hasResolvedStsRoleArn() ? s3Auth.getResolvedStsRoleArn() : "")
+                  .setCreationTime(Instant.MAX)
+                  .setExpiry(Instant.MAX) // ensure it deterministically is not expired
+                  .setSecretAccessKey(null) // no secretAccessKey needed
+                  .setSessionPolicy(
+                      s3Auth.hasResolvedStsSessionPolicy() ? s3Auth.getResolvedStsSessionPolicy() : "")
+                  .setManagedSecretKey(null) // no ManagedSecretKey needed
+                  .build());
+          OzoneManager.setStsTokenIdentifier(rehydratedTokenIdentifier);
+          isStsThreadLocalSet = true;
+        }
+      }
+      ExecutionContext context = ExecutionContext.of(termIndex.getIndex(), termIndex);
+      final OMClientResponse omClientResponse = handler.handleWriteRequest(
+          request, context, ozoneManagerDoubleBuffer);
       OMLockDetails omLockDetails = omClientResponse.getOmLockDetails();
       OMResponse omResponse = omClientResponse.getOMResponse();
       if (omLockDetails != null) {
@@ -594,11 +751,19 @@ public class OzoneManagerStateMachine extends BaseStateMachine {
       // For any Runtime exceptions, terminate OM.
       String errorMessage = "Request " + request + " failed with exception";
       ExitUtils.terminate(1, errorMessage, e, LOG);
+    } finally {
+      if (isS3AuthThreadLocalSet) {
+        OzoneManager.setS3Auth(null);
+      }
+      if (isStsThreadLocalSet) {
+        OzoneManager.setStsTokenIdentifier(null);
+      }
     }
     return null;
   }
 
-  private OMResponse createErrorResponse(
+  @VisibleForTesting
+  OMResponse createErrorResponse(
       OMRequest omRequest, IOException exception, TermIndex termIndex) {
     OMResponse.Builder omResponseBuilder = OMResponse.newBuilder()
         .setStatus(OzoneManagerRatisUtils.exceptionToResponseStatus(exception))
@@ -614,87 +779,6 @@ public class OzoneManagerStateMachine extends BaseStateMachine {
     return omResponse;
   }
 
-  /**
-   * Update lastAppliedIndex term and it's corresponding term in the
-   * stateMachine.
-   * @param flushedEpochs
-   */
-  public void updateLastAppliedIndex(List<Long> flushedEpochs) {
-    Preconditions.checkArgument(flushedEpochs.size() > 0);
-    computeAndUpdateLastAppliedIndex(
-        flushedEpochs.get(flushedEpochs.size() - 1), -1L, flushedEpochs, true);
-  }
-
-  /**
-   * Update State machine lastAppliedTermIndex.
-   * @param lastFlushedIndex
-   * @param currentTerm
-   * @param flushedEpochs - list of ratis transactions flushed to DB. If it
-   * is just one index and term, this can be set to null.
-   * @param checkMap - if true check applyTransactionMap, ratisTransaction
-   * Map and update lastAppliedTermIndex accordingly, else check
-   * lastAppliedTermIndex and update it.
-   */
-  private synchronized void computeAndUpdateLastAppliedIndex(
-      long lastFlushedIndex, long currentTerm, List<Long> flushedEpochs,
-      boolean checkMap) {
-    if (checkMap) {
-      List<Long> flushedTrans = new ArrayList<>(flushedEpochs);
-      Long appliedTerm = null;
-      long appliedIndex = -1;
-      for (long i = getLastAppliedTermIndex().getIndex() + 1; ; i++) {
-        if (flushedTrans.contains(i)) {
-          appliedIndex = i;
-          final Long removed = applyTransactionMap.remove(i);
-          appliedTerm = removed;
-          flushedTrans.remove(i);
-        } else if (ratisTransactionMap.containsKey(i)) {
-          final Long removed = ratisTransactionMap.remove(i);
-          appliedTerm = removed;
-          appliedIndex = i;
-        } else {
-          // Add remaining which are left in flushedEpochs to
-          // ratisTransactionMap to be considered further.
-          for (long epoch : flushedTrans) {
-            ratisTransactionMap.put(epoch, applyTransactionMap.remove(epoch));
-          }
-          if (LOG.isDebugEnabled()) {
-            if (!flushedTrans.isEmpty()) {
-              LOG.debug("ComputeAndUpdateLastAppliedIndex due to SM added " +
-                  "to map remaining {}", flushedTrans);
-            }
-          }
-          break;
-        }
-      }
-      if (appliedTerm != null) {
-        updateLastAppliedTermIndex(appliedTerm, appliedIndex);
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("ComputeAndUpdateLastAppliedIndex due to SM is {}",
-              getLastAppliedTermIndex());
-        }
-      }
-    } else {
-      if (getLastAppliedTermIndex().getIndex() + 1 == lastFlushedIndex) {
-        updateLastAppliedTermIndex(currentTerm, lastFlushedIndex);
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("ComputeAndUpdateLastAppliedIndex due to notifyIndex {}",
-              getLastAppliedTermIndex());
-        }
-      } else {
-        ratisTransactionMap.put(lastFlushedIndex, currentTerm);
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("ComputeAndUpdateLastAppliedIndex due to notifyIndex " +
-              "added to map. Passed Term {} index {}, where as lastApplied " +
-              "Index {}", currentTerm, lastFlushedIndex,
-              getLastAppliedTermIndex());
-        }
-      }
-    }
-    this.metrics.updateApplyTransactionMapSize(applyTransactionMap.size());
-    this.metrics.updateRatisTransactionMapSize(ratisTransactionMap.size());
-  }
-
   public void loadSnapshotInfoFromDB() throws IOException {
     // This is done, as we have a check in Ratis for not throwing
     // LeaderNotReadyException, it checks stateMachineIndex >= raftLog
@@ -704,7 +788,7 @@ public class OzoneManagerStateMachine extends BaseStateMachine {
             ozoneManager.getMetadataManager());
     if (transactionInfo != null) {
       final TermIndex ti =  transactionInfo.getTermIndex();
-      setLastAppliedTermIndex(ti);
+      restoreLastAppliedTermIndex(ti);
       ozoneManager.setTransactionInfo(transactionInfo);
       LOG.info("LastAppliedIndex is set from TransactionInfo from OM DB as {}", ti);
     } else {
@@ -738,40 +822,13 @@ public class OzoneManagerStateMachine extends BaseStateMachine {
     return (OzoneManagerRequestHandler) this.handler;
   }
 
-  @VisibleForTesting
-  public void setRaftGroupId(RaftGroupId raftGroupId) {
-    this.raftGroupId = raftGroupId;
-  }
-
-  @VisibleForTesting
-  public OzoneManagerStateMachineMetrics getMetrics() {
-    return this.metrics;
-  }
-
   public void stop() {
     ozoneManagerDoubleBuffer.stop();
     HadoopExecutors.shutdown(executorService, LOG, 5, TimeUnit.SECONDS);
     HadoopExecutors.shutdown(installSnapshotExecutor, LOG, 5, TimeUnit.SECONDS);
-    LOG.info("applyTransactionMap size {} ", applyTransactionMap.size());
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("applyTransactionMap {}",
-          applyTransactionMap.keySet().stream().map(Object::toString)
-              .collect(Collectors.joining(",")));
+    if (this.nettyMetrics != null) {
+      this.nettyMetrics.unregister();
     }
-    LOG.info("ratisTransactionMap size {}", ratisTransactionMap.size());
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("ratisTransactionMap {}",
-          ratisTransactionMap.keySet().stream().map(Object::toString)
-            .collect(Collectors.joining(",")));
-    }
-    if (metrics != null) {
-      metrics.unRegister();
-    }
-  }
-
-  @VisibleForTesting
-  void addApplyTransactionTermIndex(long term, long index) {
-    applyTransactionMap.put(index, term);
   }
 
   /**

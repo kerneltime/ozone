@@ -1,22 +1,29 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.hadoop.ozone.s3;
 
+import static org.apache.hadoop.ozone.s3.S3GatewayConfigKeys.OZONE_S3G_DOMAIN_NAME;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.net.HostAndPort;
+import java.io.IOException;
+import java.net.URI;
+import java.util.Arrays;
 import javax.annotation.Priority;
 import javax.inject.Inject;
 import javax.ws.rs.container.ContainerRequestContext;
@@ -26,19 +33,10 @@ import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MultivaluedMap;
 import javax.ws.rs.core.UriBuilder;
 import javax.ws.rs.ext.Provider;
-
-import java.io.IOException;
-import java.net.URI;
-import java.util.Arrays;
-
-
-import com.google.common.annotations.VisibleForTesting;
 import org.apache.hadoop.fs.InvalidRequestException;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import static org.apache.hadoop.ozone.s3.S3GatewayConfigKeys.OZONE_S3G_DOMAIN_NAME;
 
 /**
  * Filter used to convert virtual host style pattern to path style pattern.
@@ -63,14 +61,10 @@ public class VirtualHostStyleFilter implements ContainerRequestFilter {
   @Override
   public void filter(ContainerRequestContext requestContext) throws
       IOException {
-    // Skip this filter if the uri is hitting S3Secret generation or
-    // revocation endpoint.
-    if (requestContext.getUriInfo().getRequestUri().getPath()
-        .startsWith("/secret")) {
-      return;
-    }
-
     domains = conf.getTrimmedStrings(OZONE_S3G_DOMAIN_NAME);
+    for (int i = 0; i < domains.length; i++) {
+      domains[i] = normalizeDomain(domains[i]);
+    }
 
     if (domains.length == 0) {
       // domains is not configured, might be it is path style.
@@ -132,7 +126,6 @@ public class VirtualHostStyleFilter implements ContainerRequestFilter {
     this.conf = config;
   }
 
-
   /**
    * This method finds the longest match with the domain name.
    * @param host
@@ -154,13 +147,35 @@ public class VirtualHostStyleFilter implements ContainerRequestFilter {
     return match;
   }
 
-  private String checkHostWithoutPort(String host) {
-    if (host.contains(":")) {
-      return host.substring(0, host.lastIndexOf(":"));
-    } else {
+  /**
+   * Strips a trailing port from the Host header, if present. Uses bracket-aware
+   * parsing so IPv6 literals are handled correctly: {@code [::1]:9878} and
+   * {@code [::1]} both yield {@code ::1}, and a bare {@code 2001:db8::1} (whose
+   * colons are part of the address, not a port) is returned unchanged. A plain
+   * {@code lastIndexOf(':')} would mistake an address segment for the port.
+   */
+  @VisibleForTesting
+  String checkHostWithoutPort(String host) {
+    try {
+      return HostAndPort.fromString(host).getHost();
+    } catch (IllegalArgumentException e) {
+      // Malformed Host header (e.g. unbalanced brackets): fall back to the raw
+      // value so it is rejected with a clear "no matching domain" error rather
+      // than failing with an internal error.
       return host;
     }
   }
 
-
+  /**
+   * Strips surrounding brackets from a configured IPv6 domain so it matches the
+   * unbracketed host produced by {@link #checkHostWithoutPort(String)}, letting
+   * {@code ozone.s3g.domain.name} be configured in either form. For example
+   * {@code [::1]} becomes {@code ::1}; other values are returned unchanged.
+   */
+  private static String normalizeDomain(String domain) {
+    if (domain.length() > 1 && domain.startsWith("[") && domain.endsWith("]")) {
+      return domain.substring(1, domain.length() - 1);
+    }
+    return domain;
+  }
 }

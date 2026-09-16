@@ -1,13 +1,12 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,7 +14,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.hadoop.ozone.om.ratis_snapshot;
+
+import static java.net.HttpURLConnection.HTTP_OK;
+import static org.apache.hadoop.ozone.OzoneConsts.MULTIPART_FORM_DATA_BOUNDARY;
+import static org.assertj.core.api.AssertionsForClassTypes.assertThat;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyBoolean;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -25,27 +36,22 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystemException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-
+import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.server.http.HttpConfig;
 import org.apache.hadoop.hdfs.web.URLConnectionFactory;
 import org.apache.hadoop.ozone.OzoneConsts;
+import org.apache.hadoop.ozone.om.OMConfigKeys;
 import org.apache.hadoop.ozone.om.helpers.OMNodeDetails;
 import org.apache.hadoop.security.authentication.client.AuthenticationException;
+import org.apache.hadoop.util.DiskChecker.DiskOutOfSpaceException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-
-import static java.net.HttpURLConnection.HTTP_OK;
-import static org.apache.hadoop.ozone.OzoneConsts.MULTIPART_FORM_DATA_BOUNDARY;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /**
  * Unit tests for {@link OmRatisSnapshotProvider}.
@@ -61,7 +67,6 @@ public class TestOmRatisSnapshotProvider {
       "Content-Disposition: form-data; name=\""
           + OzoneConsts.OZONE_DB_CHECKPOINT_REQUEST_TO_EXCLUDE_SST + "[]\""
           + CR_NL + CR_NL;
-  private StringBuilder sb;
   private File targetFile;
 
   @BeforeEach
@@ -80,18 +85,67 @@ public class TestOmRatisSnapshotProvider {
     omRatisSnapshotProvider =
         new OmRatisSnapshotProvider(snapshotDir, peerNodesMap, httpPolicy,
             false, connectionFactory);
+  }
 
-    sb = new StringBuilder();
-    sb.append("--" + MULTIPART_FORM_DATA_BOUNDARY + CR_NL);
-    sb.append(CONTENT_DISPOSITION);
+  @Test
+  public void testIsDiskFullOrQuotaIOExceptionDetectsNoSpaceMessage() {
+    assertThat(OmRatisSnapshotProvider.isDiskFullOrQuotaIOException(
+        new IOException("No space left on device"))).isTrue();
+  }
+
+  @Test
+  public void testIsDiskFullOrQuotaIOExceptionDetectsFileSystemExceptionReason() {
+    IOException wrapped = new IOException("write failed",
+        new FileSystemException("p", null, "No space left on device"));
+    assertThat(OmRatisSnapshotProvider.isDiskFullOrQuotaIOException(wrapped)).isTrue();
+  }
+
+  @Test
+  public void testIsDiskFullOrQuotaIOExceptionDetectsDiskOutOfSpaceExceptionInCauseChain() {
+    IOException wrapped = new IOException("write failed", new DiskOutOfSpaceException("full"));
+    assertThat(OmRatisSnapshotProvider.isDiskFullOrQuotaIOException(wrapped)).isTrue();
+  }
+
+  @Test
+  public void testIsDiskFullOrQuotaIOExceptionReturnsFalseForNonEnglishFileSystemException() {
+    IOException wrapped = new IOException("write failed",
+        new FileSystemException("p", null, "Kein Speicherplatz mehr auf dem Gerät"));
+    assertThat(OmRatisSnapshotProvider.isDiskFullOrQuotaIOException(wrapped)).isFalse();
+  }
+
+  @Test
+  public void testIsDiskFullOrQuotaIOExceptionReturnsFalseForOtherErrors() {
+    assertThat(OmRatisSnapshotProvider.isDiskFullOrQuotaIOException(
+        new IOException("Connection reset"))).isFalse();
+  }
+
+  @Test
+  public void testBootstrapDiskSpaceCheckSkippedWhenZero(@TempDir File snapshotDir) {
+    OzoneConfiguration conf = new OzoneConfiguration();
+    conf.set(OMConfigKeys.OZONE_OM_BOOTSTRAP_MIN_SPACE_KEY, "0GB");
+    OmRatisSnapshotProvider provider =
+        new OmRatisSnapshotProvider(conf, snapshotDir, new HashMap<>());
+    assertDoesNotThrow(provider::ensureBootstrapDiskSpace);
+  }
+
+  @Test
+  public void testBootstrapDiskSpaceCheckFailsWhenBelowMinimum(@TempDir File snapshotDir) {
+    OzoneConfiguration conf = new OzoneConfiguration();
+    conf.set(OMConfigKeys.OZONE_OM_BOOTSTRAP_MIN_SPACE_KEY, "1024EB");
+    OmRatisSnapshotProvider provider =
+        new OmRatisSnapshotProvider(conf, snapshotDir, new HashMap<>());
+    IOException ex =
+        assertThrows(IOException.class, provider::ensureBootstrapDiskSpace);
+    assertThat(ex.getMessage()).contains(OMConfigKeys.OZONE_OM_BOOTSTRAP_MIN_SPACE_KEY);
   }
 
   @Test
   public void testDownloadSnapshot() throws IOException,
       AuthenticationException {
     URL omCheckpointUrl = mock(URL.class);
-    when(leader.getOMDBCheckpointEndpointUrl(anyBoolean(), anyBoolean()))
-        .thenReturn(omCheckpointUrl);
+    StringBuilder sb = getStringBuilder();
+    when(leader.getOMDBCheckpointEndpointUrl(anyBoolean(),
+        anyBoolean(), anyBoolean())).thenReturn(omCheckpointUrl);
 
     HttpURLConnection connection = mock(HttpURLConnection.class);
     when(connectionFactory.openConnection(any(URL.class), anyBoolean()))
@@ -106,7 +160,7 @@ public class TestOmRatisSnapshotProvider {
 
     omRatisSnapshotProvider.downloadSnapshot(leaderNodeId, targetFile);
 
-    sb.append("--" + MULTIPART_FORM_DATA_BOUNDARY + "--" + CR_NL);
+    sb.append("--").append(MULTIPART_FORM_DATA_BOUNDARY).append("--").append(CR_NL);
     assertEquals(sb.toString(),
         new String(outputStream.toByteArray(), StandardCharsets.UTF_8));
   }
@@ -118,13 +172,14 @@ public class TestOmRatisSnapshotProvider {
     String fileName = "file1.sst";
     sstFiles.add(fileName);
     ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+    StringBuilder sb = getStringBuilder();
     when(connection.getOutputStream()).thenReturn(outputStream);
 
 
     OmRatisSnapshotProvider.writeFormData(connection, sstFiles);
 
-    sb.append(fileName).append(CR_NL);
-    sb.append("--" + MULTIPART_FORM_DATA_BOUNDARY + "--" + CR_NL);
+    sb.append(fileName).append(CR_NL)
+        .append("--").append(MULTIPART_FORM_DATA_BOUNDARY).append("--").append(CR_NL);
     assertEquals(sb.toString(),
         new String(outputStream.toByteArray(), StandardCharsets.UTF_8));
   }
@@ -133,13 +188,21 @@ public class TestOmRatisSnapshotProvider {
   public void testWriteFormDataWithoutSstFile() throws IOException {
     HttpURLConnection connection = mock(HttpURLConnection.class);
     ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+    StringBuilder sb = getStringBuilder();
     when(connection.getOutputStream()).thenReturn(outputStream);
 
     OmRatisSnapshotProvider.writeFormData(connection, new ArrayList<>());
 
-    sb.append("--" + MULTIPART_FORM_DATA_BOUNDARY + "--" + CR_NL);
+    sb.append("--").append(MULTIPART_FORM_DATA_BOUNDARY).append("--").append(CR_NL);
     assertEquals(sb.toString(),
         new String(outputStream.toByteArray(), StandardCharsets.UTF_8));
+  }
+
+  private static StringBuilder getStringBuilder() {
+    StringBuilder sb = new StringBuilder();
+    sb.append("--").append(MULTIPART_FORM_DATA_BOUNDARY).append(CR_NL)
+        .append(CONTENT_DISPOSITION);
+    return sb;
   }
 
 }

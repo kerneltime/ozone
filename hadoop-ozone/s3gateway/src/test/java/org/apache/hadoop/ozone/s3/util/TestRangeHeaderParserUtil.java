@@ -1,13 +1,12 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,11 +17,11 @@
 
 package org.apache.hadoop.ozone.s3.util;
 
-import org.junit.jupiter.api.Test;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import org.junit.jupiter.api.Test;
 
 /**
  * Test class to test RangeHeaderParserUtil.
@@ -57,6 +56,13 @@ public class TestRangeHeaderParserUtil {
     // range is satisfying, one of the range is with in the length. So, read
     // full file
     rangeHeader = RangeHeaderParserUtil.parseRangeHeader("bytes=11-8", 10);
+    assertEquals(0, rangeHeader.getStartOffset());
+    assertEquals(9, rangeHeader.getEndOffset());
+    assertTrue(rangeHeader.isReadFull());
+    assertFalse(rangeHeader.isInValidRange());
+
+    // inverted range, start is still inside the object
+    rangeHeader = RangeHeaderParserUtil.parseRangeHeader("bytes=8-3", 10);
     assertEquals(0, rangeHeader.getStartOffset());
     assertEquals(9, rangeHeader.getEndOffset());
     assertTrue(rangeHeader.isReadFull());

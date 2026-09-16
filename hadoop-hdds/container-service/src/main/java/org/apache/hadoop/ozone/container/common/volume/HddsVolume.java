@@ -1,13 +1,12 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,38 +17,49 @@
 
 package org.apache.hadoop.ozone.container.common.volume;
 
+import static org.apache.hadoop.hdds.HddsConfigKeys.OZONE_DATANODE_IO_METRICS_PERCENTILES_INTERVALS_SECONDS_KEY;
+import static org.apache.hadoop.ozone.OzoneConsts.CONTAINER_DB_NAME;
+import static org.apache.hadoop.ozone.container.common.utils.HddsVolumeUtil.initPerDiskDBStore;
+
+import com.google.common.annotations.VisibleForTesting;
+import jakarta.annotation.Nullable;
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-
-import com.google.common.annotations.VisibleForTesting;
+import java.util.function.Function;
 import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.hdds.annotation.InterfaceAudience;
 import org.apache.hadoop.hdds.annotation.InterfaceStability;
+import org.apache.hadoop.hdds.conf.ConfigurationSource;
+import org.apache.hadoop.hdds.fs.SpaceUsageSource;
 import org.apache.hadoop.hdds.upgrade.HDDSLayoutFeature;
+import org.apache.hadoop.hdds.utils.db.managed.ManagedOptions;
+import org.apache.hadoop.hdds.utils.db.managed.ManagedRocksDB;
 import org.apache.hadoop.hdfs.server.datanode.checker.VolumeCheckResult;
-import org.apache.hadoop.ozone.container.common.statemachine.DatanodeConfiguration;
+import org.apache.hadoop.ozone.common.Storage;
+import org.apache.hadoop.ozone.container.common.impl.StorageLocationReport;
 import org.apache.hadoop.ozone.container.common.utils.DatanodeStoreCache;
 import org.apache.hadoop.ozone.container.common.utils.HddsVolumeUtil;
 import org.apache.hadoop.ozone.container.common.utils.RawDB;
 import org.apache.hadoop.ozone.container.common.utils.StorageVolumeUtil;
+import org.apache.hadoop.ozone.container.ozoneimpl.ContainerController;
+import org.apache.hadoop.ozone.container.ozoneimpl.ScanTransientIOUtil;
 import org.apache.hadoop.ozone.container.upgrade.VersionedDatanodeFeatures;
 import org.apache.hadoop.ozone.container.upgrade.VersionedDatanodeFeatures.SchemaV3;
+import org.apache.hadoop.util.Time;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import javax.annotation.Nullable;
-
-import static org.apache.hadoop.ozone.OzoneConsts.CONTAINER_DB_NAME;
-import static org.apache.hadoop.ozone.container.common.utils.HddsVolumeUtil.initPerDiskDBStore;
 
 /**
  * HddsVolume represents volume in a datanode. {@link MutableVolumeSet}
  * maintains a list of HddsVolumes, one for each volume in the Datanode.
- * {@link VolumeInfo} in encompassed by this class.
+ * {@link VolumeUsage} in encompassed by this class.
  * <p>
  * The disk layout per volume is as follows:
  * <p>../hdds/VERSION
@@ -79,7 +89,12 @@ public class HddsVolume extends StorageVolume {
   private final VolumeIOStats volumeIOStats;
   private final VolumeInfoMetrics volumeInfoMetrics;
 
+  private ContainerController controller;
+
   private final AtomicLong committedBytes = new AtomicLong(); // till Open containers become full
+  private Function<HddsVolume, Long> gatherContainerUsages = (K) -> 0L;
+
+  private final ConcurrentSkipListSet<Long> containerIds = new ConcurrentSkipListSet<>();
 
   // Mentions the type of volume
   private final VolumeType type = VolumeType.DATA_VOLUME;
@@ -91,7 +106,8 @@ public class HddsVolume extends StorageVolume {
   // and stored as a member to prevent spawning lots of File objects.
   private File dbParentDir;
   private File deletedContainerDir;
-  private AtomicBoolean dbLoaded = new AtomicBoolean(false);
+  private final AtomicBoolean dbLoaded = new AtomicBoolean(false);
+  private final AtomicBoolean dbLoadFailure = new AtomicBoolean(false);
 
   /**
    * Builder for HddsVolume.
@@ -107,6 +123,7 @@ public class HddsVolume extends StorageVolume {
       return this;
     }
 
+    @Override
     public HddsVolume build() throws IOException {
       return new HddsVolume(this);
     }
@@ -115,16 +132,14 @@ public class HddsVolume extends StorageVolume {
   private HddsVolume(Builder b) throws IOException {
     super(b);
 
-    if (!b.getFailedVolume() && getVolumeInfo().isPresent()) {
+    if (!b.getFailedVolume()) {
       this.setState(VolumeState.NOT_INITIALIZED);
+      ConfigurationSource conf = getConf();
+      int[] intervals = conf.getInts(OZONE_DATANODE_IO_METRICS_PERCENTILES_INTERVALS_SECONDS_KEY);
       this.volumeIOStats = new VolumeIOStats(b.getVolumeRootStr(),
-          this.getStorageDir().toString());
+          this.getStorageDir().toString(), intervals);
       this.volumeInfoMetrics =
           new VolumeInfoMetrics(b.getVolumeRootStr(), this);
-
-      LOG.info("Creating HddsVolume: {} of storage type : {} capacity : {}",
-          getStorageDir(), b.getStorageType(),
-              getVolumeInfo().get().getCapacity());
 
       initialize();
     } else {
@@ -135,6 +150,7 @@ public class HddsVolume extends StorageVolume {
       volumeInfoMetrics = new VolumeInfoMetrics(b.getVolumeRootStr(), this);
     }
 
+    LOG.info("HddsVolume: {}", getReport());
   }
 
   @Override
@@ -174,6 +190,16 @@ public class HddsVolume extends StorageVolume {
   }
 
   @Override
+  protected StorageLocationReport.Builder reportBuilder() {
+    StorageLocationReport.Builder builder = super.reportBuilder();
+    if (!builder.isFailed()) {
+      builder.setCommitted(getCommittedBytes())
+          .setFreeSpaceToSpare(getReportedFreeSpaceToSpare(builder.getCapacity()));
+    }
+    return builder;
+  }
+
+  @Override
   public void failVolume() {
     super.failVolume();
     if (volumeIOStats != null) {
@@ -197,7 +223,7 @@ public class HddsVolume extends StorageVolume {
 
   /**
    * Delete all files under
-   * <volume>/hdds/<cluster-id>/tmp/deleted-containers.
+   * volume/hdds/cluster-id/tmp/deleted-containers.
    * This is the directory where containers are moved when they are deleted
    * from the system, but before being removed from the filesystem. This
    * makes the deletion atomic.
@@ -254,32 +280,153 @@ public class HddsVolume extends StorageVolume {
   @Override
   public synchronized VolumeCheckResult check(@Nullable Boolean unused)
       throws Exception {
+    volumeInfoMetrics.incNumScans();
+    checkVolumeUsages();
+
     VolumeCheckResult result = super.check(unused);
 
-    DatanodeConfiguration df = getConf().getObject(DatanodeConfiguration.class);
+    if (isDbLoadFailure()) {
+      LOG.error("Volume {} failed to access RocksDB: RocksDB parent directory is null, " +
+          "the volume might not have been loaded properly.", getStorageDir());
+      return VolumeCheckResult.FAILED;
+    }
+
     if (result != VolumeCheckResult.HEALTHY ||
-        !df.getContainerSchemaV3Enabled() || !isDbLoaded()) {
+        !getDatanodeConfig().getContainerSchemaV3Enabled() || !isDbLoaded()) {
       return result;
     }
 
     // Check that per-volume RocksDB is present.
     File dbFile = new File(dbParentDir, CONTAINER_DB_NAME);
     if (!dbFile.exists() || !dbFile.canRead()) {
-      LOG.warn("Volume {} failed health check. Could not access RocksDB at " +
-          "{}", getStorageDir(), dbFile);
+      LOG.error("Volume {} failed health check. Could not access RocksDB at {}", getStorageDir(), dbFile);
       return VolumeCheckResult.FAILED;
     }
 
-    // TODO HDDS-8784 trigger compaction outside of volume check. Then the
-    //  exception can be removed.
-    if (df.autoCompactionSmallSstFile()) {
-      // Calculate number of files per level and size per level
-      RawDB rawDB = DatanodeStoreCache.getInstance().getDB(
-          dbFile.getAbsolutePath(), getConf());
-      rawDB.getStore().compactionIfNeeded();
+    return checkDbHealth(dbFile);
+  }
+
+  /**
+   * Verifies the per-volume RocksDB's global state files (CURRENT, MANIFEST,
+   * OPTIONS) by opening the DB in secondary mode. A successful open implies
+   * those files are readable and internally consistent and that the
+   * referenced SST file names match what RocksDB expects.
+   *
+   * <p>This check intentionally does <b>not</b> read or checksum SST file
+   * contents or any individual key/value. Per-block / per-key integrity is
+   * verified by the container data scanner, which scans containers (and
+   * their RocksDB rows) on its own schedule.
+   *
+   * <p>The volume is only marked {@link VolumeCheckResult#FAILED} once the
+   * configured threshold of failures is exceeded, matching the parent class's
+   * intermittent-error tolerance. Open failures whose underlying RocksDB
+   * status is {@code IOError(NoSpace)} are not counted: {@code openAsSecondary}
+   * writes its info LOG into the disk-check directory, so an out-of-space
+   * failure there is unrelated to DB integrity. Any other status — permission
+   * denied, missing path, corruption, generic IO error — is still counted as
+   * a real failure.
+   */
+  @VisibleForTesting
+  public VolumeCheckResult checkDbHealth(File dbFile) throws InterruptedException {
+    if (!(getDiskCheckEnabled() && getDatanodeConfig().isRocksDbDiskCheckEnabled())) {
+      return VolumeCheckResult.HEALTHY;
     }
 
+    File secondaryDir = new File(getDiskCheckDir(), "rocksdb-secondary-" + Time.now());
+    try {
+      Files.createDirectories(secondaryDir.toPath());
+    } catch (IOException e) {
+      LOG.error("Failed to create secondary instance dir {} for volume {}", secondaryDir, getStorageDir(), e);
+
+      if (!isNoSpaceAvailable(e) && !ScanTransientIOUtil.isTooManyOpenFiles(e)) {
+        getIoTestSlidingWindow().add();
+      }
+
+      return getIoTestSlidingWindow().isExceeded()
+          ? VolumeCheckResult.FAILED
+          : VolumeCheckResult.HEALTHY;
+    }
+
+    try (ManagedOptions managedOptions = new ManagedOptions();
+         ManagedRocksDB ignored =
+             ManagedRocksDB.openAsSecondary(managedOptions, dbFile.toString(), secondaryDir.getPath())) {
+      // Do nothing. Only check if rocksdb is accessible.
+      LOG.debug("Successfully opened the database at \"{}\" for HDDS volume {}.", dbFile, getStorageDir());
+    } catch (Exception e) {
+      if (Thread.currentThread().isInterrupted()) {
+        throw new InterruptedException("Check of database for volume " + this + " interrupted.");
+      }
+
+      // openAsSecondary writes its info LOG into secondaryDir. If that write
+      // fails because the disk is full, RocksDB surfaces the failure as
+      // IOError(NoSpace) (mapped from ENOSPC). That is unrelated to DB
+      // integrity, so don't count it against the sliding window. Any other
+      // status (permission denied, missing path, corruption, generic IO
+      // error) is still treated as a real failure.
+      if (ManagedRocksDB.isNoSpaceFailure(e)) {
+        LOG.warn("Skipping RocksDB health-check failure accounting for volume {}: " +
+            "secondary open returned IOError(NoSpace) for {}.", this, secondaryDir, e);
+      } else if (ScanTransientIOUtil.isTooManyOpenFiles(e)) {
+        LOG.warn("Skipping RocksDB health-check failure accounting for volume {}: " +
+            "secondary open hit file descriptor exhaustion for {}.", this, secondaryDir, e);
+      } else {
+        LOG.error("Could not open Volume DB located at {}", dbFile, e);
+        getIoTestSlidingWindow().add();
+      }
+    } finally {
+      try {
+        FileUtils.deleteDirectory(secondaryDir);
+      } catch (IOException e) {
+        LOG.warn("Failed to delete RocksDB secondary instance dir {}", secondaryDir, e);
+      }
+    }
+
+
+    if (getIoTestSlidingWindow().isExceeded()) {
+      LOG.error("Failed to open the database at \"{}\" for HDDS volume {}: " +
+              "encountered more than the {} tolerated failures.",
+          dbFile, this, getIoTestSlidingWindow().getWindowSize());
+      return VolumeCheckResult.FAILED;
+    }
+
+    LOG.debug("Successfully opened the database at \"{}\" for HDDS volume {}: " +
+            "encountered {} out of {} tolerated failures",
+        dbFile, this, getIoTestSlidingWindow().getNumEventsInWindow(), getIoTestSlidingWindow().getWindowSize());
     return VolumeCheckResult.HEALTHY;
+  }
+
+  void checkVolumeUsages() {
+    boolean isEnoughSpaceAvailable = true;
+    SpaceUsageSource currentUsage = getCurrentUsage();
+    long getFreeSpaceToSpare = getFreeSpaceToSpare(currentUsage.getCapacity());
+    final long committed = committedBytes.get();
+    final long available = currentUsage.getAvailable();
+    if (available < getFreeSpaceToSpare) {
+      LOG.warn("Volume {} has insufficient space for write operation. Available: {}, Free space to spare: {}",
+          getStorageDir(), available, getFreeSpaceToSpare);
+      isEnoughSpaceAvailable = false;
+    } else if (committed > 0 && available < committed + getFreeSpaceToSpare) {
+      LOG.warn("Volume {} has insufficient space for on-going container write operation. " +
+              "Committed: {}, Available: {}, Free space to spare: {}",
+          getStorageDir(), committed, available, getFreeSpaceToSpare);
+      isEnoughSpaceAvailable = false;
+    }
+
+    volumeInfoMetrics.setAvailableSpaceInsufficient(!isEnoughSpaceAvailable);
+
+    final VolumeUsage usage = getVolumeUsage();
+    if (usage != null && usage.getReservedInBytes() > 0) {
+      final SpaceUsageSource realUsage = usage.realUsage();
+      long reservedUsed = VolumeUsage.getOtherUsed(realUsage);
+      final boolean crossesLimit = reservedUsed > usage.getReservedInBytes();
+      if (crossesLimit) {
+        LOG.warn("Volume {} reserved usages {} is higher than actual allocated reserved space {}. (Real usage: {})",
+            getStorageDir(), reservedUsed, usage.getReservedInBytes(), realUsage);
+      }
+      volumeInfoMetrics.setReservedCrossesLimit(crossesLimit);
+    } else {
+      volumeInfoMetrics.setReservedCrossesLimit(false);
+    }
   }
 
   /**
@@ -301,6 +448,54 @@ public class HddsVolume extends StorageVolume {
     return committedBytes.get();
   }
 
+  /**
+   * Minimum free space reported to SCM (heartbeat), from
+   * {@code hdds.datanode.volume.min.free.space.percent}.
+   */
+  public long getReportedFreeSpaceToSpare(long volumeCapacity) {
+    return getDatanodeConfig().getMinFreeSpace(volumeCapacity);
+  }
+
+  /**
+   * Minimum free space enforced locally for writes (see
+   * {@code hdds.datanode.volume.min.free.space.hard.limit.percent}).
+   */
+  public long getFreeSpaceToSpare(long volumeCapacity) {
+    return getDatanodeConfig().getHardLimitMinFreeSpace(volumeCapacity);
+  }
+
+  @Override
+  public void setGatherContainerUsages(Function<HddsVolume, Long> gatherContainerUsages) {
+    this.gatherContainerUsages = gatherContainerUsages;
+  }
+
+  @Override
+  protected long containerUsedSpace() {
+    return gatherContainerUsages.apply(this);
+  }
+
+  @Override
+  public File getContainerDirsPath() {
+    if (getStorageState() != VolumeState.NORMAL) {
+      return null;
+    }
+    File hddsVolumeRootDir = getHddsRootDir();
+    //filtering storage directory
+    File[] storageDirs = hddsVolumeRootDir.listFiles(File::isDirectory);
+    if (storageDirs == null) {
+      LOG.error("IO error for the volume {}, directory not found", hddsVolumeRootDir);
+      return null;
+    }
+    File clusterIDDir = new File(hddsVolumeRootDir, getClusterID());
+    if (storageDirs.length == 1 && !clusterIDDir.exists()) {
+      // If this volume was formatted pre SCM HA, this will be the SCM ID.
+      // A cluster ID symlink will exist in this case only if this cluster is finalized for SCM HA.
+      // If the volume was formatted post SCM HA, this will be the cluster ID.
+      clusterIDDir = storageDirs[0];
+    }
+    return new File(clusterIDDir, Storage.STORAGE_DIR_CURRENT);
+  }
+
   public void setDbVolume(DbVolume dbVolume) {
     this.dbVolume = dbVolume;
   }
@@ -311,6 +506,11 @@ public class HddsVolume extends StorageVolume {
 
   public File getDbParentDir() {
     return this.dbParentDir;
+  }
+
+  @VisibleForTesting
+  public void setDbParentDir(File dbParentDir) {
+    this.dbParentDir = dbParentDir;
   }
 
   public File getDeletedContainerDir() {
@@ -324,6 +524,10 @@ public class HddsVolume extends StorageVolume {
 
   public boolean isDbLoaded() {
     return dbLoaded.get();
+  }
+
+  public boolean isDbLoadFailure() {
+    return dbLoadFailure.get();
   }
 
   public void loadDbStore(boolean readOnly) throws IOException {
@@ -363,7 +567,8 @@ public class HddsVolume extends StorageVolume {
     String containerDBPath = containerDBFile.getAbsolutePath();
     try {
       initPerDiskDBStore(containerDBPath, getConf(), readOnly);
-    } catch (IOException e) {
+    } catch (Throwable e) {
+      dbLoadFailure.set(true);
       throw new IOException("Can't init db instance under path "
           + containerDBPath + " for volume " + getStorageID(), e);
     }
@@ -374,10 +579,36 @@ public class HddsVolume extends StorageVolume {
         getStorageID());
   }
 
+  public void setController(ContainerController controller) {
+    this.controller = controller;
+  }
+
+  public long getContainers() {
+    if (controller != null) {
+      return controller.getContainerCount(this);
+    }
+    return 0;
+  }
+
+  public void addContainer(long containerId) {
+    containerIds.add(containerId);
+  }
+
+  public void removeContainer(long containerId) {
+    containerIds.remove(containerId);
+  }
+
+  public Iterator<Long> getContainerIterator() {
+    return containerIds.iterator();
+  }
+
+  public long getContainerCount() {
+    return containerIds.size();
+  }
+
   /**
    * Pick a DbVolume for HddsVolume and init db instance.
    * Use the HddsVolume directly if no DbVolume found.
-   * @param dbVolumeSet
    */
   public void createDbStore(MutableVolumeSet dbVolumeSet) throws IOException {
     DbVolume chosenDbVolume = null;
@@ -417,9 +648,11 @@ public class HddsVolume extends StorageVolume {
     try {
       HddsVolumeUtil.initPerDiskDBStore(containerDBPath, getConf(), false);
       dbLoaded.set(true);
+      dbLoadFailure.set(false);
       LOG.info("SchemaV3 db is created and loaded at {} for volume {}",
           containerDBPath, getStorageID());
     } catch (IOException e) {
+      dbLoadFailure.set(true);
       String errMsg = "Can't create db instance under path "
           + containerDBPath + " for volume " + getStorageID();
       LOG.error(errMsg, e);
@@ -448,7 +681,24 @@ public class HddsVolume extends StorageVolume {
         .getAbsolutePath();
     DatanodeStoreCache.getInstance().removeDB(containerDBPath);
     dbLoaded.set(false);
+    dbLoadFailure.set(false);
     LOG.info("SchemaV3 db is stopped at {} for volume {}", containerDBPath,
         getStorageID());
+  }
+
+  public void compactDb() {
+    File dbFile = new File(getDbParentDir(), CONTAINER_DB_NAME);
+    String dbFilePath = dbFile.getAbsolutePath();
+    try {
+      // Calculate number of files per level and size per level
+      RawDB rawDB =
+          DatanodeStoreCache.getInstance().getDB(dbFilePath, getConf());
+      long start = Time.monotonicNowNanos();
+      rawDB.getStore().compactionIfNeeded();
+      volumeInfoMetrics.dbCompactTimesNanoSecondsIncr(
+          Time.monotonicNowNanos() - start);
+    } catch (Exception e) {
+      LOG.warn("compact rocksdb error in {}", dbFilePath, e);
+    }
   }
 }

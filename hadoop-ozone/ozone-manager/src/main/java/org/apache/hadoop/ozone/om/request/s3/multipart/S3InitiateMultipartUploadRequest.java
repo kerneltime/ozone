@@ -1,14 +1,13 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,17 +17,29 @@
 
 package org.apache.hadoop.ozone.om.request.s3.multipart;
 
-import com.google.common.base.Preconditions;
+import static org.apache.hadoop.ozone.om.lock.OzoneManagerLock.LeveledResource.BUCKET_LOCK;
+
+import java.io.IOException;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Map;
+import java.util.Objects;
 import org.apache.hadoop.hdds.client.ReplicationConfig;
-import org.apache.ratis.server.protocol.TermIndex;
+import org.apache.hadoop.hdds.utils.db.cache.CacheKey;
+import org.apache.hadoop.hdds.utils.db.cache.CacheValue;
+import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.audit.OMAction;
 import org.apache.hadoop.ozone.om.OMMetadataManager;
 import org.apache.hadoop.ozone.om.OzoneConfigUtil;
 import org.apache.hadoop.ozone.om.OzoneManager;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
+import org.apache.hadoop.ozone.om.execution.flowcontrol.ExecutionContext;
+import org.apache.hadoop.ozone.om.helpers.BucketLayout;
+import org.apache.hadoop.ozone.om.helpers.KeyValueUtil;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
-import org.apache.hadoop.ozone.om.helpers.BucketLayout;
 import org.apache.hadoop.ozone.om.helpers.OmKeyLocationInfoGroup;
 import org.apache.hadoop.ozone.om.helpers.OmMultipartKeyInfo;
 import org.apache.hadoop.ozone.om.request.file.OMFileRequest;
@@ -36,7 +47,6 @@ import org.apache.hadoop.ozone.om.request.key.OMKeyRequest;
 import org.apache.hadoop.ozone.om.request.util.OMMultipartUploadUtils;
 import org.apache.hadoop.ozone.om.request.util.OmResponseUtil;
 import org.apache.hadoop.ozone.om.request.validation.RequestFeatureValidator;
-import org.apache.hadoop.ozone.om.request.validation.RequestProcessingPhase;
 import org.apache.hadoop.ozone.om.request.validation.ValidationCondition;
 import org.apache.hadoop.ozone.om.request.validation.ValidationContext;
 import org.apache.hadoop.ozone.om.response.OMClientResponse;
@@ -49,21 +59,11 @@ import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMReque
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMResponse;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Type;
 import org.apache.hadoop.ozone.protocolPB.OMPBHelper;
+import org.apache.hadoop.ozone.request.validation.RequestProcessingPhase;
 import org.apache.hadoop.ozone.security.acl.IAccessAuthorizer.ACLType;
 import org.apache.hadoop.util.Time;
-import org.apache.hadoop.hdds.utils.db.cache.CacheKey;
-import org.apache.hadoop.hdds.utils.db.cache.CacheValue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.IOException;
-import java.nio.file.InvalidPathException;
-import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Map;
-
-import static org.apache.hadoop.ozone.om.lock.OzoneManagerLock.Resource.BUCKET_LOCK;
 
 /**
  * Handles initiate multipart upload request.
@@ -82,7 +82,7 @@ public class S3InitiateMultipartUploadRequest extends OMKeyRequest {
   public OMRequest preExecute(OzoneManager ozoneManager) throws IOException {
     MultipartInfoInitiateRequest multipartInfoInitiateRequest =
         super.preExecute(ozoneManager).getInitiateMultiPartUploadRequest();
-    Preconditions.checkNotNull(multipartInfoInitiateRequest);
+    Objects.requireNonNull(multipartInfoInitiateRequest, "multipartInfoInitiateRequest == null");
 
     KeyArgs keyArgs = multipartInfoInitiateRequest.getKeyArgs();
 
@@ -100,26 +100,31 @@ public class S3InitiateMultipartUploadRequest extends OMKeyRequest {
 
     KeyArgs resolvedArgs = resolveBucketAndCheckKeyAcls(newKeyArgs.build(),
         ozoneManager, ACLType.CREATE);
+    int schemaVersion = resolveMultipartSchemaVersion(ozoneManager);
+    MultipartInfoInitiateRequest.Builder requestBuilder =
+        multipartInfoInitiateRequest.toBuilder()
+            .setKeyArgs(resolvedArgs)
+            .setSchemaVersion(schemaVersion);
     return getOmRequest().toBuilder()
         .setUserInfo(getUserInfo())
-        .setInitiateMultiPartUploadRequest(
-            multipartInfoInitiateRequest.toBuilder().setKeyArgs(resolvedArgs))
+        .setInitiateMultiPartUploadRequest(requestBuilder)
         .build();
   }
 
   @Override
   @SuppressWarnings("methodlength")
-  public OMClientResponse validateAndUpdateCache(OzoneManager ozoneManager, TermIndex termIndex) {
-    final long transactionLogIndex = termIndex.getIndex();
+  public OMClientResponse validateAndUpdateCache(OzoneManager ozoneManager, ExecutionContext context) {
+    final long transactionLogIndex = context.getIndex();
     MultipartInfoInitiateRequest multipartInfoInitiateRequest =
         getOmRequest().getInitiateMultiPartUploadRequest();
 
     KeyArgs keyArgs =
         multipartInfoInitiateRequest.getKeyArgs();
 
-    Preconditions.checkNotNull(keyArgs.getMultipartUploadID());
+    Objects.requireNonNull(keyArgs.getMultipartUploadID(), "multipartUploadID == null");
 
     Map<String, String> auditMap = buildKeyArgsAuditMap(keyArgs);
+    auditMap.put(OzoneConsts.UPLOAD_ID, keyArgs.getMultipartUploadID());
 
     String volumeName = keyArgs.getVolumeName();
     String bucketName = keyArgs.getBucketName();
@@ -194,6 +199,9 @@ public class S3InitiateMultipartUploadRequest extends OMKeyRequest {
               replicationConfig)
           .setObjectID(objectID)
           .setUpdateID(transactionLogIndex)
+          // Source of truth is the value stamped onto the proto in preExecute
+          // (before Ratis). Never re-check MLV here in the replicated apply path.
+          .setSchemaVersion(multipartInfoInitiateRequest.getSchemaVersion())
           .build();
 
       omKeyInfo = new OmKeyInfo.Builder()
@@ -206,11 +214,14 @@ public class S3InitiateMultipartUploadRequest extends OMKeyRequest {
           .setOmKeyLocationInfos(Collections.singletonList(
               new OmKeyLocationInfoGroup(0, new ArrayList<>(), true)))
           .setAcls(getAclsForKey(keyArgs, bucketInfo, pathInfo,
-              ozoneManager.getPrefixManager()))
+              ozoneManager.getPrefixManager(), ozoneManager.getConfig()))
           .setObjectID(objectID)
           .setUpdateID(transactionLogIndex)
           .setFileEncryptionInfo(keyArgs.hasFileEncryptionInfo() ?
               OMPBHelper.convert(keyArgs.getFileEncryptionInfo()) : null)
+          .addAllMetadata(KeyValueUtil.getFromProtobuf(keyArgs.getMetadataList()))
+          .setOwnerName(keyArgs.getOwnerName())
+          .addAllTags(KeyValueUtil.getFromProtobuf(keyArgs.getTagsList()))
           .build();
 
       // Add to cache
@@ -258,7 +269,7 @@ public class S3InitiateMultipartUploadRequest extends OMKeyRequest {
       Map<String, String> auditMap, String volumeName, String bucketName,
       String keyName, Exception exception, Result result) {
     // audit log
-    auditLog(ozoneManager.getAuditLogger(), buildAuditMessage(
+    markForAudit(ozoneManager.getAuditLogger(), buildAuditMessage(
         OMAction.INITIATE_MULTIPART_UPLOAD, auditMap,
         exception, getOmRequest().getUserInfo()));
 
@@ -278,6 +289,34 @@ public class S3InitiateMultipartUploadRequest extends OMKeyRequest {
       LOG.error("Unrecognized Result for S3InitiateMultipartUploadRequest: {}",
           multipartInfoInitiateRequest);
     }
+  }
+
+  /**
+   * Resolve the schema version stamped onto a newly initiated multipart upload.
+   * <p>
+   * This is a server-authoritative decision made once, in {@code preExecute}
+   * (i.e. on the leader, before the request is submitted to Ratis). Any
+   * client-supplied {@code schemaVersion} on the request is intentionally
+   * ignored so that a client can never force the OM to persist an on-disk
+   * format the cluster is not ready for.
+   * <p>
+   * The split parts-table on-disk format is gated on the
+   * {@link OMLayoutFeature#MPU_PARTS_TABLE_SPLIT} layout feature:
+   * <ul>
+   *   <li>pre-finalized (or mixed-binary rolling upgrade) &rarr; legacy schema,
+   *   so no split-table rows are written on a cluster that may still be
+   *   downgraded;</li>
+   *   <li>finalized &rarr; split parts-table schema.</li>
+   * </ul>
+   * Because finalization is replicated through Ratis, the leader's view here is
+   * consistent across the quorum, and the stamped value (not the live layout
+   * version) is what all subsequent processing obeys.
+   */
+  protected int resolveMultipartSchemaVersion(OzoneManager ozoneManager) {
+    return ozoneManager.getVersionManager()
+        .isAllowed(OMLayoutFeature.MPU_PARTS_TABLE_SPLIT)
+        ? OmMultipartKeyInfo.SPLIT_PARTS_TABLE_SCHEMA_VERSION
+        : OmMultipartKeyInfo.LEGACY_SCHEMA_VERSION;
   }
 
   @RequestFeatureValidator(

@@ -1,13 +1,12 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,18 +17,18 @@
 
 package org.apache.ozone.fs.http.server;
 
-import com.sun.jersey.api.container.ContainerException;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import javax.ws.rs.core.Response;
+import javax.ws.rs.ext.Provider;
 import org.apache.hadoop.hdds.annotation.InterfaceAudience;
+import org.apache.hadoop.hdds.scm.container.ContainerException;
+import org.apache.hadoop.security.AccessControlException;
 import org.apache.ozone.lib.service.FileSystemAccessException;
 import org.apache.ozone.lib.wsrs.ExceptionProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
-
-import javax.ws.rs.core.Response;
-import javax.ws.rs.ext.Provider;
-import java.io.FileNotFoundException;
-import java.io.IOException;
 
 /**
  * JAX-RS <code>ExceptionMapper</code> implementation that maps HttpFSServer's
@@ -47,6 +46,7 @@ public class HttpFSExceptionProvider extends ExceptionProvider {
    * Maps different exceptions thrown by HttpFSServer to HTTP status codes.
    * <ul>
    * <li>SecurityException : HTTP UNAUTHORIZED</li>
+   * <li>AccessControlException : HTTP UNAUTHORIZED</li>
    * <li>FileNotFoundException : HTTP NOT_FOUND</li>
    * <li>IOException : INTERNAL_HTTP SERVER_ERROR</li>
    * <li>UnsupporteOperationException : HTTP BAD_REQUEST</li>
@@ -66,7 +66,8 @@ public class HttpFSExceptionProvider extends ExceptionProvider {
     if (throwable instanceof ContainerException) {
       throwable = throwable.getCause();
     }
-    if (throwable instanceof SecurityException) {
+    if (throwable instanceof SecurityException
+        || throwable instanceof AccessControlException) {
       status = Response.Status.UNAUTHORIZED;
     } else if (throwable instanceof FileNotFoundException) {
       status = Response.Status.NOT_FOUND;

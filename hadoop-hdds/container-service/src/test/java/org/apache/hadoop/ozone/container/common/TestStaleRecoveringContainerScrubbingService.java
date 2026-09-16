@@ -1,42 +1,33 @@
 /*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with this
- * work for additional information regarding copyright ownership.  The ASF
- * licenses this file to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations under
- * the License.
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package org.apache.hadoop.ozone.container.common;
 
-import org.apache.hadoop.conf.StorageUnit;
-import org.apache.hadoop.hdds.HddsConfigKeys;
-import org.apache.hadoop.hdds.conf.OzoneConfiguration;
-import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos;
-import org.apache.hadoop.hdds.scm.ScmConfigKeys;
-import org.apache.hadoop.hdds.scm.container.common.helpers.StorageContainerException;
-import org.apache.hadoop.ozone.container.common.impl.ContainerLayoutVersion;
-import org.apache.hadoop.ozone.container.common.impl.ContainerSet;
-import org.apache.hadoop.ozone.container.common.interfaces.Container;
-import org.apache.hadoop.ozone.container.common.volume.HddsVolume;
-import org.apache.hadoop.ozone.container.common.volume.MutableVolumeSet;
-import org.apache.hadoop.ozone.container.common.volume.RoundRobinVolumeChoosingPolicy;
-import org.apache.hadoop.ozone.container.keyvalue.ContainerTestVersionInfo;
-import org.apache.hadoop.ozone.container.keyvalue.KeyValueContainer;
-import org.apache.hadoop.ozone.container.keyvalue.KeyValueContainerData;
-import org.apache.hadoop.ozone.container.keyvalue.helpers.BlockUtils;
-import org.apache.hadoop.ozone.container.keyvalue.statemachine.background.StaleRecoveringContainerScrubbingService;
-import org.apache.ozone.test.TestClock;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.io.TempDir;
+import static org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ContainerDataProto.State.CLOSED;
+import static org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ContainerDataProto.State.RECOVERING;
+import static org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ContainerDataProto.State.UNHEALTHY;
+import static org.apache.hadoop.ozone.container.common.impl.ContainerImplTestUtils.newContainerSet;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.anyList;
+import static org.mockito.Mockito.anyLong;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import java.io.File;
 import java.io.IOException;
@@ -52,15 +43,28 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
-
-import static org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ContainerDataProto.State.CLOSED;
-import static org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ContainerDataProto.State.RECOVERING;
-import static org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ContainerDataProto.State.UNHEALTHY;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import org.apache.hadoop.conf.StorageUnit;
+import org.apache.hadoop.hdds.HddsConfigKeys;
+import org.apache.hadoop.hdds.conf.OzoneConfiguration;
+import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos;
+import org.apache.hadoop.hdds.scm.ScmConfigKeys;
+import org.apache.hadoop.hdds.scm.container.common.helpers.StorageContainerException;
+import org.apache.hadoop.hdds.utils.BackgroundTask;
+import org.apache.hadoop.hdds.utils.BackgroundTaskQueue;
+import org.apache.hadoop.ozone.container.common.impl.ContainerLayoutVersion;
+import org.apache.hadoop.ozone.container.common.impl.ContainerSet;
+import org.apache.hadoop.ozone.container.common.interfaces.Container;
+import org.apache.hadoop.ozone.container.common.volume.HddsVolume;
+import org.apache.hadoop.ozone.container.common.volume.MutableVolumeSet;
+import org.apache.hadoop.ozone.container.common.volume.RoundRobinVolumeChoosingPolicy;
+import org.apache.hadoop.ozone.container.keyvalue.ContainerTestVersionInfo;
+import org.apache.hadoop.ozone.container.keyvalue.KeyValueContainer;
+import org.apache.hadoop.ozone.container.keyvalue.KeyValueContainerData;
+import org.apache.hadoop.ozone.container.keyvalue.helpers.BlockUtils;
+import org.apache.hadoop.ozone.container.keyvalue.statemachine.background.StaleRecoveringContainerScrubbingService;
+import org.apache.ozone.test.MockClock;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Tests to stale recovering container scrubbing service.
@@ -71,21 +75,19 @@ public class TestStaleRecoveringContainerScrubbingService {
   private Path tempDir;
   private String datanodeUuid;
   private OzoneConfiguration conf;
-  private HddsVolume hddsVolume;
 
   private ContainerLayoutVersion layout;
-  private String schemaVersion;
   private String clusterID;
   private int containerIdNum = 0;
   private MutableVolumeSet volumeSet;
   private RoundRobinVolumeChoosingPolicy volumeChoosingPolicy;
-  private final TestClock testClock =
-      new TestClock(Instant.now(), ZoneOffset.UTC);
+  private final MockClock testClock =
+      new MockClock(Instant.now(), ZoneOffset.UTC);
 
   private void initVersionInfo(ContainerTestVersionInfo versionInfo)
       throws IOException {
     this.layout = versionInfo.getLayout();
-    this.schemaVersion = versionInfo.getSchemaVersion();
+    String schemaVersion = versionInfo.getSchemaVersion();
     conf = new OzoneConfiguration();
     ContainerTestVersionInfo.setTestSchemaVersion(schemaVersion, conf);
     init();
@@ -98,8 +100,8 @@ public class TestStaleRecoveringContainerScrubbingService {
     conf.set(HddsConfigKeys.OZONE_METADATA_DIRS, volumeDir.getAbsolutePath());
     datanodeUuid = UUID.randomUUID().toString();
     clusterID = UUID.randomUUID().toString();
-    hddsVolume = new HddsVolume.Builder(volumeDir.getAbsolutePath())
-        .conf(conf).datanodeUuid(datanodeUuid).clusterID(clusterID).build();
+    HddsVolume hddsVolume = new HddsVolume.Builder(volumeDir.getAbsolutePath())
+                                .conf(conf).datanodeUuid(datanodeUuid).clusterID(clusterID).build();
     hddsVolume.format(clusterID);
     hddsVolume.createWorkingDir(clusterID, null);
     volumeSet = mock(MutableVolumeSet.class);
@@ -146,8 +148,7 @@ public class TestStaleRecoveringContainerScrubbingService {
   public void testScrubbingStaleRecoveringContainers(
       ContainerTestVersionInfo versionInfo) throws Exception {
     initVersionInfo(versionInfo);
-    ContainerSet containerSet = new ContainerSet(10);
-    containerSet.setClock(testClock);
+    ContainerSet containerSet = newContainerSet(10, testClock);
     StaleRecoveringContainerScrubbingService srcss =
         new StaleRecoveringContainerScrubbingService(
             50, TimeUnit.MILLISECONDS, 10,
@@ -189,5 +190,51 @@ public class TestStaleRecoveringContainerScrubbingService {
       assertEquals(entry.getContainerState(),
               containerStateMap.get(entry.getContainerData().getContainerID()));
     }
+  }
+
+  @ContainerTestVersionInfo.ContainerTest
+  public void testUpdateRecoveringContainerTimeoutExtendsScrubDeadline(
+      ContainerTestVersionInfo versionInfo) throws Exception {
+    initVersionInfo(versionInfo);
+    ContainerSet containerSet = newContainerSet(1000, testClock);
+    StaleRecoveringContainerScrubbingService srcss =
+        new StaleRecoveringContainerScrubbingService(
+            50, TimeUnit.MILLISECONDS, 10,
+            Duration.ofSeconds(300).toMillis(),
+            containerSet);
+    List<Long> ids = createTestContainers(containerSet, 1, RECOVERING);
+    long containerId = ids.get(0);
+    testClock.fastForward(800L);
+    containerSet.updateRecoveringContainerTimeout(containerId);
+    testClock.fastForward(800L);
+    srcss.runPeriodicalTaskNow();
+    assertEquals(RECOVERING, containerSet.getContainer(containerId).getContainerState());
+    testClock.fastForward(500L);
+    srcss.runPeriodicalTaskNow();
+    assertEquals(UNHEALTHY, containerSet.getContainer(containerId).getContainerState());
+  }
+
+  @ContainerTestVersionInfo.ContainerTest
+  public void testScrubSkippedWhenDeadlineExtendedBeforeTaskRuns(
+      ContainerTestVersionInfo versionInfo) throws Exception {
+    initVersionInfo(versionInfo);
+    ContainerSet containerSet = newContainerSet(1000, testClock);
+    StaleRecoveringContainerScrubbingService srcss =
+        new StaleRecoveringContainerScrubbingService(
+            50, TimeUnit.MILLISECONDS, 10,
+            Duration.ofSeconds(300).toMillis(),
+            containerSet);
+    List<Long> ids = createTestContainers(containerSet, 1, RECOVERING);
+    long containerId = ids.get(0);
+    testClock.fastForward(1000L);
+    BackgroundTaskQueue tasks = srcss.getTasks();
+    assertFalse(containerSet.getRecoveringContainerMap().containsKey(containerId));
+    containerSet.updateRecoveringContainerTimeout(containerId);
+    while (!tasks.isEmpty()) {
+      BackgroundTask task = tasks.poll();
+      task.call();
+    }
+    assertEquals(RECOVERING, containerSet.getContainer(containerId).getContainerState());
+    assertTrue(containerSet.getRecoveringContainerMap().containsKey(containerId));
   }
 }

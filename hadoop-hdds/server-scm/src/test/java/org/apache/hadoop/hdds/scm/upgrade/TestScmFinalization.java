@@ -1,13 +1,12 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,6 +17,25 @@
 
 package org.apache.hadoop.hdds.scm.upgrade;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.eq;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.matches;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.UUID;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.scm.ha.SCMContext;
 import org.apache.hadoop.hdds.scm.ha.SCMHAManager;
@@ -36,8 +54,10 @@ import org.apache.hadoop.hdds.upgrade.HDDSLayoutFeature;
 import org.apache.hadoop.hdds.upgrade.HDDSLayoutVersionManager;
 import org.apache.hadoop.hdds.utils.db.Table;
 import org.apache.hadoop.ozone.OzoneConsts;
+import org.apache.hadoop.ozone.upgrade.UpgradeFinalization;
+import org.apache.hadoop.ozone.upgrade.UpgradeFinalization.StatusAndMessages;
 import org.apache.hadoop.ozone.upgrade.UpgradeFinalizer;
-import org.apache.hadoop.ozone.upgrade.UpgradeFinalizer.StatusAndMessages;
+import org.apache.ozone.test.GenericTestUtils.LogCapturer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -46,27 +66,12 @@ import org.mockito.verification.VerificationMode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.Arrays;
-import java.util.UUID;
-
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.inOrder;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.eq;
-import static org.mockito.Mockito.matches;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
 /**
  * Tests SCM finalization operations on mocked upgrade state.
  */
 public class TestScmFinalization {
+  private static final String FINALIZATION_COMPLETE_LOG =
+      "SCM Finalization has crossed checkpoint FINALIZATION_COMPLETE";
   private static final Logger LOG =
       LoggerFactory.getLogger(TestScmFinalization.class);
 
@@ -233,8 +238,17 @@ public class TestScmFinalization {
 
     // Execute upgrade finalization, then check that events happened in the
     // correct order.
-    StatusAndMessages status =
-        manager.finalizeUpgrade(UUID.randomUUID().toString());
+    LogCapturer logCapturer =
+        LogCapturer.captureLogs(UpgradeFinalizer.class);
+    StatusAndMessages status;
+    try {
+      status = manager.finalizeUpgrade(UUID.randomUUID().toString());
+      assertEquals(
+          initialCheckpoint != FinalizationCheckpoint.FINALIZATION_COMPLETE,
+          logCapturer.getOutput().contains(FINALIZATION_COMPLETE_LOG));
+    } finally {
+      logCapturer.stopCapturing();
+    }
     assertEquals(getStatusFromCheckpoint(initialCheckpoint).status(),
         status.status());
 
@@ -298,6 +312,36 @@ public class TestScmFinalization {
     // have been invoked.
   }
 
+  @Test
+  public void testFinalizationCompleteNotLoggedWhenRemovingMarkFails()
+      throws Exception {
+    FinalizationStateManager stateManager = mock(FinalizationStateManager.class);
+    when(stateManager.crossedCheckpoint(
+        FinalizationCheckpoint.FINALIZATION_COMPLETE)).thenReturn(false);
+    doThrow(new IOException("Failed to remove finalizing mark"))
+        .when(stateManager).removeFinalizingMark();
+
+    SCMUpgradeFinalizationContext context =
+        mock(SCMUpgradeFinalizationContext.class);
+    PipelineManager pipelineManager = getMockPipelineManager(
+        FinalizationCheckpoint.MLV_EQUALS_SLV);
+    when(context.getFinalizationStateManager()).thenReturn(stateManager);
+    when(context.getPipelineManager()).thenReturn(pipelineManager);
+    when(context.getSCMContext()).thenReturn(SCMContext.emptyContext());
+
+    SCMUpgradeFinalizer finalizer =
+        new SCMUpgradeFinalizer(mock(HDDSLayoutVersionManager.class));
+    LogCapturer logCapturer = LogCapturer.captureLogs(UpgradeFinalizer.class);
+    try {
+      IOException exception = assertThrows(IOException.class,
+          () -> finalizer.postFinalizeUpgrade(context));
+      assertEquals("Failed to remove finalizing mark", exception.getMessage());
+      assertFalse(logCapturer.getOutput().contains(FINALIZATION_COMPLETE_LOG));
+    } finally {
+      logCapturer.stopCapturing();
+    }
+  }
+
   /**
    * On startup, the finalization table will be read to determine the
    * checkpoint we are resuming from. After this, the results will be stored
@@ -338,9 +382,9 @@ public class TestScmFinalization {
   private StatusAndMessages getStatusFromCheckpoint(
       FinalizationCheckpoint initialCheckpoint) {
     if (initialCheckpoint == FinalizationCheckpoint.FINALIZATION_COMPLETE) {
-      return UpgradeFinalizer.FINALIZED_MSG;
+      return UpgradeFinalization.FINALIZED_MSG;
     } else {
-      return UpgradeFinalizer.STARTING_MSG;
+      return UpgradeFinalization.STARTING_MSG;
     }
   }
 

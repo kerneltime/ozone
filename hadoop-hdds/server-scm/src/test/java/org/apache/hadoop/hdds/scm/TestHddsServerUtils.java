@@ -1,14 +1,13 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,10 +17,24 @@
 
 package org.apache.hadoop.hdds.scm;
 
-import java.io.File;
-import java.net.InetSocketAddress;
-import java.util.concurrent.TimeUnit;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_CLIENT_ADDRESS_KEY;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_DATANODE_ADDRESS_KEY;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_DATANODE_ID_DIR;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_DATANODE_PORT_DEFAULT;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_NAMES;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_STALENODE_INTERVAL;
+import static org.apache.hadoop.ozone.OzoneConsts.OZONE_SCM_DATANODE_ID_FILE_DEFAULT;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.File;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.UnknownHostException;
+import java.util.concurrent.TimeUnit;
+import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.hdds.HddsConfigKeys;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.scm.ha.SCMNodeInfo;
@@ -29,31 +42,12 @@ import org.apache.hadoop.hdds.server.ServerUtils;
 import org.apache.hadoop.hdds.utils.HddsServerUtil;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.test.PathUtils;
-
-import org.apache.commons.io.FileUtils;
-
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_CLIENT_ADDRESS_KEY;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_DATANODE_ADDRESS_KEY;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_DATANODE_PORT_DEFAULT;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_NAMES;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_STALENODE_INTERVAL;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_DATANODE_ID_DIR;
-import static org.apache.hadoop.ozone.OzoneConsts.OZONE_SCM_DATANODE_ID_FILE_DEFAULT;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * Unit tests for {@link HddsServerUtil}.
  */
-@Timeout(300)
 public class TestHddsServerUtils {
-  public static final Logger LOG = LoggerFactory.getLogger(
-      TestHddsServerUtils.class);
 
   /**
    * Test getting OZONE_SCM_DATANODE_ADDRESS_KEY with port.
@@ -63,6 +57,7 @@ public class TestHddsServerUtils {
   public void testGetDatanodeAddressWithPort() {
     final String scmHost = "host123:100";
     final OzoneConfiguration conf = new OzoneConfiguration();
+    conf.set(OZONE_SCM_CLIENT_ADDRESS_KEY, scmHost);
     conf.set(OZONE_SCM_DATANODE_ADDRESS_KEY, scmHost);
     final InetSocketAddress address =
         NetUtils.createSocketAddr(
@@ -78,6 +73,7 @@ public class TestHddsServerUtils {
   public void testGetDatanodeAddressWithoutPort() {
     final String scmHost = "host123";
     final OzoneConfiguration conf = new OzoneConfiguration();
+    conf.set(OZONE_SCM_CLIENT_ADDRESS_KEY, scmHost);
     conf.set(OZONE_SCM_DATANODE_ADDRESS_KEY, scmHost);
     final InetSocketAddress address =
         NetUtils.createSocketAddr(
@@ -195,6 +191,29 @@ public class TestHddsServerUtils {
   public void testNoScmDbDirConfigured() {
     assertThrows(IllegalArgumentException.class,
         () -> ServerUtils.getScmDbDir(new OzoneConfiguration()));
+  }
+
+  /**
+   * Wildcard and loopback addresses must be excluded from a certificate's SAN
+   * extension for both IPv4 and IPv6. See HDDS-9894.
+   */
+  @Test
+  public void testInvalidInetsExcludedFromCsr() throws UnknownHostException {
+    // IPv4 wildcard and loopback
+    assertThat(HddsServerUtil.isValidInetForCsr(InetAddress.getByName("0.0.0.0"))).isFalse();
+    assertThat(HddsServerUtil.isValidInetForCsr(InetAddress.getByName("127.0.0.1"))).isFalse();
+    // IPv6 equivalents: unspecified (::) and loopback (::1)
+    assertThat(HddsServerUtil.isValidInetForCsr(InetAddress.getByName("::"))).isFalse();
+    assertThat(HddsServerUtil.isValidInetForCsr(InetAddress.getByName("::1"))).isFalse();
+  }
+
+  /**
+   * Regular routable addresses stay eligible for the SAN extension.
+   */
+  @Test
+  public void testValidInetsIncludedInCsr() throws UnknownHostException {
+    assertThat(HddsServerUtil.isValidInetForCsr(InetAddress.getByName("1.2.3.4"))).isTrue();
+    assertThat(HddsServerUtil.isValidInetForCsr(InetAddress.getByName("2001:db8::1"))).isTrue();
   }
 
   @Test

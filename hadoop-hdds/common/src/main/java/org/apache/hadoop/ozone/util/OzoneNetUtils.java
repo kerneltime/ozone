@@ -1,32 +1,35 @@
 /*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with this
- * work for additional information regarding copyright ownership.  The ASF
- * licenses this file to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations under
- * the License.
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
+
 package org.apache.hadoop.ozone.util;
 
-import org.apache.hadoop.hdds.conf.OzoneConfiguration;
-import org.apache.hadoop.net.NetUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_JVM_NETWORK_ADDRESS_CACHE_ENABLED;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_JVM_NETWORK_ADDRESS_CACHE_ENABLED_DEFAULT;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.security.Security;
-
-import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_JVM_NETWORK_ADDRESS_CACHE_ENABLED;
-import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_JVM_NETWORK_ADDRESS_CACHE_ENABLED_DEFAULT;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import org.apache.hadoop.hdds.conf.OzoneConfiguration;
+import org.apache.hadoop.net.NetUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Ozone Network related utils. Provides methods related to local host name and
@@ -37,6 +40,8 @@ import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_JVM_NETWORK_ADDRESS_
 public final class OzoneNetUtils {
   private static final Logger LOG =
           LoggerFactory.getLogger(OzoneNetUtils.class);
+  private static final Map<String, Boolean> CACHE =
+      Collections.synchronizedMap(new HashMap<String, Boolean>());
 
   private OzoneNetUtils() {
   }
@@ -88,16 +93,29 @@ public final class OzoneNetUtils {
     return fqdn.split("\\.")[0];
   }
 
-
   /**
    * Match input address to local address.
-   * Return true if it matches, false otherwsie.
+   * Return true if it matches, false otherwise.
    */
   public static boolean isAddressLocal(InetSocketAddress addr) {
     InetAddress inetAddress = addr.getAddress();
-    return inetAddress != null && NetUtils.isLocalAddress(inetAddress);
+    if (inetAddress == null) {
+      return false;
+    }
+    Boolean cached = CACHE.get(inetAddress.getHostAddress());
+    if (cached != null) {
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Address {} is {} local", addr, (cached ? "" : "not"));
+      }
+      return cached;
+    }
+    boolean local = NetUtils.isLocalAddress(inetAddress);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Address {} is {} local", addr, (local ? "" : "not"));
+    }
+    CACHE.put(inetAddress.getHostAddress(), local);
+    return local;
   }
-
 
   public static boolean isUnresolved(boolean flexibleFqdnResolutionEnabled,
                                       InetSocketAddress addr) {

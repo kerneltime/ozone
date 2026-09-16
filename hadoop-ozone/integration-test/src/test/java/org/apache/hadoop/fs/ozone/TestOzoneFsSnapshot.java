@@ -1,79 +1,95 @@
 /*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with this
- * work for additional information regarding copyright ownership.  The ASF
- * licenses this file to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations under
- * the License.
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
+
 package org.apache.hadoop.fs.ozone;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.hadoop.fs.FileSystem.FS_DEFAULT_NAME_KEY;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_FS_LISTING_PAGE_SIZE;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_FS_LISTING_PAGE_SIZE_DEFAULT;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_SNAPSHOT_DELETING_SERVICE_INTERVAL;
+import static org.apache.hadoop.ozone.OzoneConsts.OM_KEY_PREFIX;
+import static org.apache.hadoop.ozone.OzoneConsts.OM_SNAPSHOT_INDICATOR;
+import static org.apache.hadoop.ozone.OzoneConsts.OZONE_OFS_URI_SCHEME;
+import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_SNAPSHOT_SST_FILTERING_SERVICE_INTERVAL;
+import static org.apache.hadoop.ozone.om.OmSnapshotManager.getSnapshotPath;
+import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes.FEATURE_NOT_ENABLED;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.UUID;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
-
-import com.google.common.base.Strings;
-
 import org.apache.commons.io.FileUtils;
-import org.apache.commons.lang3.RandomStringUtils;
+import org.apache.hadoop.hdds.cli.GenericCli;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.ozone.MiniOzoneCluster;
+import org.apache.hadoop.ozone.client.OzoneClient;
 import org.apache.hadoop.ozone.om.OMConfigKeys;
+import org.apache.hadoop.ozone.om.OmConfig;
 import org.apache.hadoop.ozone.om.OzoneManager;
+import org.apache.hadoop.ozone.om.exceptions.OMException;
 import org.apache.hadoop.ozone.om.helpers.SnapshotInfo;
+import org.apache.hadoop.ozone.shell.OzoneShell;
 import org.apache.hadoop.util.ToolRunner;
 import org.apache.ozone.test.GenericTestUtils;
 import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import static java.nio.charset.StandardCharsets.UTF_8;
-import static org.apache.hadoop.fs.FileSystem.FS_DEFAULT_NAME_KEY;
-import static org.apache.hadoop.ozone.OzoneConsts.OM_KEY_PREFIX;
-import static org.apache.hadoop.ozone.OzoneConsts.OZONE_OFS_URI_SCHEME;
-import static org.apache.hadoop.ozone.OzoneConsts.OM_SNAPSHOT_INDICATOR;
-import static org.apache.hadoop.ozone.om.OmSnapshotManager.getSnapshotPath;
-import static org.assertj.core.api.Assertions.assertThat;
-
 /**
  * Test client-side CRUD snapshot operations with Ozone Manager.
  * Setting a timeout for every test method to 300 seconds.
  */
-@Timeout(value = 300)
 class TestOzoneFsSnapshot {
+
+  private static final String SNAPSHOT_RENAME_NOT_ALLOWED_MESSAGE =
+      "Ozone snapshot rename feature is not allowed per Ozone Manager server config";
 
   private static MiniOzoneCluster cluster;
   private static final String OM_SERVICE_ID = "om-service-test1";
   private static OzoneManager ozoneManager;
   private static OzoneFsShell shell;
+  private static AtomicInteger counter = new AtomicInteger();
   private static final String VOLUME =
-      "vol-" + RandomStringUtils.randomNumeric(5);
+      "vol-" + counter.incrementAndGet();
   private static final String BUCKET =
-      "buck-" + RandomStringUtils.randomNumeric(5);
+      "buck-" + counter.incrementAndGet();
   private static final String KEY =
-      "key-" + RandomStringUtils.randomNumeric(5);
+      "key-" + counter.incrementAndGet();
   private static final String BUCKET_PATH =
       OM_KEY_PREFIX + VOLUME + OM_KEY_PREFIX + BUCKET;
   private static final String BUCKET_WITH_SNAPSHOT_INDICATOR_PATH =
@@ -86,11 +102,15 @@ class TestOzoneFsSnapshot {
     OzoneConfiguration conf = new OzoneConfiguration();
     // Enable filesystem snapshot feature for the test regardless of the default
     conf.setBoolean(OMConfigKeys.OZONE_FILESYSTEM_SNAPSHOT_ENABLED_KEY, true);
+    conf.setTimeDuration(OZONE_SNAPSHOT_DELETING_SERVICE_INTERVAL, 1, TimeUnit.SECONDS);
+    conf.setInt(OZONE_SNAPSHOT_SST_FILTERING_SERVICE_INTERVAL, -1);
+    conf.setInt(OmConfig.Keys.SERVER_LIST_MAX_SIZE, 20);
+    conf.setInt(OZONE_FS_LISTING_PAGE_SIZE, 30);
+    // Explicitly disable snapshot rename for the test
+    conf.setBoolean(OMConfigKeys.OZONE_OM_SNAPSHOT_RENAME_ALLOWED_KEY, false);
 
     // Start the cluster
-    cluster = MiniOzoneCluster.newOMHABuilder(conf)
-        .setClusterId(UUID.randomUUID().toString())
-        .setScmId(UUID.randomUUID().toString())
+    cluster = MiniOzoneCluster.newHABuilder(conf)
         .setOMServiceId(OM_SERVICE_ID)
         .setNumOfOzoneManagers(1)
         .build();
@@ -120,29 +140,29 @@ class TestOzoneFsSnapshot {
     // Create volume and bucket
     int res = ToolRunner.run(shell,
         new String[]{"-mkdir", "-p", BUCKET_PATH});
-    Assertions.assertEquals(0, res);
+    assertEquals(0, res);
     // Create key
     res = ToolRunner.run(shell, new String[]{"-touch", KEY_PATH});
-    Assertions.assertEquals(0, res);
+    assertEquals(0, res);
     // List the bucket to make sure that bucket exists.
     res = ToolRunner.run(shell, new String[]{"-ls", BUCKET_PATH});
-    Assertions.assertEquals(0, res);
+    assertEquals(0, res);
 
   }
 
   @Test
   void testCreateSnapshotDuplicateName() throws Exception {
-    String snapshotName = "snap-" + RandomStringUtils.randomNumeric(5);
+    String snapshotName = "snap-" + counter.incrementAndGet();
 
     int res = ToolRunner.run(shell,
         new String[]{"-createSnapshot", BUCKET_PATH, snapshotName});
     // Asserts that create request succeeded
-    Assertions.assertEquals(0, res);
+    assertEquals(0, res);
 
     res = ToolRunner.run(shell,
         new String[]{"-createSnapshot", BUCKET_PATH, snapshotName});
     // Asserts that create request fails since snapshot name provided twice
-    Assertions.assertEquals(1, res);
+    assertEquals(1, res);
   }
 
   @Test
@@ -156,25 +176,25 @@ class TestOzoneFsSnapshot {
     // rather than:
     // Created snapshot ofs://om/vol1/buck2/dir3/.snapshot/snap1
 
-    String snapshotName = "snap-" + RandomStringUtils.randomNumeric(5);
+    String snapshotName = "snap-" + counter.incrementAndGet();
 
     String dirPath = BUCKET_PATH + "/dir1/";
 
     int res = ToolRunner.run(shell, new String[] {
         "-mkdir", "-p", dirPath});
-    Assertions.assertEquals(0, res);
+    assertEquals(0, res);
 
     try (GenericTestUtils.SystemOutCapturer capture =
              new GenericTestUtils.SystemOutCapturer()) {
       res = ToolRunner.run(shell, new String[] {
           "-createSnapshot", dirPath, snapshotName});
       // Asserts that create request succeeded
-      Assertions.assertEquals(0, res);
+      assertEquals(0, res);
 
       String expectedSnapshotPath = Paths.get(
           BUCKET_PATH, OM_SNAPSHOT_INDICATOR, snapshotName).toString();
       String out = capture.getOutput().trim();
-      Assertions.assertTrue(out.endsWith(expectedSnapshotPath));
+      assertThat(out).endsWith(expectedSnapshotPath);
     }
   }
 
@@ -192,7 +212,7 @@ class TestOzoneFsSnapshot {
     int res = ToolRunner.run(shell,
         new String[]{"-createSnapshot", BUCKET_PATH, snapshotName});
     // Asserts that create request succeeded
-    Assertions.assertEquals(0, res);
+    assertEquals(0, res);
 
     SnapshotInfo snapshotInfo = ozoneManager
         .getMetadataManager()
@@ -202,7 +222,45 @@ class TestOzoneFsSnapshot {
     // Assert that snapshot exists in RocksDB.
     // We can't use list or valid if snapshot directory exists because DB
     // transaction might not be flushed by the time.
-    Assertions.assertNotNull(snapshotInfo);
+    assertNotNull(snapshotInfo);
+  }
+
+  @Test
+  void testSnapshotRenameBlockedWhenConfigDisallows(@TempDir Path tempDir)
+      throws Exception {
+    assertFalse(cluster.getConf().getBoolean(
+        OMConfigKeys.OZONE_OM_SNAPSHOT_RENAME_ALLOWED_KEY,
+        OMConfigKeys.OZONE_OM_SNAPSHOT_RENAME_ALLOWED_DEFAULT));
+
+    String oldSnapshotName = createSnapshot();
+    String newSnapshotName = "snap-" + counter.incrementAndGet();
+
+    try (OzoneClient ozoneClient = cluster.newClient()) {
+      OMException omException = assertThrows(OMException.class,
+          () -> ozoneClient.getObjectStore().renameSnapshot(
+              VOLUME, BUCKET, oldSnapshotName, newSnapshotName));
+      assertEquals(FEATURE_NOT_ENABLED, omException.getResult());
+      assertEquals(SNAPSHOT_RENAME_NOT_ALLOWED_MESSAGE,
+          omException.getMessage());
+    }
+
+    Path confPath = tempDir.resolve("ozone-site.xml");
+    try (OutputStream outputStream = Files.newOutputStream(confPath)) {
+      cluster.getConf().writeXml(outputStream);
+    }
+
+    try (GenericTestUtils.SystemErrCapturer capture =
+             new GenericTestUtils.SystemErrCapturer()) {
+      OzoneShell ozoneShell = new OzoneShell();
+      int res = ozoneShell.execute(new String[] {
+          "-conf", confPath.toString(), "snapshot", "rename",
+          "o3://" + OM_SERVICE_ID + BUCKET_PATH,
+          oldSnapshotName, newSnapshotName});
+
+      assertEquals(GenericCli.EXECUTION_ERROR_EXIT_CODE, res);
+      assertThat(capture.getOutput()).contains(
+          SNAPSHOT_RENAME_NOT_ALLOWED_MESSAGE);
+    }
   }
 
   private static Stream<Arguments> createSnapshotFailureScenarios() {
@@ -252,8 +310,7 @@ class TestOzoneFsSnapshot {
     String errorMessage = execShellCommandAndGetOutput(expectedResponse,
         new String[]{"-createSnapshot", paramBucketPath, snapshotName});
 
-    Assertions.assertTrue(errorMessage
-        .contains(expectedMessage));
+    assertThat(errorMessage).contains(expectedMessage);
   }
 
   /**
@@ -262,7 +319,7 @@ class TestOzoneFsSnapshot {
    */
   @Test
   void testFsLsSnapshot(@TempDir Path tempDir) throws Exception {
-    String key1 = "key-" + RandomStringUtils.randomNumeric(5);
+    String key1 = "key-" + counter.incrementAndGet();
     String newKeyPath = BUCKET_PATH + OM_KEY_PREFIX + key1;
     // Pause SnapshotDeletingService so that Snapshot marked deleted is not reclaimed.
     ozoneManager.getKeyManager().getSnapshotDeletingService().suspend();
@@ -279,7 +336,7 @@ class TestOzoneFsSnapshot {
       String snapshotPath1 = BUCKET_WITH_SNAPSHOT_INDICATOR_PATH +
           OM_KEY_PREFIX + snapshotName1;
 
-      String key2 = "key-" + RandomStringUtils.randomNumeric(5);
+      String key2 = "key-" + counter.incrementAndGet();
       String newKeyPath2 = BUCKET_PATH + OM_KEY_PREFIX + key2;
       execShellCommandAndGetOutput(0,
           new String[]{"-put", tempFile.toString(), newKeyPath2});
@@ -287,11 +344,18 @@ class TestOzoneFsSnapshot {
       String snapshotPath2 = BUCKET_WITH_SNAPSHOT_INDICATOR_PATH +
           OM_KEY_PREFIX + snapshotName2;
       String snapshotKeyPath2 = snapshotPath2 + OM_KEY_PREFIX + key2;
+      List<String> snapshotNames = new ArrayList<>();
+      for (int i = 0; i < cluster.getConf().getInt(OZONE_FS_LISTING_PAGE_SIZE,
+          OZONE_FS_LISTING_PAGE_SIZE_DEFAULT) * 2; i++) {
+        snapshotNames.add(createSnapshot());
+      }
+      String snapshotName3 = createSnapshot();
+
 
       int res = ToolRunner.run(shell,
           new String[]{"-deleteSnapshot", BUCKET_PATH, snapshotName1});
       // Asserts that delete request succeeded
-      Assertions.assertEquals(0, res);
+      assertEquals(0, res);
 
       // Wait for the snapshot to be marked deleted.
       GenericTestUtils.waitFor(() -> {
@@ -311,6 +375,10 @@ class TestOzoneFsSnapshot {
 
       assertThat(listSnapOut).doesNotContain(snapshotName1);
       assertThat(listSnapOut).contains(snapshotName2);
+      assertThat(listSnapOut).contains(snapshotName3);
+      for (String snapshotName : snapshotNames) {
+        assertThat(listSnapOut).contains(snapshotName);
+      }
 
       // Check for snapshot keys with "ozone fs -ls"
       String listSnapKeyOut = execShellCommandAndGetOutput(1,
@@ -339,24 +407,22 @@ class TestOzoneFsSnapshot {
     String deleteKeyOut = execShellCommandAndGetOutput(0,
         new String[]{"-rm", "-r", "-skipTrash", KEY_PATH});
 
-    Assertions.assertTrue(deleteKeyOut
-        .contains("Deleted " + BUCKET_PATH));
+    assertThat(deleteKeyOut).contains("Deleted " + BUCKET_PATH);
 
     // Delete bucket should fail due to existing snapshot
     String deleteBucketOut = execShellCommandAndGetOutput(1,
         new String[]{"-rm", "-r", "-skipTrash", BUCKET_PATH});
-    Assertions.assertTrue(deleteBucketOut
-          .contains(BUCKET + " can't be deleted when it has snapshots"));
+    assertThat(deleteBucketOut).contains(BUCKET + " can't be deleted when it has snapshots");
 
     // Key shouldn't exist under bucket
     String listKeyOut = execShellCommandAndGetOutput(0,
         new String[]{"-ls", BUCKET_PATH});
-    Assertions.assertTrue(Strings.isNullOrEmpty(listKeyOut));
+    assertThat(listKeyOut).isNullOrEmpty();
 
     // Key should still exist under snapshot
     String listSnapKeyOut = execShellCommandAndGetOutput(0,
         new String[]{"-ls", snapshotPath});
-    Assertions.assertTrue(listSnapKeyOut.contains(snapshotKeyPath));
+    assertThat(listSnapKeyOut).contains(snapshotKeyPath);
   }
 
   @Test
@@ -366,7 +432,7 @@ class TestOzoneFsSnapshot {
     int res = ToolRunner.run(shell,
         new String[]{"-deleteSnapshot", BUCKET_PATH, snapshotName});
     // Asserts that delete request succeeded
-    Assertions.assertEquals(0, res);
+    assertEquals(0, res);
 
     // Wait for the snapshot to be marked deleted.
     GenericTestUtils.waitFor(() -> {
@@ -417,8 +483,65 @@ class TestOzoneFsSnapshot {
     String errorMessage = execShellCommandAndGetOutput(expectedResponse,
             new String[]{"-deleteSnapshot", paramBucketPath, snapshotName});
 
-    Assertions.assertTrue(errorMessage
-            .contains(expectedMessage), errorMessage);
+    assertThat(errorMessage).contains(expectedMessage);
+  }
+
+  @Test
+  public void testSnapshotReuseSnapName() throws Exception {
+    String key1 = "key-" + counter.incrementAndGet();
+    int res = ToolRunner.run(shell, new String[]{"-touch",
+        BUCKET_PATH + OM_KEY_PREFIX + key1});
+    assertEquals(0, res);
+
+    String snap1 = "snap" + counter.incrementAndGet();
+    res = ToolRunner.run(shell,
+        new String[]{"-createSnapshot", BUCKET_PATH, snap1});
+    // Asserts that create request succeeded
+    assertEquals(0, res);
+
+    String listSnapOut = execShellCommandAndGetOutput(0,
+        new String[]{"-ls", BUCKET_WITH_SNAPSHOT_INDICATOR_PATH + OM_KEY_PREFIX + snap1});
+    assertThat(listSnapOut).contains(key1);
+
+    res = ToolRunner.run(shell,
+        new String[]{"-deleteSnapshot", BUCKET_PATH, snap1});
+    // Asserts that delete request succeeded
+    assertEquals(0, res);
+
+    GenericTestUtils.waitFor(() -> {
+      try {
+        return !ozoneManager.getMetadataManager().getSnapshotInfoTable()
+            .isExist(SnapshotInfo.getTableKey(VOLUME, BUCKET, snap1));
+      } catch (IOException e) {
+        throw new RuntimeException(e);
+      }
+    }, 200, 10000);
+
+    String key2 = "key-" + counter.incrementAndGet();
+    res = ToolRunner.run(shell, new String[]{"-touch",
+        BUCKET_PATH + OM_KEY_PREFIX + key2});
+    assertEquals(0, res);
+    String snap2 = "snap" + counter.incrementAndGet();
+    res = ToolRunner.run(shell,
+        new String[]{"-createSnapshot", BUCKET_PATH, snap2});
+    // Asserts that create request succeeded
+    assertEquals(0, res);
+
+    String key3 = "key-" + counter.incrementAndGet();
+    res = ToolRunner.run(shell, new String[]{"-touch",
+        BUCKET_PATH + OM_KEY_PREFIX + key3});
+    assertEquals(0, res);
+
+    res = ToolRunner.run(shell,
+        new String[]{"-createSnapshot", BUCKET_PATH, snap1});
+    // Asserts that create request succeeded
+    assertEquals(0, res);
+
+    listSnapOut = execShellCommandAndGetOutput(0,
+        new String[]{"-ls", BUCKET_WITH_SNAPSHOT_INDICATOR_PATH + OM_KEY_PREFIX + snap1});
+    assertThat(listSnapOut).contains(key1);
+    assertThat(listSnapOut).contains(key2);
+    assertThat(listSnapOut).contains(key3);
   }
 
   /**
@@ -438,7 +561,7 @@ class TestOzoneFsSnapshot {
 
     // Execute command
     int res = ToolRunner.run(shell, args);
-    Assertions.assertEquals(response, res);
+    assertEquals(response, res);
 
     // Store command output to a string,
     // if command should succeed then
@@ -461,13 +584,13 @@ class TestOzoneFsSnapshot {
   }
 
   private String createSnapshot() throws Exception {
-    String snapshotName = "snap-" + RandomStringUtils.randomNumeric(5);
+    String snapshotName = "snap-" + counter.incrementAndGet();
 
     // Create snapshot
     int res = ToolRunner.run(shell,
         new String[]{"-createSnapshot", BUCKET_PATH, snapshotName});
     // Asserts that create request succeeded
-    Assertions.assertEquals(0, res);
+    assertEquals(0, res);
 
     OzoneConfiguration conf = ozoneManager.getConfiguration();
 
@@ -475,7 +598,7 @@ class TestOzoneFsSnapshot {
     SnapshotInfo snapshotInfo = ozoneManager.getMetadataManager()
         .getSnapshotInfoTable()
         .get(SnapshotInfo.getTableKey(VOLUME, BUCKET, snapshotName));
-    String snapshotDirName = getSnapshotPath(conf, snapshotInfo) +
+    String snapshotDirName = getSnapshotPath(conf, snapshotInfo, 0) +
         OM_KEY_PREFIX + "CURRENT";
     GenericTestUtils.waitFor(() -> new File(snapshotDirName).exists(),
         1000, 100000);

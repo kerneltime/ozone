@@ -1,14 +1,13 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,118 +17,76 @@
 
 package org.apache.hadoop.ozone.recon.tasks;
 
-import org.apache.hadoop.hdds.client.StandaloneReplicationConfig;
-import org.apache.hadoop.hdds.conf.OzoneConfiguration;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
-import org.apache.hadoop.hdds.utils.db.RDBBatchOperation;
-import org.apache.hadoop.ozone.om.OMConfigKeys;
-import org.apache.hadoop.ozone.om.OMMetadataManager;
-import org.apache.hadoop.ozone.om.OmMetadataManagerImpl;
-import org.apache.hadoop.ozone.om.helpers.BucketLayout;
+import static org.apache.hadoop.ozone.OzoneConsts.OM_KEY_PREFIX;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.io.File;
+import java.io.IOException;
+import java.lang.reflect.Field;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
-import org.apache.hadoop.ozone.om.helpers.OmVolumeArgs;
 import org.apache.hadoop.ozone.recon.ReconConstants;
-import org.apache.hadoop.ozone.recon.ReconTestInjector;
 import org.apache.hadoop.ozone.recon.api.types.NSSummary;
 import org.apache.hadoop.ozone.recon.recovery.ReconOMMetadataManager;
-import org.apache.hadoop.ozone.recon.spi.ReconNamespaceSummaryManager;
-import org.apache.hadoop.ozone.recon.spi.impl.OzoneManagerServiceProviderImpl;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.io.File;
-import java.io.IOException;
-import java.util.Arrays;
-import java.util.Set;
-
-import static org.apache.hadoop.ozone.OzoneConsts.OM_KEY_PREFIX;
-import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_DB_DIRS;
-import static org.apache.hadoop.ozone.recon.OMMetadataManagerTestUtils.writeKeyToOm;
-import static org.apache.hadoop.ozone.recon.OMMetadataManagerTestUtils.getMockOzoneManagerServiceProvider;
-import static org.apache.hadoop.ozone.recon.OMMetadataManagerTestUtils.getTestReconOmMetadataManager;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-
 /**
- * Test for NSSummaryTask. Create one bucket of each layout
- * and test process and reprocess. Currently, there is no
- * support for OBS buckets. Check that the NSSummary
- * for the OBS bucket is null.
+ * Test for NSSummaryTask. Creates one bucket of each layout (FSO, Legacy, OBS)
+ * and exercises reprocess, parallel process(), and bucket-cache invalidation.
  */
-public final class TestNSSummaryTask {
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+public class TestNSSummaryTask extends AbstractNSSummaryTaskTest {
 
-  private static ReconNamespaceSummaryManager reconNamespaceSummaryManager;
-  private static OMMetadataManager omMetadataManager;
-  private static ReconOMMetadataManager reconOMMetadataManager;
-  private static NSSummaryTask nSSummaryTask;
-  private static OzoneConfiguration omConfiguration;
-
-  // Object names
-  private static final String VOL = "vol";
-  private static final String BUCKET_ONE = "bucket1";
-  private static final String BUCKET_TWO = "bucket2";
-  private static final String BUCKET_THREE = "bucket3";
-  private static final String KEY_ONE = "file1";
-  private static final String KEY_TWO = "file2";
-  private static final String KEY_THREE = "file3";
-  private static final String KEY_FIVE = "file5";
-  private static final String FILE_ONE = "file1";
-  private static final String FILE_TWO = "file2";
-  private static final String FILE_THREE = "file3";
-  private static final String FILE_FIVE = "file5";
-
-  private static final String TEST_USER = "TestUser";
-
-  private static final long PARENT_OBJECT_ID_ZERO = 0L;
-  private static final long VOL_OBJECT_ID = 0L;
-  private static final long BUCKET_ONE_OBJECT_ID = 1L;
-  private static final long BUCKET_TWO_OBJECT_ID = 2L;
-  private static final long BUCKET_THREE_OBJECT_ID = 4L;
-  private static final long KEY_ONE_OBJECT_ID = 3L;
-  private static final long KEY_TWO_OBJECT_ID = 5L;
-  private static final long KEY_THREE_OBJECT_ID = 8L;
-  private static final long KEY_FIVE_OBJECT_ID = 9L;
-
-  private static final long KEY_ONE_SIZE = 500L;
-  private static final long KEY_TWO_SIZE = 1025L;
-  private static final long KEY_THREE_SIZE =
-      ReconConstants.MAX_FILE_SIZE_UPPER_BOUND - 100L;
-  private static final long KEY_FIVE_SIZE = 100L;
-
-  private TestNSSummaryTask() {
-  }
+  private NSSummaryTask nSSummaryTask;
 
   @BeforeAll
-  public static void setUp(@TempDir File tmpDir) throws Exception {
-    initializeNewOmMetadataManager(new File(tmpDir, "om"));
-    OzoneManagerServiceProviderImpl ozoneManagerServiceProvider =
-        getMockOzoneManagerServiceProvider();
-    reconOMMetadataManager = getTestReconOmMetadataManager(omMetadataManager,
-        new File(tmpDir, "recon"));
+  void setUp(@TempDir File tmpDir) throws Exception {
+    commonSetup(tmpDir,
+        new OMConfigParameter(false,
+            false,
+            null, 0,
+            false,
+            true,
+            false));
 
-    ReconTestInjector reconTestInjector =
-        new ReconTestInjector.Builder(tmpDir)
-            .withReconOm(reconOMMetadataManager)
-            .withOmServiceProvider(ozoneManagerServiceProvider)
-            .withReconSqlDb()
-            .withContainerDB()
-            .build();
-    reconNamespaceSummaryManager =
-        reconTestInjector.getInstance(ReconNamespaceSummaryManager.class);
+    nSSummaryTask = new NSSummaryTask(
+        getReconNamespaceSummaryManager(),
+        getReconOMMetadataManager(),
+        getOmConfiguration()
+    );
+  }
 
-    NSSummary nonExistentSummary =
-        reconNamespaceSummaryManager.getNSSummary(BUCKET_ONE_OBJECT_ID);
-    assertNull(nonExistentSummary);
+  @Test
+  public void testTaskInstancesReuseSharedProcessExecutor() throws Exception {
+    NSSummaryTask anotherTask = new NSSummaryTask(
+        getReconNamespaceSummaryManager(),
+        getReconOMMetadataManager(),
+        getOmConfiguration());
 
-    populateOMDB();
+    assertSame(getSubTaskExecutor(nSSummaryTask),
+        getSubTaskExecutor(anotherTask));
+  }
 
-    nSSummaryTask = new NSSummaryTask(reconNamespaceSummaryManager,
-        reconOMMetadataManager, omConfiguration);
+  private Object getSubTaskExecutor(NSSummaryTask task) throws Exception {
+    Field executorField = NSSummaryTask.class.getDeclaredField(
+        "SUB_TASK_EXECUTOR");
+    executorField.setAccessible(true);
+    return executorField.get(task);
   }
 
   /**
@@ -144,43 +101,30 @@ public final class TestNSSummaryTask {
 
     @BeforeEach
     public void setUp() throws Exception {
-      // write a NSSummary prior to reprocess
-      // verify it got cleaned up after.
-      NSSummary staleNSSummary = new NSSummary();
-      RDBBatchOperation rdbBatchOperation = new RDBBatchOperation();
-      reconNamespaceSummaryManager.batchStoreNSSummaries(rdbBatchOperation, -1L,
-          staleNSSummary);
-      reconNamespaceSummaryManager.commitBatchOperation(rdbBatchOperation);
-
-      // Verify commit
-      assertNotNull(reconNamespaceSummaryManager.getNSSummary(-1L));
-
-      nSSummaryTask.reprocess(reconOMMetadataManager);
-      assertNull(reconNamespaceSummaryManager.getNSSummary(-1L));
-
-      nsSummaryForBucket1 =
-          reconNamespaceSummaryManager.getNSSummary(BUCKET_ONE_OBJECT_ID);
-      nsSummaryForBucket2 =
-          reconNamespaceSummaryManager.getNSSummary(BUCKET_TWO_OBJECT_ID);
-      nsSummaryForBucket3 =
-      reconNamespaceSummaryManager.getNSSummary(BUCKET_THREE_OBJECT_ID);
-      assertNotNull(nsSummaryForBucket1);
-      assertNotNull(nsSummaryForBucket2);
-      assertNull(nsSummaryForBucket3);
+      List<NSSummary> result = commonSetUpTestReprocess(
+          () -> nSSummaryTask.reprocess(getReconOMMetadataManager()),
+          BUCKET_ONE_OBJECT_ID,
+          BUCKET_TWO_OBJECT_ID,
+          BUCKET_THREE_OBJECT_ID);
+      nsSummaryForBucket1 = result.get(0);
+      nsSummaryForBucket2 = result.get(1);
+      nsSummaryForBucket3 = result.get(2);
     }
 
     @Test
     public void testReprocessNSSummaryNull() throws IOException {
-      assertNull(reconNamespaceSummaryManager.getNSSummary(-1L));
+      assertNull(getReconNamespaceSummaryManager().getNSSummary(-1L));
     }
 
     @Test
     public void testReprocessGetFiles() {
       assertEquals(1, nsSummaryForBucket1.getNumOfFiles());
       assertEquals(1, nsSummaryForBucket2.getNumOfFiles());
+      assertEquals(1, nsSummaryForBucket3.getNumOfFiles());
 
       assertEquals(KEY_ONE_SIZE, nsSummaryForBucket1.getSizeOfFiles());
       assertEquals(KEY_TWO_SIZE, nsSummaryForBucket2.getSizeOfFiles());
+      assertEquals(KEY_THREE_SIZE, nsSummaryForBucket3.getSizeOfFiles());
     }
 
     @Test
@@ -216,58 +160,75 @@ public final class TestNSSummaryTask {
     private NSSummary nsSummaryForBucket1;
     private NSSummary nsSummaryForBucket2;
     private NSSummary nsSummaryForBucket3;
-
-    private OMDBUpdateEvent keyEvent1;
-    private OMDBUpdateEvent keyEvent2;
+    private ReconOmTask.TaskResult processResult;
 
     @BeforeEach
     public void setUp() throws IOException {
-      nSSummaryTask.reprocess(reconOMMetadataManager);
-      nSSummaryTask.process(processEventBatch());
+      nSSummaryTask.reprocess(getReconOMMetadataManager());
+      // Exercise process() across all three bucket layouts in a single batch
+      // so the parallel sub-task dispatch is covered end-to-end.
+      processResult = nSSummaryTask.process(processEventBatch(), Collections.emptyMap());
 
       nsSummaryForBucket1 =
-          reconNamespaceSummaryManager.getNSSummary(BUCKET_ONE_OBJECT_ID);
+          getReconNamespaceSummaryManager().getNSSummary(BUCKET_ONE_OBJECT_ID);
       assertNotNull(nsSummaryForBucket1);
       nsSummaryForBucket2 =
-          reconNamespaceSummaryManager.getNSSummary(BUCKET_TWO_OBJECT_ID);
+          getReconNamespaceSummaryManager().getNSSummary(BUCKET_TWO_OBJECT_ID);
       assertNotNull(nsSummaryForBucket2);
       nsSummaryForBucket3 =
-          reconNamespaceSummaryManager.getNSSummary(BUCKET_THREE_OBJECT_ID);
-      assertNull(nsSummaryForBucket3);
+          getReconNamespaceSummaryManager().getNSSummary(BUCKET_THREE_OBJECT_ID);
+      assertNotNull(nsSummaryForBucket3);
     }
 
     private OMUpdateEventBatch processEventBatch() throws IOException {
-      // put file5 under bucket 2
+      // PUT file5 under bucket 2 (Legacy)
       String omPutKey =
           OM_KEY_PREFIX + VOL +
               OM_KEY_PREFIX + BUCKET_TWO +
               OM_KEY_PREFIX + FILE_FIVE;
       OmKeyInfo omPutKeyInfo = buildOmKeyInfo(VOL, BUCKET_TWO, KEY_FIVE,
           FILE_FIVE, KEY_FIVE_OBJECT_ID, BUCKET_TWO_OBJECT_ID, KEY_FIVE_SIZE);
-      keyEvent1 = new OMDBUpdateEvent.
-          OMUpdateEventBuilder<String, OmKeyInfo>()
-          .setKey(omPutKey)
-          .setValue(omPutKeyInfo)
-          .setTable(omMetadataManager.getKeyTable(getLegacyBucketLayout())
-              .getName())
-          .setAction(OMDBUpdateEvent.OMDBUpdateAction.PUT)
-          .build();
+      OMDBUpdateEvent keyEvent1 = new OMDBUpdateEvent.
+                                          OMUpdateEventBuilder<String, OmKeyInfo>()
+                                      .setKey(omPutKey)
+                                      .setValue(omPutKeyInfo)
+                                      .setTable(getOmMetadataManager().getKeyTable(getLegacyBucketLayout())
+                                                    .getName())
+                                      .setAction(OMDBUpdateEvent.OMDBUpdateAction.PUT)
+                                      .build();
 
-      // delete file 1 under bucket 1
+      // DELETE file1 under bucket 1 (FSO)
       String omDeleteKey = BUCKET_ONE_OBJECT_ID + OM_KEY_PREFIX + FILE_ONE;
       OmKeyInfo omDeleteInfo = buildOmKeyInfo(
           VOL, BUCKET_ONE, KEY_ONE, FILE_ONE,
           KEY_ONE_OBJECT_ID, BUCKET_ONE_OBJECT_ID);
-      keyEvent2 = new OMDBUpdateEvent.
-          OMUpdateEventBuilder<String, OmKeyInfo>()
-          .setKey(omDeleteKey)
-          .setValue(omDeleteInfo)
-          .setTable(omMetadataManager.getKeyTable(getFSOBucketLayout())
-              .getName())
-          .setAction(OMDBUpdateEvent.OMDBUpdateAction.DELETE)
-          .build();
+      OMDBUpdateEvent keyEvent2 = new OMDBUpdateEvent.
+                                          OMUpdateEventBuilder<String, OmKeyInfo>()
+                                      .setKey(omDeleteKey)
+                                      .setValue(omDeleteInfo)
+                                      .setTable(getOmMetadataManager().getKeyTable(getFSOBucketLayout())
+                                                    .getName())
+                                      .setAction(OMDBUpdateEvent.OMDBUpdateAction.DELETE)
+                                      .build();
 
-      return new OMUpdateEventBatch(Arrays.asList(keyEvent1, keyEvent2));
+      // PUT file4 under bucket 3 (OBS) — exercises the OBS sub-task path so a
+      // regression in the OBS branch (e.g. missed events) is caught.
+      String omObsPutKey =
+          OM_KEY_PREFIX + VOL +
+              OM_KEY_PREFIX + BUCKET_THREE +
+              OM_KEY_PREFIX + KEY_FOUR;
+      OmKeyInfo omObsPutKeyInfo = buildOmKeyInfo(VOL, BUCKET_THREE, KEY_FOUR,
+          KEY_FOUR, KEY_FOUR_OBJECT_ID, BUCKET_THREE_OBJECT_ID, KEY_FOUR_SIZE);
+      OMDBUpdateEvent keyEvent3 = new OMDBUpdateEvent.
+                                          OMUpdateEventBuilder<String, OmKeyInfo>()
+                                      .setKey(omObsPutKey)
+                                      .setValue(omObsPutKeyInfo)
+                                      .setTable(getOmMetadataManager().getKeyTable(getOBSBucketLayout())
+                                                    .getName())
+                                      .setAction(OMDBUpdateEvent.OMDBUpdateAction.PUT)
+                                      .build();
+
+      return new OMUpdateEventBatch(Arrays.asList(keyEvent1, keyEvent2, keyEvent3), 0L);
     }
 
     @Test
@@ -300,189 +261,384 @@ public final class TestNSSummaryTask {
         assertEquals(0, fileSizeDist[i]);
       }
     }
+
+    @Test
+    public void testProcessObsBucket() {
+      // bucket 3 (OBS) had file3 from reprocess; the batch added file4.
+      assertEquals(2, nsSummaryForBucket3.getNumOfFiles());
+      assertEquals(KEY_THREE_SIZE + KEY_FOUR_SIZE,
+          nsSummaryForBucket3.getSizeOfFiles());
+    }
+
+    @Test
+    public void testProcessTaskResult() {
+      // Sub-task seek positions must be reported for all three layouts so the
+      // dispatcher can resume each sub-task independently on retry.
+      assertNotNull(processResult);
+      assertTrue(processResult.isTaskSuccess());
+      assertNotNull(processResult.getSubTaskSeekPositions().get(NSSummaryTask.BucketType.FSO.name()));
+      assertNotNull(processResult.getSubTaskSeekPositions().get(NSSummaryTask.BucketType.LEGACY.name()));
+      assertNotNull(processResult.getSubTaskSeekPositions().get(NSSummaryTask.BucketType.OBS.name()));
+    }
   }
 
   /**
-   * Build a key info for put/update action.
-   * @param volume         volume name
-   * @param bucket         bucket name
-   * @param key            key name
-   * @param fileName       file name
-   * @param objectID       object ID
-   * @param parentObjectId parent object ID
-   * @param dataSize       file size
-   * @return the KeyInfo
+   * Exercises parallel FSO / Legacy / OBS sub-task dispatch beyond the happy
+   * path: interleaved multi-mutation batches, per-layout filtering in a shared
+   * event stream, and independent seek positions per sub-task on retry.
    */
-  private static OmKeyInfo buildOmKeyInfo(String volume,
-                                          String bucket,
-                                          String key,
-                                          String fileName,
-                                          long objectID,
-                                          long parentObjectId,
-                                          long dataSize) {
-    return new OmKeyInfo.Builder()
-        .setBucketName(bucket)
-        .setVolumeName(volume)
-        .setKeyName(key)
-        .setFileName(fileName)
-        .setReplicationConfig(
-            StandaloneReplicationConfig.getInstance(
-                HddsProtos.ReplicationFactor.ONE))
-        .setObjectID(objectID)
-        .setParentObjectID(parentObjectId)
-        .setDataSize(dataSize)
-        .build();
+  @Nested
+  public class TestProcessParallelMixedBatch {
+
+    @BeforeEach
+    public void reprocessBaseline() throws IOException {
+      nSSummaryTask.reprocess(getReconOMMetadataManager());
+    }
+
+    @Test
+    public void testInterleavedBatchAppliesAllLayoutMutations() throws IOException {
+      // Deliberately scramble layout order: OBS, Legacy, FSO, OBS, Legacy.
+      ReconOmTask.TaskResult result = nSSummaryTask.process(
+          new OMUpdateEventBatch(Arrays.asList(
+              obsDeleteEvent(KEY_THREE, KEY_THREE_OBJECT_ID, KEY_THREE_SIZE),
+              legacyPutEvent(KEY_FIVE, KEY_FIVE_OBJECT_ID, KEY_FIVE_SIZE),
+              fsoDeleteEvent(KEY_ONE, KEY_ONE_OBJECT_ID, KEY_ONE_SIZE),
+              obsPutEvent(KEY_FOUR, KEY_FOUR_OBJECT_ID, KEY_FOUR_SIZE),
+              legacyUpdateEvent(KEY_TWO, KEY_TWO_OBJECT_ID, KEY_TWO_SIZE,
+                  KEY_TWO_UPDATE_SIZE)),
+              0L),
+          Collections.emptyMap());
+
+      assertTrue(result.isTaskSuccess());
+
+      NSSummary fsoBucket =
+          getReconNamespaceSummaryManager().getNSSummary(BUCKET_ONE_OBJECT_ID);
+      assertNotNull(fsoBucket);
+      assertEquals(0, fsoBucket.getNumOfFiles());
+      assertEquals(0, fsoBucket.getSizeOfFiles());
+
+      NSSummary legacyBucket =
+          getReconNamespaceSummaryManager().getNSSummary(BUCKET_TWO_OBJECT_ID);
+      assertNotNull(legacyBucket);
+      assertEquals(2, legacyBucket.getNumOfFiles());
+      assertEquals(KEY_TWO_UPDATE_SIZE + KEY_FIVE_SIZE,
+          legacyBucket.getSizeOfFiles());
+
+      NSSummary obsBucket =
+          getReconNamespaceSummaryManager().getNSSummary(BUCKET_THREE_OBJECT_ID);
+      assertNotNull(obsBucket);
+      assertEquals(1, obsBucket.getNumOfFiles());
+      assertEquals(KEY_FOUR_SIZE, obsBucket.getSizeOfFiles());
+    }
+
+    @Test
+    public void testLayoutFilteringInMixedBatch() throws IOException {
+      // OBS-only keyTable events in a batch that still runs all three sub-tasks
+      // in parallel. Legacy and FSO must leave their buckets at the reprocess
+      // baseline while OBS applies delete+put.
+      ReconOmTask.TaskResult result = nSSummaryTask.process(
+          new OMUpdateEventBatch(Arrays.asList(
+              obsDeleteEvent(KEY_THREE, KEY_THREE_OBJECT_ID, KEY_THREE_SIZE),
+              obsPutEvent(KEY_FOUR, KEY_FOUR_OBJECT_ID, KEY_FOUR_SIZE)),
+              0L),
+          Collections.emptyMap());
+
+      assertTrue(result.isTaskSuccess());
+
+      assertEquals(1, getReconNamespaceSummaryManager()
+          .getNSSummary(BUCKET_ONE_OBJECT_ID).getNumOfFiles());
+      assertEquals(KEY_ONE_SIZE, getReconNamespaceSummaryManager()
+          .getNSSummary(BUCKET_ONE_OBJECT_ID).getSizeOfFiles());
+      assertEquals(1, getReconNamespaceSummaryManager()
+          .getNSSummary(BUCKET_TWO_OBJECT_ID).getNumOfFiles());
+      assertEquals(KEY_TWO_SIZE, getReconNamespaceSummaryManager()
+          .getNSSummary(BUCKET_TWO_OBJECT_ID).getSizeOfFiles());
+      assertEquals(1, getReconNamespaceSummaryManager()
+          .getNSSummary(BUCKET_THREE_OBJECT_ID).getNumOfFiles());
+      assertEquals(KEY_FOUR_SIZE, getReconNamespaceSummaryManager()
+          .getNSSummary(BUCKET_THREE_OBJECT_ID).getSizeOfFiles());
+    }
+
+    @Test
+    public void testIndependentSubTaskSeekPositions() throws IOException {
+      // Shared stream (5 events): OBS delete, Legacy put, FSO delete, OBS put,
+      // Legacy update. Legacy seek=3 skips the first three stream positions
+      // (including its own put at position 2) while FSO/OBS start at 0.
+      OMUpdateEventBatch batch = new OMUpdateEventBatch(Arrays.asList(
+          obsDeleteEvent(KEY_THREE, KEY_THREE_OBJECT_ID, KEY_THREE_SIZE),
+          legacyPutEvent(KEY_FIVE, KEY_FIVE_OBJECT_ID, KEY_FIVE_SIZE),
+          fsoDeleteEvent(KEY_ONE, KEY_ONE_OBJECT_ID, KEY_ONE_SIZE),
+          obsPutEvent(KEY_FOUR, KEY_FOUR_OBJECT_ID, KEY_FOUR_SIZE),
+          legacyUpdateEvent(KEY_TWO, KEY_TWO_OBJECT_ID, KEY_TWO_SIZE,
+              KEY_TWO_UPDATE_SIZE)),
+          0L);
+
+      Map<String, Integer> legacySeekOnly = new HashMap<>();
+      legacySeekOnly.put(NSSummaryTask.BucketType.LEGACY.name(), 3);
+
+      ReconOmTask.TaskResult result =
+          nSSummaryTask.process(batch, legacySeekOnly);
+
+      assertTrue(result.isTaskSuccess());
+      // Each sub-task reports its resume position independently. Legacy was
+      // told to skip the first three stream indices; FSO/OBS consumed from 0.
+      assertNotNull(result.getSubTaskSeekPositions());
+      assertEquals(0, result.getSubTaskSeekPositions()
+          .get(NSSummaryTask.BucketType.FSO.name()).intValue());
+      assertEquals(3, result.getSubTaskSeekPositions()
+          .get(NSSummaryTask.BucketType.LEGACY.name()).intValue());
+      assertEquals(0, result.getSubTaskSeekPositions()
+          .get(NSSummaryTask.BucketType.OBS.name()).intValue());
+
+      // FSO/OBS processed from the start; Legacy only picked up the update.
+      assertEquals(0, getReconNamespaceSummaryManager()
+          .getNSSummary(BUCKET_ONE_OBJECT_ID).getNumOfFiles());
+      assertEquals(1, getReconNamespaceSummaryManager()
+          .getNSSummary(BUCKET_TWO_OBJECT_ID).getNumOfFiles());
+      assertEquals(KEY_TWO_UPDATE_SIZE, getReconNamespaceSummaryManager()
+          .getNSSummary(BUCKET_TWO_OBJECT_ID).getSizeOfFiles());
+      assertEquals(1, getReconNamespaceSummaryManager()
+          .getNSSummary(BUCKET_THREE_OBJECT_ID).getNumOfFiles());
+      assertEquals(KEY_FOUR_SIZE, getReconNamespaceSummaryManager()
+          .getNSSummary(BUCKET_THREE_OBJECT_ID).getSizeOfFiles());
+    }
+
+    @Test
+    public void testLegacySeekZeroAppliesAllLegacyEvents() throws IOException {
+      // Contrast with testIndependentSubTaskSeekPositions: without a Legacy
+      // seek offset, the interleaved batch applies both Legacy mutations.
+      OMUpdateEventBatch batch = new OMUpdateEventBatch(Arrays.asList(
+          obsDeleteEvent(KEY_THREE, KEY_THREE_OBJECT_ID, KEY_THREE_SIZE),
+          legacyPutEvent(KEY_FIVE, KEY_FIVE_OBJECT_ID, KEY_FIVE_SIZE),
+          fsoDeleteEvent(KEY_ONE, KEY_ONE_OBJECT_ID, KEY_ONE_SIZE),
+          obsPutEvent(KEY_FOUR, KEY_FOUR_OBJECT_ID, KEY_FOUR_SIZE),
+          legacyUpdateEvent(KEY_TWO, KEY_TWO_OBJECT_ID, KEY_TWO_SIZE,
+              KEY_TWO_UPDATE_SIZE)),
+          0L);
+
+      assertTrue(nSSummaryTask.process(batch, Collections.emptyMap()).isTaskSuccess());
+      assertEquals(2, getReconNamespaceSummaryManager()
+          .getNSSummary(BUCKET_TWO_OBJECT_ID).getNumOfFiles());
+      assertEquals(KEY_TWO_UPDATE_SIZE + KEY_FIVE_SIZE,
+          getReconNamespaceSummaryManager()
+              .getNSSummary(BUCKET_TWO_OBJECT_ID).getSizeOfFiles());
+    }
+
+    @Test
+    public void testSequentialMixedBatches() throws IOException {
+      ReconOmTask.TaskResult batch1 = nSSummaryTask.process(
+          new OMUpdateEventBatch(Collections.singletonList(
+              fsoDeleteEvent(KEY_ONE, KEY_ONE_OBJECT_ID, KEY_ONE_SIZE)), 0L),
+          Collections.emptyMap());
+      assertTrue(batch1.isTaskSuccess());
+
+      ReconOmTask.TaskResult batch2 = nSSummaryTask.process(
+          new OMUpdateEventBatch(Arrays.asList(
+              legacyPutEvent(KEY_FIVE, KEY_FIVE_OBJECT_ID, KEY_FIVE_SIZE),
+              obsPutEvent(KEY_FOUR, KEY_FOUR_OBJECT_ID, KEY_FOUR_SIZE)),
+              0L),
+          Collections.emptyMap());
+      assertTrue(batch2.isTaskSuccess());
+
+      assertEquals(0, getReconNamespaceSummaryManager()
+          .getNSSummary(BUCKET_ONE_OBJECT_ID).getNumOfFiles());
+      assertEquals(2, getReconNamespaceSummaryManager()
+          .getNSSummary(BUCKET_TWO_OBJECT_ID).getNumOfFiles());
+      assertEquals(2, getReconNamespaceSummaryManager()
+          .getNSSummary(BUCKET_THREE_OBJECT_ID).getNumOfFiles());
+      assertEquals(KEY_THREE_SIZE + KEY_FOUR_SIZE, getReconNamespaceSummaryManager()
+          .getNSSummary(BUCKET_THREE_OBJECT_ID).getSizeOfFiles());
+    }
+
+    private OMDBUpdateEvent fsoDeleteEvent(String fileName, long objectId,
+                                           long dataSize) {
+      String key = BUCKET_ONE_OBJECT_ID + OM_KEY_PREFIX + fileName;
+      OmKeyInfo keyInfo = buildOmKeyInfo(
+          VOL, BUCKET_ONE, fileName, fileName, objectId, BUCKET_ONE_OBJECT_ID,
+          dataSize);
+      return new OMDBUpdateEvent.OMUpdateEventBuilder<String, OmKeyInfo>()
+          .setKey(key)
+          .setValue(keyInfo)
+          .setTable(getOmMetadataManager().getKeyTable(getFSOBucketLayout()).getName())
+          .setAction(OMDBUpdateEvent.OMDBUpdateAction.DELETE)
+          .build();
+    }
+
+    private OMDBUpdateEvent legacyPutEvent(String keyName, long objectId,
+                                           long dataSize) {
+      String key = OM_KEY_PREFIX + VOL + OM_KEY_PREFIX + BUCKET_TWO
+          + OM_KEY_PREFIX + keyName;
+      OmKeyInfo keyInfo = buildOmKeyInfo(
+          VOL, BUCKET_TWO, keyName, keyName, objectId, BUCKET_TWO_OBJECT_ID,
+          dataSize);
+      return new OMDBUpdateEvent.OMUpdateEventBuilder<String, OmKeyInfo>()
+          .setKey(key)
+          .setValue(keyInfo)
+          .setTable(getOmMetadataManager().getKeyTable(getLegacyBucketLayout()).getName())
+          .setAction(OMDBUpdateEvent.OMDBUpdateAction.PUT)
+          .build();
+    }
+
+    private OMDBUpdateEvent legacyUpdateEvent(String keyName, long objectId,
+                                              long oldSize, long newSize) {
+      String key = OM_KEY_PREFIX + VOL + OM_KEY_PREFIX + BUCKET_TWO
+          + OM_KEY_PREFIX + keyName;
+      OmKeyInfo oldInfo = buildOmKeyInfo(
+          VOL, BUCKET_TWO, keyName, keyName, objectId, BUCKET_TWO_OBJECT_ID,
+          oldSize);
+      OmKeyInfo newInfo = buildOmKeyInfo(
+          VOL, BUCKET_TWO, keyName, keyName, objectId, BUCKET_TWO_OBJECT_ID,
+          newSize);
+      return new OMDBUpdateEvent.OMUpdateEventBuilder<String, OmKeyInfo>()
+          .setKey(key)
+          .setValue(newInfo)
+          .setOldValue(oldInfo)
+          .setTable(getOmMetadataManager().getKeyTable(getLegacyBucketLayout()).getName())
+          .setAction(OMDBUpdateEvent.OMDBUpdateAction.UPDATE)
+          .build();
+    }
+
+    private OMDBUpdateEvent obsPutEvent(String keyName, long objectId,
+                                        long dataSize) {
+      String key = OM_KEY_PREFIX + VOL + OM_KEY_PREFIX + BUCKET_THREE
+          + OM_KEY_PREFIX + keyName;
+      OmKeyInfo keyInfo = buildOmKeyInfo(
+          VOL, BUCKET_THREE, keyName, keyName, objectId, BUCKET_THREE_OBJECT_ID,
+          dataSize);
+      return new OMDBUpdateEvent.OMUpdateEventBuilder<String, OmKeyInfo>()
+          .setKey(key)
+          .setValue(keyInfo)
+          .setTable(getOmMetadataManager().getKeyTable(getOBSBucketLayout()).getName())
+          .setAction(OMDBUpdateEvent.OMDBUpdateAction.PUT)
+          .build();
+    }
+
+    private OMDBUpdateEvent obsDeleteEvent(String keyName, long objectId,
+                                           long dataSize) {
+      String key = OM_KEY_PREFIX + VOL + OM_KEY_PREFIX + BUCKET_THREE
+          + OM_KEY_PREFIX + keyName;
+      OmKeyInfo keyInfo = buildOmKeyInfo(
+          VOL, BUCKET_THREE, keyName, keyName, objectId, BUCKET_THREE_OBJECT_ID,
+          dataSize);
+      return new OMDBUpdateEvent.OMUpdateEventBuilder<String, OmKeyInfo>()
+          .setKey(key)
+          .setValue(keyInfo)
+          .setTable(getOmMetadataManager().getKeyTable(getOBSBucketLayout()).getName())
+          .setAction(OMDBUpdateEvent.OMDBUpdateAction.DELETE)
+          .build();
+    }
   }
 
   /**
-   * Build a key info for delete action.
-   * @param volume         volume name
-   * @param bucket         bucket name
-   * @param key            key name
-   * @param fileName       file name
-   * @param objectID       object ID
-   * @param parentObjectId parent object ID
-   * @return the KeyInfo
+   * Regression test for the field-level OmBucketInfo cache in
+   * {@link NSSummaryTaskDbEventHandler}. A bucket deleted and recreated under
+   * the same volume/bucket name gets a new objectID but reuses the same DB key.
+   * The cached entry must be invalidated when the bucketTable event is observed,
+   * otherwise key events for the recreated bucket would be attributed to the
+   * stale (old) bucket objectID.
    */
-  private static OmKeyInfo buildOmKeyInfo(String volume,
-                                          String bucket,
-                                          String key,
-                                          String fileName,
-                                          long objectID,
-                                          long parentObjectId) {
-    return new OmKeyInfo.Builder()
-        .setBucketName(bucket)
-        .setVolumeName(volume)
-        .setKeyName(key)
-        .setFileName(fileName)
-        .setReplicationConfig(
-            StandaloneReplicationConfig.getInstance(
-                HddsProtos.ReplicationFactor.ONE))
-        .setObjectID(objectID)
-        .setParentObjectID(parentObjectId)
-        .build();
-  }
+  @Nested
+  public class TestProcessBucketRecreate {
 
-  /**
-   * Populate OMDB with the following configs.
-   *             vol
-   *      /       \       \
-   * bucket1   bucket2    bucket3
-   *    /        /        /
-   * file1    file2     file3
-   *
-   * @throws IOException
-   */
-  private static void populateOMDB() throws IOException {
-    // Bucket1 FSO layout
-    writeKeyToOm(reconOMMetadataManager,
-        KEY_ONE,
-        BUCKET_ONE,
-        VOL,
-        FILE_ONE,
-        KEY_ONE_OBJECT_ID,
-        BUCKET_ONE_OBJECT_ID,
-        BUCKET_ONE_OBJECT_ID,
-        VOL_OBJECT_ID,
-        KEY_ONE_SIZE,
-        getFSOBucketLayout());
+    private static final String RECREATE_BUCKET = "bucketrecreate";
+    private static final long OLD_BUCKET_OBJECT_ID = 100L;
+    private static final long NEW_BUCKET_OBJECT_ID = 200L;
+    private static final long FIRST_KEY_OBJECT_ID = 101L;
+    private static final long SECOND_KEY_OBJECT_ID = 201L;
+    private static final long RECREATE_KEY_SIZE = 1024L;
 
-    // Bucket2 Legacy layout
-    writeKeyToOm(reconOMMetadataManager,
-        KEY_TWO,
-        BUCKET_TWO,
-        VOL,
-        FILE_TWO,
-        KEY_TWO_OBJECT_ID,
-        PARENT_OBJECT_ID_ZERO,
-        BUCKET_TWO_OBJECT_ID,
-        VOL_OBJECT_ID,
-          KEY_TWO_SIZE,
-        getLegacyBucketLayout());
+    @Test
+    public void testBucketCacheInvalidatedOnRecreate() throws IOException {
+      ReconOMMetadataManager reconMetadataMgr = getReconOMMetadataManager();
+      String bucketKey = reconMetadataMgr.getBucketKey(VOL, RECREATE_BUCKET);
 
-    // Bucket3 OBS layout
-    writeKeyToOm(reconOMMetadataManager,
-        KEY_THREE,
-        BUCKET_THREE,
-        VOL,
-        FILE_THREE,
-        KEY_THREE_OBJECT_ID,
-        PARENT_OBJECT_ID_ZERO,
-        BUCKET_THREE_OBJECT_ID,
-        VOL_OBJECT_ID,
-        KEY_THREE_SIZE,
-        getOBSBucketLayout());
-  }
+      // The bucket initially exists as an OBS bucket with the old objectID.
+      reconMetadataMgr.getBucketTable()
+          .put(bucketKey, buildObsBucketInfo(OLD_BUCKET_OBJECT_ID));
 
-  /**
-   * Create a new OM Metadata manager instance with one user, one vol, and two
-   * buckets. Bucket1 will have FSO layout, bucket2 will have Legacy layout
-   * and bucket3 will have OBS layout.
-   * @throws IOException ioEx
-   */
-  private static void initializeNewOmMetadataManager(
-      File omDbDir)
-      throws IOException {
-    omConfiguration = new OzoneConfiguration();
-    omConfiguration.set(OZONE_OM_DB_DIRS,
-        omDbDir.getAbsolutePath());
-    omConfiguration.set(OMConfigKeys
-        .OZONE_OM_ENABLE_FILESYSTEM_PATHS, "true");
-    omMetadataManager = new OmMetadataManagerImpl(
-        omConfiguration, null);
+      // A fresh task starts with an empty bucket cache and exercises the full
+      // parallel sub-task dispatch.
+      NSSummaryTask task = new NSSummaryTask(getReconNamespaceSummaryManager(),
+          reconMetadataMgr, getOmConfiguration());
 
-    String volumeKey = omMetadataManager.getVolumeKey(VOL);
-    OmVolumeArgs args =
-        OmVolumeArgs.newBuilder()
-            .setObjectID(VOL_OBJECT_ID)
-            .setVolume(VOL)
-            .setAdminName(TEST_USER)
-            .setOwnerName(TEST_USER)
-            .build();
-    omMetadataManager.getVolumeTable().put(volumeKey, args);
+      // Batch 1: a key lands in the original bucket. This warms the OBS
+      // sub-task's bucket cache with the old objectID.
+      OMDBUpdateEvent firstKeyPut =
+          obsKeyPutEvent(bucketKey, KEY_ONE, FIRST_KEY_OBJECT_ID, OLD_BUCKET_OBJECT_ID);
+      task.process(new OMUpdateEventBatch(
+          Collections.singletonList(firstKeyPut), 0L), Collections.emptyMap());
 
-    OmBucketInfo bucketInfo1 = OmBucketInfo.newBuilder()
-        .setVolumeName(VOL)
-        .setBucketName(BUCKET_ONE)
-        .setObjectID(BUCKET_ONE_OBJECT_ID)
-        .setBucketLayout(getFSOBucketLayout())
-        .build();
+      NSSummary oldBucketSummary =
+          getReconNamespaceSummaryManager().getNSSummary(OLD_BUCKET_OBJECT_ID);
+      assertNotNull(oldBucketSummary);
+      assertEquals(1, oldBucketSummary.getNumOfFiles());
+      assertEquals(RECREATE_KEY_SIZE, oldBucketSummary.getSizeOfFiles());
 
-    OmBucketInfo bucketInfo2 = OmBucketInfo.newBuilder()
-        .setVolumeName(VOL)
-        .setBucketName(BUCKET_TWO)
-        .setObjectID(BUCKET_TWO_OBJECT_ID)
-        .setBucketLayout(getLegacyBucketLayout())
-        .build();
+      // The bucket is deleted and recreated under the same name with a new
+      // objectID (same DB key, different identity). The manual bucketTable put
+      // below simulates OM DB state after the recreate: synthetic events in this
+      // harness do not apply bucketTable writes to RocksDB (unlike production,
+      // where Recon commits the OM batch before tasks run).
+      reconMetadataMgr.getBucketTable()
+          .put(bucketKey, buildObsBucketInfo(NEW_BUCKET_OBJECT_ID));
 
-    OmBucketInfo bucketInfo3 = OmBucketInfo.newBuilder()
-        .setVolumeName(VOL)
-        .setBucketName(BUCKET_THREE)
-        .setObjectID(BUCKET_THREE_OBJECT_ID)
-        .setBucketLayout(getOBSBucketLayout())
-        .build();
+      // Batch 2 mirrors the real recreate sequence: the old bucket is deleted,
+      // a new bucket is created under the same name, then a key lands in it.
+      // The bucketTable delete event must invalidate the stale cache entry so
+      // the key event re-reads the recreated bucket's objectID.
+      OMDBUpdateEvent bucketDelete = new OMDBUpdateEvent
+          .OMUpdateEventBuilder<String, OmBucketInfo>()
+          .setKey(bucketKey)
+          .setValue(buildObsBucketInfo(OLD_BUCKET_OBJECT_ID))
+          .setTable(reconMetadataMgr.getBucketTable().getName())
+          .setAction(OMDBUpdateEvent.OMDBUpdateAction.DELETE)
+          .build();
+      OMDBUpdateEvent bucketPut = new OMDBUpdateEvent
+          .OMUpdateEventBuilder<String, OmBucketInfo>()
+          .setKey(bucketKey)
+          .setValue(buildObsBucketInfo(NEW_BUCKET_OBJECT_ID))
+          .setTable(reconMetadataMgr.getBucketTable().getName())
+          .setAction(OMDBUpdateEvent.OMDBUpdateAction.PUT)
+          .build();
+      OMDBUpdateEvent secondKeyPut =
+          obsKeyPutEvent(bucketKey, KEY_TWO, SECOND_KEY_OBJECT_ID, NEW_BUCKET_OBJECT_ID);
+      task.process(new OMUpdateEventBatch(
+          Arrays.asList(bucketDelete, bucketPut, secondKeyPut), 0L), Collections.emptyMap());
 
-    String bucketKey = omMetadataManager.getBucketKey(
-        bucketInfo1.getVolumeName(), bucketInfo1.getBucketName());
-    String bucketKey2 = omMetadataManager.getBucketKey(
-        bucketInfo2.getVolumeName(), bucketInfo2.getBucketName());
-    String bucketKey3 = omMetadataManager.getBucketKey(
-        bucketInfo3.getVolumeName(), bucketInfo3.getBucketName());
+      // The new key must be attributed to the recreated bucket's objectID...
+      NSSummary newBucketSummary =
+          getReconNamespaceSummaryManager().getNSSummary(NEW_BUCKET_OBJECT_ID);
+      assertNotNull(newBucketSummary);
+      assertEquals(1, newBucketSummary.getNumOfFiles());
+      assertEquals(RECREATE_KEY_SIZE, newBucketSummary.getSizeOfFiles());
 
-    omMetadataManager.getBucketTable().put(bucketKey, bucketInfo1);
-    omMetadataManager.getBucketTable().put(bucketKey2, bucketInfo2);
-    omMetadataManager.getBucketTable().put(bucketKey3, bucketInfo3);
-  }
+      // ...and the stale (old) bucket must not have absorbed it.
+      NSSummary staleBucketSummary =
+          getReconNamespaceSummaryManager().getNSSummary(OLD_BUCKET_OBJECT_ID);
+      assertEquals(1, staleBucketSummary.getNumOfFiles());
+      assertEquals(RECREATE_KEY_SIZE, staleBucketSummary.getSizeOfFiles());
+    }
 
-  private static BucketLayout getFSOBucketLayout() {
-    return BucketLayout.FILE_SYSTEM_OPTIMIZED;
-  }
+    private OmBucketInfo buildObsBucketInfo(long objectId) {
+      return OmBucketInfo.newBuilder()
+          .setVolumeName(VOL)
+          .setBucketName(RECREATE_BUCKET)
+          .setObjectID(objectId)
+          .setBucketLayout(getOBSBucketLayout())
+          .build();
+    }
 
-  private static BucketLayout getLegacyBucketLayout() {
-    return BucketLayout.LEGACY;
-  }
-
-  private static BucketLayout getOBSBucketLayout() {
-    return BucketLayout.OBJECT_STORE;
+    private OMDBUpdateEvent obsKeyPutEvent(String bucketKey, String keyName,
+                                           long keyObjectId, long parentObjectId) {
+      String omKey = bucketKey + OM_KEY_PREFIX + keyName;
+      OmKeyInfo keyInfo = buildOmKeyInfo(VOL, RECREATE_BUCKET, keyName, keyName,
+          keyObjectId, parentObjectId, RECREATE_KEY_SIZE);
+      return new OMDBUpdateEvent.OMUpdateEventBuilder<String, OmKeyInfo>()
+          .setKey(omKey)
+          .setValue(keyInfo)
+          .setTable(getReconOMMetadataManager().getKeyTable(getOBSBucketLayout()).getName())
+          .setAction(OMDBUpdateEvent.OMDBUpdateAction.PUT)
+          .build();
+    }
   }
 }

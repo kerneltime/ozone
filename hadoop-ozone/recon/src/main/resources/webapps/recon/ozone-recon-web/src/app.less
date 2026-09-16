@@ -16,14 +16,53 @@
  * limitations under the License.
  */
 
-@import "~antd/es/style/themes/default.less";
-@import "components/navBar/navBar.less";
+@import "antd/es/style/themes/default.less";
+@import 'antd/dist/antd.less';
+@import "@/components/navBar/navBar.less";
 
 .ant-layout-header {
   padding: 0 20px;
   height: 50px;
   line-height: 50px;
   background: #FFF;
+}
+
+.ant-tabs-nav-wrap {
+  padding: 0px 5px;
+}
+
+.ant-tooltip {
+  .ant-tooltip-inner {
+    background-color: rgba(0, 0, 0, 0.85);
+  }
+}
+
+.ant-statistic-title {
+  font-size: 12px;
+}
+
+// This is for the suffix part of the value ex: TB, GB etc
+.ant-statistic-content-suffix {
+  font-family: Roboto;
+  font-size: 14px;
+  font-weight: normal;
+  font-stretch: normal;
+  font-style: normal;
+  line-height: 1.43;
+  letter-spacing: normal;
+  text-align: left;
+  vertical-align: text-top;
+  color: rgba(0, 0, 0, 0.85);
+  margin: 3px 0 0 1px;
+}
+
+.ant-divider-horizontal {
+  margin: 16px 0;
+}
+
+.ant-card-body {
+  // This is to enforce 16px padding for card body which is 12px by default
+  padding: 16px !important;
 }
 
 .content-layout {
@@ -39,29 +78,17 @@
   font-weight: 500;
 }
 
+.page-header-v2 {
+  padding: 10px 20px;
+  font-size: 20px;
+  font-weight: 500;
+  background-color: #FFFFFF;
+}
+
 .content-div {
   padding: 24px;
   background-color: #FFF;
   min-height: 80vh;
-  .ant-table {
-    .ant-table-body {
-      table {
-        .ant-table-thead > tr > th {
-          background-color: #ececec;
-        }
-
-        .ant-table-tbody {
-          tr.ant-table-row:hover {
-            background: rgba(60, 90, 100, 0.01);
-
-            & > td {
-              background: rgba(60, 90, 100, 0.01);
-            }
-          }
-        }
-      }
-    }
-  }
 }
 
 body {
@@ -82,12 +109,6 @@ body {
 
 .icon-neutral {
   color: gray;
-}
-
-.ant-tooltip {
-  .ant-tooltip-inner {
-    background-color: rgba(0, 0, 0, 0.85);
-  }
 }
 
 .hexagon-shape(@width, @height, @bg-color) {
@@ -171,4 +192,100 @@ body {
 
 .pointer {
   cursor: pointer;
+}
+
+.data-container {
+  padding: 24px;
+  height: 80vh;
+}
+
+.health-availability {
+  display: inline-flex;
+  flex-direction: column;
+  
+  .health-availability-value {
+    font-size: 18px;
+    font-weight: 400;
+  }
+}
+
+#error-icon {
+  font-size: 24px;
+  width: 100%;
+  color: #5A656D;
+}
+
+.cluster-card-data-container {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+
+  &.vertical-layout {
+    flex-direction: column;
+    gap: 0px;
+  }
+
+  .cluster-card-statistic {
+    flex: 2 1 10em;
+  }
+
+  .data-detail-item {
+    display: flex;
+    width: 100%;
+    flex-direction: column;
+    justify-content: flex-start;
+    align-items: stretch;
+    border-radius: 3px;
+
+    .data-detail-breakdown-container {
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      .data-detail-breakdown-item {
+        margin-left: 20px;
+        .data-detail-breakdown-label {
+          font-size: 12px;
+          color: #5a656d;
+          margin-right: 4px;
+        }
+
+        .data-detail-breakdown-value {
+          font-size: 14px;
+          font-weight: 500;
+        }
+        
+      }
+    }
+  }
+
+  .data-detail-breakdown-container {
+    .ant-statistic-title {
+      margin-bottom: 0;
+    }
+
+    .ant-statistic-content {
+      .ant-statistic-content-prefix {
+        margin-right: 1px;
+      }
+      .ant-statistic-content-value {
+        font-size: 16px;
+      }
+    }
+  }
+}
+
+.stacked-progress {
+  display: flex;
+  width: 100%;
+  height: 8px;
+  border-radius: 100px;
+  overflow: hidden;
+  margin: 24px auto 8px auto;
+}
+
+.stacked-progress-empty {
+  width: 100%;
+  height: 8px;
+  border-radius: 100px;
+  background-color: #f4f5f6;
+  margin: 24px auto 8px auto;
 }

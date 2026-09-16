@@ -1,13 +1,12 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,30 +14,39 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.hadoop.ozone.recon.api.handlers;
 
-import org.apache.hadoop.hdds.scm.server.OzoneStorageContainerManager;
-import org.apache.hadoop.ozone.OmUtils;
-import org.apache.hadoop.ozone.recon.ReconConstants;
-import org.apache.hadoop.ozone.recon.api.types.NamespaceSummaryResponse;
-import org.apache.hadoop.ozone.recon.api.types.DUResponse;
-import org.apache.hadoop.ozone.recon.api.types.QuotaUsageResponse;
-import org.apache.hadoop.ozone.recon.api.types.FileSizeDistributionResponse;
-import org.apache.hadoop.ozone.recon.api.types.EntityType;
-import org.apache.hadoop.ozone.recon.api.types.NSSummary;
-import org.apache.hadoop.ozone.recon.recovery.ReconOMMetadataManager;
-import org.apache.hadoop.ozone.recon.spi.ReconNamespaceSummaryManager;
+import static org.apache.hadoop.ozone.OzoneConsts.OM_KEY_PREFIX;
 
 import java.io.IOException;
-
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Set;
-
-import static org.apache.hadoop.ozone.OzoneConsts.OM_KEY_PREFIX;
+import java.util.function.Consumer;
+import org.apache.hadoop.hdds.scm.server.OzoneStorageContainerManager;
+import org.apache.hadoop.ozone.OmUtils;
+import org.apache.hadoop.ozone.om.helpers.BucketLayout;
+import org.apache.hadoop.ozone.recon.ReconConstants;
+import org.apache.hadoop.ozone.recon.api.types.DUResponse;
+import org.apache.hadoop.ozone.recon.api.types.EntityType;
+import org.apache.hadoop.ozone.recon.api.types.FileSizeDistributionResponse;
+import org.apache.hadoop.ozone.recon.api.types.NSSummary;
+import org.apache.hadoop.ozone.recon.api.types.NamespaceSummaryResponse;
+import org.apache.hadoop.ozone.recon.api.types.QuotaUsageResponse;
+import org.apache.hadoop.ozone.recon.recovery.ReconOMMetadataManager;
+import org.apache.hadoop.ozone.recon.spi.ReconNamespaceSummaryManager;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Class for handling all entity types.
  */
 public abstract class EntityHandler {
+
+  private static final Logger LOG = LoggerFactory.getLogger(EntityHandler.class);
 
   private final ReconNamespaceSummaryManager reconNamespaceSummaryManager;
 
@@ -60,16 +68,25 @@ public abstract class EntityHandler {
     this.omMetadataManager = omMetadataManager;
     this.reconSCM = reconSCM;
     this.bucketHandler = bucketHandler;
-    normalizedPath = normalizePath(path);
-    names = parseRequestPath(normalizedPath);
 
+    // Defaulting to FILE_SYSTEM_OPTIMIZED if bucketHandler is null
+    BucketLayout layout =
+        (bucketHandler != null) ? bucketHandler.getBucketLayout() :
+            BucketLayout.FILE_SYSTEM_OPTIMIZED;
+
+    // Normalize the path based on the determined layout
+    normalizedPath = normalizePath(path, layout);
+
+    // Choose the parsing method based on the bucket layout
+    names = (layout == BucketLayout.OBJECT_STORE) ?
+        parseObjectStorePath(normalizedPath) : parseRequestPath(normalizedPath);
   }
 
   public abstract NamespaceSummaryResponse getSummaryResponse()
           throws IOException;
 
   public abstract DUResponse getDuResponse(
-          boolean listFile, boolean withReplica)
+      boolean listFile, boolean withReplica, boolean sort)
           throws IOException;
 
   public abstract QuotaUsageResponse getQuotaResponse()
@@ -118,7 +135,8 @@ public abstract class EntityHandler {
           String path) throws IOException {
     BucketHandler bucketHandler;
 
-    String normalizedPath = normalizePath(path);
+    String normalizedPath =
+        normalizePath(path, BucketLayout.FILE_SYSTEM_OPTIMIZED);
     String[] names = parseRequestPath(normalizedPath);
     if (path.equals(OM_KEY_PREFIX)) {
       return EntityType.ROOT.create(reconNamespaceSummaryManager,
@@ -156,23 +174,36 @@ public abstract class EntityHandler {
       String volName = names[0];
       String bucketName = names[1];
 
-      String keyName = BucketHandler.getKeyName(names);
-
+      // Assuming getBucketHandler already validates volume and bucket existence
       bucketHandler = BucketHandler.getBucketHandler(
-              reconNamespaceSummaryManager,
-              omMetadataManager, reconSCM,
-              volName, bucketName);
+          reconNamespaceSummaryManager, omMetadataManager, reconSCM, volName,
+          bucketName);
 
-      // check if either volume or bucket doesn't exist
-      if (bucketHandler == null
-          || !omMetadataManager.volumeExists(volName)
-          || !bucketHandler.bucketExists(volName, bucketName)) {
+      if (bucketHandler == null) {
         return EntityType.UNKNOWN.create(reconNamespaceSummaryManager,
-                omMetadataManager, reconSCM, null, path);
+            omMetadataManager, reconSCM, null, path);
       }
-      return bucketHandler.determineKeyPath(keyName)
-          .create(reconNamespaceSummaryManager,
-          omMetadataManager, reconSCM, bucketHandler, path);
+
+      // Directly handle path normalization and parsing based on the layout
+      if (bucketHandler.getBucketLayout() == BucketLayout.OBJECT_STORE) {
+        String[] parsedObjectLayoutPath = parseObjectStorePath(
+            normalizePath(path, bucketHandler.getBucketLayout()));
+        if (parsedObjectLayoutPath == null) {
+          return EntityType.UNKNOWN.create(reconNamespaceSummaryManager,
+              omMetadataManager, reconSCM, null, path);
+        }
+        // Use the key part directly from the parsed path
+        return bucketHandler.determineKeyPath(parsedObjectLayoutPath[2])
+            .create(reconNamespaceSummaryManager, omMetadataManager, reconSCM,
+                bucketHandler, path);
+      } else {
+        // Use the existing names array for non-OBJECT_STORE layouts to derive
+        // the keyName
+        String keyName = BucketHandler.getKeyName(names);
+        return bucketHandler.determineKeyPath(keyName)
+            .create(reconNamespaceSummaryManager, omMetadataManager, reconSCM,
+                bucketHandler, path);
+      }
     }
   }
 
@@ -183,32 +214,111 @@ public abstract class EntityHandler {
    * @throws IOException ioEx
    */
   protected int[] getTotalFileSizeDist(long objectId) throws IOException {
-    NSSummary nsSummary = reconNamespaceSummaryManager.getNSSummary(objectId);
-    if (nsSummary == null) {
-      return new int[ReconConstants.NUM_OF_FILE_SIZE_BINS];
-    }
-    int[] res = nsSummary.getFileSizeBucket();
-    for (long childId: nsSummary.getChildDir()) {
-      int[] subDirFileSizeDist = getTotalFileSizeDist(childId);
+    int[] res = new int[ReconConstants.NUM_OF_FILE_SIZE_BINS];
+    walkNSSummaryTree(objectId, nsSummary -> {
+      int[] fileSizeBucket = nsSummary.getFileSizeBucket();
       for (int i = 0; i < ReconConstants.NUM_OF_FILE_SIZE_BINS; ++i) {
-        res[i] += subDirFileSizeDist[i];
+        res[i] += fileSizeBucket[i];
       }
-    }
+    });
     return res;
   }
 
   protected int getTotalDirCount(long objectId) throws IOException {
-    NSSummary nsSummary =
-        getReconNamespaceSummaryManager().getNSSummary(objectId);
-    if (nsSummary == null) {
+    return walkNSSummaryTree(objectId, null);
+  }
+
+  /**
+   * Walk the NSSummary tree without retaining every object ID. Each stack frame
+   * keeps one child iterator, so live memory is proportional to tree depth
+   * instead of the number of directories. The ancestor set prevents a corrupt
+   * child reference from walking back into the active path.
+   *
+   * @param objectId root object ID
+   * @param summaryConsumer optional consumer for each available NSSummary
+   * @return number of reachable subdirectory references
+   * @throws IOException if an NSSummary cannot be read
+   */
+  private int walkNSSummaryTree(long objectId,
+      Consumer<NSSummary> summaryConsumer) throws IOException {
+    NSSummary rootSummary = reconNamespaceSummaryManager.getNSSummary(objectId);
+    if (rootSummary == null) {
       return 0;
     }
-    Set<Long> subdirs = nsSummary.getChildDir();
-    int totalCnt = subdirs.size();
-    for (long subdir : subdirs) {
-      totalCnt += getTotalDirCount(subdir);
+    if (summaryConsumer != null) {
+      summaryConsumer.accept(rootSummary);
     }
-    return totalCnt;
+
+    Set<Long> ancestors = new HashSet<>();
+    Deque<NSSummaryTraversalFrame> stack = new ArrayDeque<>();
+    ancestors.add(objectId);
+    stack.push(new NSSummaryTraversalFrame(objectId,
+        rootSummary.getChildDir().iterator()));
+    int totalDirCount = 0;
+    boolean cycleLogged = false;
+    while (!stack.isEmpty()) {
+      NSSummaryTraversalFrame frame = stack.peek();
+      if (!frame.getChildIterator().hasNext()) {
+        stack.pop();
+        ancestors.remove(frame.getObjectId());
+        continue;
+      }
+
+      long childId = frame.getChildIterator().next();
+      if (ancestors.contains(childId)) {
+        if (!cycleLogged) {
+          logNSSummaryCycle(childId);
+          cycleLogged = true;
+        }
+        continue;
+      }
+
+      totalDirCount++;
+      NSSummary childSummary =
+          reconNamespaceSummaryManager.getNSSummary(childId);
+      if (childSummary == null) {
+        continue;
+      }
+      if (summaryConsumer != null) {
+        summaryConsumer.accept(childSummary);
+      }
+      ancestors.add(childId);
+      stack.push(new NSSummaryTraversalFrame(childId,
+          childSummary.getChildDir().iterator()));
+    }
+    return totalDirCount;
+  }
+
+  /**
+   * Warn that the NSSummary tree contains a self or ancestor loop. The walk
+   * skips the cyclic edge so the request still completes and operators can see
+   * that the persisted NSSummary data may be corrupted. Callers invoke this at
+   * most once per walk.
+   */
+  private void logNSSummaryCycle(long objectId) {
+    reconNamespaceSummaryManager.recordNSSummaryInvalidTreeDetection();
+    LOG.warn("Detected a cycle through object {} while walking the " +
+        "NSSummary tree under {}; skipping the cyclic reference. The " +
+        "NSSummary data may be corrupted.", objectId, getNormalizedPath());
+  }
+
+  private static final class NSSummaryTraversalFrame {
+    private final long objectId;
+    private final Iterator<Long> childIterator;
+
+    private NSSummaryTraversalFrame(long objectId,
+        Iterator<Long> childIterator) {
+      this.objectId = objectId;
+      this.childIterator = childIterator;
+    }
+
+    private long getObjectId() {
+      return objectId;
+    }
+
+    private Iterator<Long> getChildIterator() {
+      return childIterator;
+    }
   }
 
   /**
@@ -222,11 +332,8 @@ public abstract class EntityHandler {
     if (nsSummary == null) {
       return 0L;
     }
-    long totalCnt = nsSummary.getNumOfFiles();
-    for (long childId: nsSummary.getChildDir()) {
-      totalCnt += getTotalKeyCount(childId);
-    }
-    return totalCnt;
+    // With materialized optimization: getNumOfFiles now returns total count (including all subdirectories)
+    return nsSummary.getNumOfFiles();
   }
 
   /**
@@ -241,11 +348,8 @@ public abstract class EntityHandler {
     if (nsSummary == null) {
       return 0L;
     }
-    long totalSize = nsSummary.getSizeOfFiles();
-    for (long childId: nsSummary.getChildDir()) {
-      totalSize += getTotalSize(childId);
-    }
-    return totalSize;
+    // With materialized optimization: getSizeOfFiles now returns total size (including all subdirectories)
+    return nsSummary.getSizeOfFiles();
   }
 
   public static String[] parseRequestPath(String path) {
@@ -256,7 +360,52 @@ public abstract class EntityHandler {
     return names;
   }
 
-  private static String normalizePath(String path) {
+  /**
+   * Splits an object store path into volume, bucket, and key name components.
+   *
+   * This method parses a path of the format "/volumeName/bucketName/keyName",
+   * including paths with additional '/' characters within the key name. It's
+   * designed for object store paths where the first three '/' characters
+   * separate the root, volume and bucket names from the key name.
+   *
+   * @param path The object store path to parse, starting with a slash.
+   * @return A String array with three elements: volume name, bucket name, and
+   * key name, or {null} if the path format is invalid.
+   */
+  public static String[] parseObjectStorePath(String path) {
+    // Removing the leading slash for correct splitting
+    path = path.substring(1);
+
+    // Splitting the modified path by "/", limiting to 3 parts
+    String[] parts = path.split("/", 3);
+
+    // Checking if we correctly obtained 3 parts after removing the leading slash
+    if (parts.length <= 3) {
+      return parts;
+    } else {
+      return null;
+    }
+  }
+
+  /**
+   * Normalizes a given path based on the specified bucket layout.
+   *
+   * This method adjusts the path according to the bucket layout.
+   * For {OBJECT_STORE Layout}, it normalizes the path up to the bucket level
+   * using OmUtils.normalizePathUptoBucket. For other layouts, it
+   * normalizes the entire path, including the key, using
+   * OmUtils.normalizeKey, and does not preserve any trailing slashes.
+   * The normalized path will always be prefixed with OM_KEY_PREFIX to ensure it
+   * is consistent with the expected format for object storage paths in Ozone.
+   *
+   * @param path
+   * @param bucketLayout
+   * @return A normalized path
+   */
+  public static String normalizePath(String path, BucketLayout bucketLayout) {
+    if (bucketLayout == BucketLayout.OBJECT_STORE) {
+      return OM_KEY_PREFIX + OmUtils.normalizePathUptoBucket(path);
+    }
     return OM_KEY_PREFIX + OmUtils.normalizeKey(path, false);
   }
 }

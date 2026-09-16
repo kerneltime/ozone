@@ -1,14 +1,13 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,39 +17,48 @@
 
 package org.apache.hadoop.ozone.om.response.key;
 
+import static org.apache.hadoop.ozone.om.codec.OMDBDefinition.BUCKET_TABLE;
+import static org.apache.hadoop.ozone.om.codec.OMDBDefinition.DELETED_TABLE;
+import static org.apache.hadoop.ozone.om.codec.OMDBDefinition.KEY_TABLE;
+import static org.apache.hadoop.ozone.om.codec.OMDBDefinition.LIFECYCLE_SCAN_STATE_TABLE;
+import static org.apache.hadoop.ozone.om.codec.OMDBDefinition.OPEN_KEY_TABLE;
+import static org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Status.OK;
+import static org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Status.PARTIAL_DELETE;
+
+import jakarta.annotation.Nonnull;
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import org.apache.hadoop.hdds.utils.db.BatchOperation;
 import org.apache.hadoop.hdds.utils.db.Table;
 import org.apache.hadoop.ozone.om.OMMetadataManager;
 import org.apache.hadoop.ozone.om.helpers.BucketLayout;
 import org.apache.hadoop.ozone.om.helpers.OmBucketInfo;
 import org.apache.hadoop.ozone.om.helpers.OmKeyInfo;
+import org.apache.hadoop.ozone.om.helpers.OmLifecycleScanState;
 import org.apache.hadoop.ozone.om.response.CleanupTableInfo;
 import org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.OMResponse;
-
-import javax.annotation.Nonnull;
-import java.io.IOException;
-import java.util.List;
-
-import static org.apache.hadoop.ozone.om.OmMetadataManagerImpl.BUCKET_TABLE;
-import static org.apache.hadoop.ozone.om.OmMetadataManagerImpl.DELETED_TABLE;
-import static org.apache.hadoop.ozone.om.OmMetadataManagerImpl.KEY_TABLE;
-import static org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Status.OK;
-import static org.apache.hadoop.ozone.protocol.proto.OzoneManagerProtocolProtos.Status.PARTIAL_DELETE;
 
 /**
  * Response for DeleteKey request.
  */
-@CleanupTableInfo(cleanupTables = {KEY_TABLE, DELETED_TABLE, BUCKET_TABLE})
+@CleanupTableInfo(cleanupTables = {KEY_TABLE, OPEN_KEY_TABLE, DELETED_TABLE, BUCKET_TABLE, LIFECYCLE_SCAN_STATE_TABLE})
 public class OMKeysDeleteResponse extends AbstractOMKeyDeleteResponse {
   private List<OmKeyInfo> omKeyInfoList;
   private OmBucketInfo omBucketInfo;
+  private Map<String, OmKeyInfo> openKeyInfoMap = new HashMap<>();
+  private OmLifecycleScanState scanState;
 
   public OMKeysDeleteResponse(@Nonnull OMResponse omResponse,
       @Nonnull List<OmKeyInfo> keyDeleteList,
-      boolean isRatisEnabled, @Nonnull OmBucketInfo omBucketInfo) {
-    super(omResponse, isRatisEnabled);
+      @Nonnull OmBucketInfo omBucketInfo,
+      @Nonnull Map<String, OmKeyInfo> openKeyInfoMap, OmLifecycleScanState scanState) {
+    super(omResponse);
     this.omKeyInfoList = keyDeleteList;
     this.omBucketInfo = omBucketInfo;
+    this.openKeyInfoMap = openKeyInfoMap;
+    this.scanState = scanState;
   }
 
   /**
@@ -60,6 +68,7 @@ public class OMKeysDeleteResponse extends AbstractOMKeyDeleteResponse {
   public OMKeysDeleteResponse(@Nonnull OMResponse omResponse, @Nonnull
                               BucketLayout bucketLayout) {
     super(omResponse, bucketLayout);
+    checkStatusNotOK();
   }
 
   @Override
@@ -88,13 +97,25 @@ public class OMKeysDeleteResponse extends AbstractOMKeyDeleteResponse {
           keyName);
 
       addDeletionToBatch(omMetadataManager, batchOperation, keyTable,
-          deleteKey, omKeyInfo);
+          deleteKey, omKeyInfo, getOmBucketInfo().getObjectID(), true);
     }
 
     // update bucket usedBytes.
     omMetadataManager.getBucketTable().putWithBatch(batchOperation,
         omMetadataManager.getBucketKey(omBucketInfo.getVolumeName(),
             omBucketInfo.getBucketName()), omBucketInfo);
+
+    if (!openKeyInfoMap.isEmpty()) {
+      for (Map.Entry<String, OmKeyInfo> entry : openKeyInfoMap.entrySet()) {
+        omMetadataManager.getOpenKeyTable(getBucketLayout()).putWithBatch(
+            batchOperation, entry.getKey(), entry.getValue());
+      }
+    }
+
+    if (scanState != null) {
+      omMetadataManager.getLifecycleScanStateTable().putWithBatch(
+          batchOperation, scanState.getBucketKey(), scanState);
+    }
   }
 
   public List<OmKeyInfo> getOmKeyInfoList() {
@@ -103,5 +124,13 @@ public class OMKeysDeleteResponse extends AbstractOMKeyDeleteResponse {
 
   public OmBucketInfo getOmBucketInfo() {
     return omBucketInfo;
+  }
+
+  protected Map<String, OmKeyInfo> getOpenKeyInfoMap() {
+    return openKeyInfoMap;
+  }
+
+  public OmLifecycleScanState getScanState() {
+    return scanState;
   }
 }

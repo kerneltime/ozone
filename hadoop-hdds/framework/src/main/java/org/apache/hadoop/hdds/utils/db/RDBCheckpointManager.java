@@ -1,11 +1,10 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- *  with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
  *      http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -14,7 +13,6 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- *
  */
 
 package org.apache.hadoop.hdds.utils.db;
@@ -64,16 +62,20 @@ public class RDBCheckpointManager implements Closeable {
     try {
       long currentTime = System.currentTimeMillis();
 
-      String checkpointDir = StringUtils.EMPTY;
+      StringBuilder checkpointDir = new StringBuilder();
       if (StringUtils.isNotEmpty(checkpointNamePrefix)) {
-        checkpointDir += checkpointNamePrefix;
+        checkpointDir.append(checkpointNamePrefix);
       }
-      if (name == null) {
-        name = "_" + RDB_CHECKPOINT_DIR_PREFIX + currentTime;
-      }
-      checkpointDir += name;
 
-      Path checkpointPath = Paths.get(parentDir, checkpointDir);
+      if (name == null) {
+        checkpointDir.append('_')
+            .append(RDB_CHECKPOINT_DIR_PREFIX)
+            .append(currentTime);
+      } else {
+        checkpointDir.append(name);
+      }
+
+      Path checkpointPath = Paths.get(parentDir, checkpointDir.toString());
       Instant start = Instant.now();
 
       // Flush the DB WAL and mem table.

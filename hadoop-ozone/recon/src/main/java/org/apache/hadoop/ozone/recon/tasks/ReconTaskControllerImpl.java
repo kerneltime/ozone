@@ -1,14 +1,13 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,33 +17,56 @@
 
 package org.apache.hadoop.ozone.recon.tasks;
 
+import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_OM_EVENT_BUFFER_CAPACITY;
+import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_OM_EVENT_BUFFER_CAPACITY_DEFAULT;
 import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_TASK_THREAD_COUNT_DEFAULT;
 import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_TASK_THREAD_COUNT_KEY;
 
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import com.google.inject.Inject;
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Paths;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
+import java.util.UUID;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
-import org.apache.commons.lang3.tuple.Pair;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
+import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
+import org.apache.hadoop.hdds.utils.db.DBCheckpoint;
 import org.apache.hadoop.ozone.om.OMMetadataManager;
+import org.apache.hadoop.ozone.recon.ReconConstants;
+import org.apache.hadoop.ozone.recon.metrics.ReconTaskControllerMetrics;
+import org.apache.hadoop.ozone.recon.metrics.ReconTaskMetrics;
 import org.apache.hadoop.ozone.recon.recovery.ReconOMMetadataManager;
-import org.hadoop.ozone.recon.schema.tables.daos.ReconTaskStatusDao;
-import org.hadoop.ozone.recon.schema.tables.pojos.ReconTaskStatus;
+import org.apache.hadoop.ozone.recon.spi.ReconContainerMetadataManager;
+import org.apache.hadoop.ozone.recon.spi.ReconFileMetadataManager;
+import org.apache.hadoop.ozone.recon.spi.ReconGlobalStatsManager;
+import org.apache.hadoop.ozone.recon.spi.ReconNamespaceSummaryManager;
+import org.apache.hadoop.ozone.recon.spi.impl.ReconDBProvider;
+import org.apache.hadoop.ozone.recon.tasks.types.NamedCallableTask;
+import org.apache.hadoop.ozone.recon.tasks.types.TaskExecutionException;
+import org.apache.hadoop.ozone.recon.tasks.updater.ReconTaskStatusUpdater;
+import org.apache.hadoop.ozone.recon.tasks.updater.ReconTaskStatusUpdaterManager;
+import org.apache.hadoop.util.Time;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import com.google.inject.Inject;
 
 /**
  * Implementation of ReconTaskController.
@@ -53,25 +75,89 @@ public class ReconTaskControllerImpl implements ReconTaskController {
 
   private static final Logger LOG =
       LoggerFactory.getLogger(ReconTaskControllerImpl.class);
+  private static final String REPROCESS_STAGING = "REPROCESS_STAGING";
+  private static final long SHUTDOWN_TIMEOUT_SECONDS = 30L;
+  private final ReconDBProvider reconDBProvider;
+  private final ReconContainerMetadataManager reconContainerMetadataManager;
+  private final ReconNamespaceSummaryManager reconNamespaceSummaryManager;
+  private final ReconGlobalStatsManager reconGlobalStatsManager;
+  private final ReconFileMetadataManager reconFileMetadataManager;
 
   private Map<String, ReconOmTask> reconOmTasks;
   private ExecutorService executorService;
   private final int threadCount;
-  private Map<String, AtomicInteger> taskFailureCounter = new HashMap<>();
-  private static final int TASK_FAILURE_THRESHOLD = 2;
-  private ReconTaskStatusDao reconTaskStatusDao;
+  private final ReconTaskStatusUpdaterManager taskStatusUpdaterManager;
+  private final OMUpdateEventBuffer eventBuffer;
+  private ExecutorService eventProcessingExecutor;
+  private volatile boolean running = false;
+  private final AtomicBoolean tasksFailed = new AtomicBoolean(false);
+  private volatile ReconOMMetadataManager currentOMMetadataManager;
+  private final OzoneConfiguration configuration;
+
+  // Metrics
+  private final ReconTaskControllerMetrics controllerMetrics;
+  private final ReconTaskMetrics taskMetrics;
+
+  // Retry logic for event processing failures
+  private AtomicInteger eventProcessRetryCount = new AtomicInteger(0);
+  private AtomicLong lastRetryTimestamp = new AtomicLong(0);
+  private static final int MAX_EVENT_PROCESS_RETRIES = 6;
+  private static final long RETRY_DELAY_MS = 2000; // 2 seconds
+  // Clock for the retry-delay gate; overridable in tests via the
+  // @VisibleForTesting constructor to drive the gate with a MockClock.
+  private Clock clock = Clock.systemUTC();
+  // Log the 1st cleanup and every Nth after that at INFO; the rest at DEBUG.
+  private static final int CHECKPOINT_CLEANUP_LOG_SAMPLE_RATE = 20;
+  private final AtomicLong checkpointCleanupCount = new AtomicLong(0);
 
   @Inject
+  @SuppressWarnings("checkstyle:ParameterNumber")
   public ReconTaskControllerImpl(OzoneConfiguration configuration,
-                                 ReconTaskStatusDao reconTaskStatusDao,
-                                 Set<ReconOmTask> tasks) {
+                                 Set<ReconOmTask> tasks,
+                                 ReconTaskStatusUpdaterManager taskStatusUpdaterManager,
+                                 ReconDBProvider reconDBProvider,
+                                 ReconContainerMetadataManager reconContainerMetadataManager,
+                                 ReconNamespaceSummaryManager reconNamespaceSummaryManager,
+                                 ReconGlobalStatsManager reconGlobalStatsManager,
+                                 ReconFileMetadataManager reconFileMetadataManager) {
+    this.configuration = configuration;
+    this.reconDBProvider = reconDBProvider;
+    this.reconContainerMetadataManager = reconContainerMetadataManager;
+    this.reconNamespaceSummaryManager = reconNamespaceSummaryManager;
+    this.reconGlobalStatsManager = reconGlobalStatsManager;
+    this.reconFileMetadataManager = reconFileMetadataManager;
     reconOmTasks = new HashMap<>();
     threadCount = configuration.getInt(OZONE_RECON_TASK_THREAD_COUNT_KEY,
         OZONE_RECON_TASK_THREAD_COUNT_DEFAULT);
-    this.reconTaskStatusDao = reconTaskStatusDao;
+    this.taskStatusUpdaterManager = taskStatusUpdaterManager;
+
+    // Initialize metrics
+    this.controllerMetrics = ReconTaskControllerMetrics.create();
+    this.taskMetrics = ReconTaskMetrics.create();
+
+    int eventBufferCapacity = configuration.getInt(OZONE_RECON_OM_EVENT_BUFFER_CAPACITY,
+        OZONE_RECON_OM_EVENT_BUFFER_CAPACITY_DEFAULT);
+    this.eventBuffer = new OMUpdateEventBuffer(eventBufferCapacity, controllerMetrics);
     for (ReconOmTask task : tasks) {
       registerTask(task);
     }
+  }
+
+  @VisibleForTesting
+  @SuppressWarnings("checkstyle:ParameterNumber")
+  ReconTaskControllerImpl(OzoneConfiguration configuration,
+                          Set<ReconOmTask> tasks,
+                          ReconTaskStatusUpdaterManager taskStatusUpdaterManager,
+                          ReconDBProvider reconDBProvider,
+                          ReconContainerMetadataManager reconContainerMetadataManager,
+                          ReconNamespaceSummaryManager reconNamespaceSummaryManager,
+                          ReconGlobalStatsManager reconGlobalStatsManager,
+                          ReconFileMetadataManager reconFileMetadataManager,
+                          Clock clock) {
+    this(configuration, tasks, taskStatusUpdaterManager, reconDBProvider,
+        reconContainerMetadataManager, reconNamespaceSummaryManager,
+        reconGlobalStatsManager, reconFileMetadataManager);
+    this.clock = clock;
   }
 
   @Override
@@ -81,14 +167,6 @@ public class ReconTaskControllerImpl implements ReconTaskController {
 
     // Store task in Task Map.
     reconOmTasks.put(taskName, task);
-    // Store Task in Task failure tracker.
-    taskFailureCounter.put(taskName, new AtomicInteger(0));
-    // Create DB record for the task.
-    ReconTaskStatus reconTaskStatusRecord = new ReconTaskStatus(taskName,
-        0L, 0L);
-    if (!reconTaskStatusDao.existsById(taskName)) {
-      reconTaskStatusDao.insert(reconTaskStatusRecord);
-    }
   }
 
   /**
@@ -97,114 +175,196 @@ public class ReconTaskControllerImpl implements ReconTaskController {
    * reprocess call more than 2 times across events, it is unregistered
    * (ignored).
    * @param events set of events
-   * @throws InterruptedException
    */
   @Override
-  public synchronized void consumeOMEvents(OMUpdateEventBatch events,
-                              OMMetadataManager omMetadataManager)
-      throws InterruptedException {
-
-    try {
-      if (!events.isEmpty()) {
-        Collection<Callable<Pair<String, Boolean>>> tasks = new ArrayList<>();
-        for (Map.Entry<String, ReconOmTask> taskEntry :
-            reconOmTasks.entrySet()) {
-          ReconOmTask task = taskEntry.getValue();
-          // events passed to process method is no longer filtered
-          tasks.add(() -> task.process(events));
-        }
-
-        List<Future<Pair<String, Boolean>>> results =
-            executorService.invokeAll(tasks);
-        List<String> failedTasks = processTaskResults(results, events);
-
-        // Retry
-        List<String> retryFailedTasks = new ArrayList<>();
-        if (!failedTasks.isEmpty()) {
-          tasks.clear();
-          for (String taskName : failedTasks) {
-            ReconOmTask task = reconOmTasks.get(taskName);
-            // events passed to process method is no longer filtered
-            tasks.add(() -> task.process(events));
-          }
-          results = executorService.invokeAll(tasks);
-          retryFailedTasks = processTaskResults(results, events);
-        }
-
-        // Reprocess the failed tasks.
-        if (!retryFailedTasks.isEmpty()) {
-          tasks.clear();
-          for (String taskName : failedTasks) {
-            ReconOmTask task = reconOmTasks.get(taskName);
-            tasks.add(() -> task.reprocess(omMetadataManager));
-          }
-          results = executorService.invokeAll(tasks);
-          List<String> reprocessFailedTasks =
-              processTaskResults(results, events);
-          ignoreFailedTasks(reprocessFailedTasks);
-        }
+  public synchronized void consumeOMEvents(OMUpdateEventBatch events, OMMetadataManager omMetadataManager) {
+    // If tasks have failed, we skip buffering events till we successfully queue reinit event
+    if (!events.isEmpty() && !hasTasksFailed()) {
+      // Always buffer events for async processing
+      boolean buffered = eventBuffer.offer(events);
+      if (!buffered) {
+        LOG.error("Event buffer is full (capacity: {}). Dropping buffered events and signaling full snapshot. " +
+            "Buffer size: {}, Dropped batches: {}", 
+            20000, eventBuffer.getQueueSize(), eventBuffer.getDroppedBatches());
+        
+        // Clear buffer and signal full snapshot requirement
+        drainEventBufferAndCleanExistingCheckpoints();
+      } else {
+        LOG.debug("Buffered event batch with {} events. Buffer queue size: {}", 
+            events.getEvents().size(), eventBuffer.getQueueSize());
       }
-    } catch (ExecutionException e) {
-      LOG.error("Unexpected error : ", e);
     }
   }
 
   /**
-   * Ignore tasks that failed reprocess step more than threshold times.
-   * @param failedTasks list of failed tasks.
+   * Reinitializes the registered Recon OM tasks with a new OM Metadata Manager instance.
+   *
+   * @param omMetadataManager the OM Metadata Manager instance to be used for reinitialization.
+   * @param reconOmTaskMap    a map of Recon OM tasks whose lastUpdatedSeqNumber does not match
+   *                          the lastUpdatedSeqNumber from the previous run of the 'OmDeltaRequest' task.
+   *                          These tasks will be reinitialized to process the delta OM DB updates
+   *                          received in the last run of 'OmDeltaRequest'.
+   *                          If {@code reconOmTaskMap} is null, all registered Recon OM tasks
+   *                          will be reinitialized.
+   * @return
    */
-  private void ignoreFailedTasks(List<String> failedTasks) {
-    for (String taskName : failedTasks) {
-      LOG.info("Reprocess step failed for task {}.", taskName);
-      if (taskFailureCounter.get(taskName).incrementAndGet() >
-          TASK_FAILURE_THRESHOLD) {
-        LOG.info("Ignoring task since it failed retry and " +
-            "reprocess more than {} times.", TASK_FAILURE_THRESHOLD);
-        reconOmTasks.remove(taskName);
-      }
-    }
-  }
-
   @Override
-  public synchronized void reInitializeTasks(
-      ReconOMMetadataManager omMetadataManager) throws InterruptedException {
+  public synchronized boolean reInitializeTasks(ReconOMMetadataManager omMetadataManager,
+                                                Map<String, ReconOmTask> reconOmTaskMap) {
+    LOG.info("Starting Re-initialization of tasks. This is a blocking operation.");
+    Collection<NamedCallableTask<ReconOmTask.TaskResult>> tasks = new ArrayList<>();
+    Map<String, ReconOmTask> localReconOmTaskMap = reconOmTaskMap;
+    if (reconOmTaskMap == null) {
+      localReconOmTaskMap = reconOmTasks;
+    }
+    ReconConstants.resetTableTruncatedFlags();
+
+    ReconDBProvider stagedReconDBProvider;
     try {
-      Collection<Callable<Pair<String, Boolean>>> tasks = new ArrayList<>();
-      for (Map.Entry<String, ReconOmTask> taskEntry :
-          reconOmTasks.entrySet()) {
-        ReconOmTask task = taskEntry.getValue();
-        tasks.add(() -> task.reprocess(omMetadataManager));
-      }
-      List<Future<Pair<String, Boolean>>> results =
-          executorService.invokeAll(tasks);
-      for (Future<Pair<String, Boolean>> f : results) {
-        String taskName = f.get().getLeft();
-        if (!f.get().getRight()) {
-          LOG.info("Init failed for task {}.", taskName);
-        } else {
-          //store the timestamp for the task
-          ReconTaskStatus reconTaskStatusRecord = new ReconTaskStatus(taskName,
-              System.currentTimeMillis(),
-              omMetadataManager.getLastSequenceNumberFromDB());
-          reconTaskStatusDao.update(reconTaskStatusRecord);
+      ReconTaskStatusUpdater reprocessTaskStatus = taskStatusUpdaterManager.getTaskStatusUpdater(REPROCESS_STAGING);
+      reprocessTaskStatus.recordRunStart();
+      stagedReconDBProvider = reconDBProvider.getStagedReconDBProvider();
+    } catch (IOException e) {
+      LOG.error("Failed to get staged Recon DB provider for reinitialization of tasks.", e);
+
+      // Track checkpoint creation failure
+      controllerMetrics.incrReprocessCheckpointFailures();
+
+      recordAllTaskStatus(localReconOmTaskMap, -1, -1);
+      return false;
+    }
+
+    localReconOmTaskMap.values().forEach(task -> {
+      ReconTaskStatusUpdater taskStatusUpdater = taskStatusUpdaterManager.getTaskStatusUpdater(task.getTaskName());
+      taskStatusUpdater.recordRunStart();
+      tasks.add(new NamedCallableTask<>(task.getTaskName(),
+          () -> task.getStagedTask(omMetadataManager, stagedReconDBProvider.getDbStore())
+              .reprocess(omMetadataManager)));
+    });
+
+    AtomicBoolean isRunSuccessful = new AtomicBoolean(true);
+    LOG.info("Submitting {} tasks for parallel reprocessing", tasks.size());
+    try {
+      CompletableFuture.allOf(tasks.stream()
+          .map(task -> {
+            // Track reprocess duration per task - start time recorded before async execution
+            long reprocessStartTime = Time.monotonicNow();
+
+            return CompletableFuture.supplyAsync(() -> {
+              LOG.info("Task {} started execution on thread {}", 
+                  task.getTaskName(), Thread.currentThread().getName());
+              try {
+                ReconOmTask.TaskResult result = task.call();
+                LOG.info("Task {} completed execution", task.getTaskName());
+                return result;
+              } catch (Exception e) {
+                // Track reprocess failure per task
+                taskMetrics.incrTaskReprocessFailures(task.getTaskName());
+
+                if (e instanceof InterruptedException) {
+                  Thread.currentThread().interrupt();
+                }
+                // Wrap the exception with the task name
+                throw new TaskExecutionException(task.getTaskName(), e);
+              }
+            }, executorService).thenAccept(result -> {
+              // Update reprocess duration after task completes (includes queue time)
+              long reprocessDuration = Time.monotonicNow() - reprocessStartTime;
+              taskMetrics.updateTaskReprocessDuration(task.getTaskName(), reprocessDuration);
+
+              if (!result.isTaskSuccess()) {
+                String taskName = result.getTaskName();
+                LOG.error("Init failed for task {}.", taskName);
+
+                // Track reprocess failure per task
+                taskMetrics.incrTaskReprocessFailures(taskName);
+
+                isRunSuccessful.set(false);
+              }
+            }).exceptionally(ex -> {
+              LOG.error("Task failed with exception: ", ex);
+              isRunSuccessful.set(false);
+              if (ex.getCause() instanceof TaskExecutionException) {
+                TaskExecutionException taskEx = (TaskExecutionException) ex.getCause();
+                String taskName = taskEx.getTaskName();
+                // Track reprocess failure per task
+                taskMetrics.incrTaskReprocessFailures(taskName);
+                LOG.error("The above error occurred while trying to execute task: {}", taskName);
+              }
+              return null;
+            });
+          }).toArray(CompletableFuture[]::new)).join();
+    } catch (CompletionException ce) {
+      LOG.error("Completing all tasks failed with exception ", ce);
+      isRunSuccessful.set(false);
+    } catch (CancellationException ce) {
+      LOG.error("Some tasks were cancelled with exception", ce);
+      isRunSuccessful.set(false);
+    }
+
+    if (isRunSuccessful.get()) {
+      try {
+        reconDBProvider.replaceStagedDb(stagedReconDBProvider);
+        reconNamespaceSummaryManager.reinitialize(reconDBProvider);
+        reconContainerMetadataManager.reinitialize(reconDBProvider);
+        reconGlobalStatsManager.reinitialize(reconDBProvider);
+        reconFileMetadataManager.reinitialize(reconDBProvider);
+        //Tasks with staged instances must reload instance state in init() after reinit.
+        localReconOmTaskMap.values().forEach(ReconOmTask::init);
+        recordAllTaskStatus(localReconOmTaskMap, 0, omMetadataManager.getLastSequenceNumberFromDB());
+        // Track reprocess success
+        controllerMetrics.incrReprocessSuccessCount();
+
+        LOG.info("Re-initialization of tasks completed successfully.");
+      } catch (Exception e) {
+        LOG.error("Re-initialization of tasks failed.", e);
+
+        // Track stage database failure
+        controllerMetrics.incrReprocessStageDatabaseFailures();
+
+        recordAllTaskStatus(localReconOmTaskMap, -1, -1);
+        // reinitialize the Recon OM tasks with the original DB provider
+        try {
+          reconNamespaceSummaryManager.reinitialize(reconDBProvider);
+          reconContainerMetadataManager.reinitialize(reconDBProvider);
+          reconGlobalStatsManager.reinitialize(reconDBProvider);
+          reconFileMetadataManager.reinitialize(reconDBProvider);
+        } catch (IOException ex) {
+          LOG.error("Re-initialization of task manager failed.", e);
         }
       }
-    } catch (ExecutionException e) {
-      LOG.error("Unexpected error : ", e);
+    } else {
+      LOG.error("Re-initialization of tasks failed.");
+
+      // Track reprocess execution failure
+      controllerMetrics.incrReprocessExecutionFailures();
+
+      try {
+        stagedReconDBProvider.close();
+      } catch (Exception e) {
+        LOG.error("Close of recon container staged db handler is failed", e);
+      }
+      recordAllTaskStatus(localReconOmTaskMap, -1, -1);
     }
+    return isRunSuccessful.get();
   }
 
-  /**
-   * Store the last completed event sequence number and timestamp to the DB
-   * for that task.
-   * @param taskName taskname to be updated.
-   * @param lastSequenceNumber contains the new sequence number.
-   */
-  private void storeLastCompletedTransaction(
-      String taskName, long lastSequenceNumber) {
-    ReconTaskStatus reconTaskStatusRecord = new ReconTaskStatus(taskName,
-        System.currentTimeMillis(), lastSequenceNumber);
-    reconTaskStatusDao.update(reconTaskStatusRecord);
+  private void recordAllTaskStatus(Map<String, ReconOmTask> localReconOmTaskMap, int status, long updateSeqNumber) {
+    localReconOmTaskMap.values().forEach(task -> {
+      ReconTaskStatusUpdater taskStatusUpdater = taskStatusUpdaterManager.getTaskStatusUpdater(task.getTaskName());
+      if (status == 0) {
+        taskStatusUpdater.setLastUpdatedSeqNumber(updateSeqNumber);
+      }
+      taskStatusUpdater.setLastTaskRunStatus(status);
+      taskStatusUpdater.recordRunCompletion();
+    });
+
+    ReconTaskStatusUpdater reprocessTaskStatus = taskStatusUpdaterManager.getTaskStatusUpdater(REPROCESS_STAGING);
+    if (status == 0) {
+      reprocessTaskStatus.setLastUpdatedSeqNumber(updateSeqNumber);
+    }
+    reprocessTaskStatus.setLastTaskRunStatus(status);
+    reprocessTaskStatus.recordRunCompletion();
   }
 
   @Override
@@ -213,49 +373,622 @@ public class ReconTaskControllerImpl implements ReconTaskController {
   }
 
   @Override
-  public ReconTaskStatusDao getReconTaskStatusDao() {
-    return reconTaskStatusDao;
-  }
-
-  @Override
   public synchronized void start() {
     LOG.info("Starting Recon Task Controller.");
+    
+    // Clean up any pre-existing checkpoint directories from previous runs
+    cleanupPreExistingCheckpoints();
+    
     executorService = Executors.newFixedThreadPool(threadCount,
         new ThreadFactoryBuilder().setNameFormat("ReconTaskThread-%d")
             .build());
+    
+    // Start async event processing thread
+    running = true;
+    eventProcessingExecutor = Executors.newSingleThreadExecutor(
+        new ThreadFactoryBuilder().setNameFormat("ReconEventProcessor-%d")
+            .build());
+    eventProcessingExecutor.submit(this::processBufferedEventsAsync);
+    LOG.info("Started async event processing thread.");
   }
 
   @Override
   public synchronized void stop() {
     LOG.info("Stopping Recon Task Controller.");
-    if (this.executorService != null) {
-      this.executorService.shutdownNow();
+    // Signal the event processing loop to exit on its next poll cycle so the
+    // graceful shutdown below can complete without waiting out the timeout.
+    running = false;
+    shutdownExecutorGracefully(this.executorService, "main task executor");
+    shutdownExecutorGracefully(this.eventProcessingExecutor, "event processing executor");
+  }
+
+  private void shutdownExecutorGracefully(ExecutorService executor, String name) {
+    if (executor == null) {
+      return;
+    }
+    executor.shutdown();
+    try {
+      if (!executor.awaitTermination(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+        LOG.warn("Executor {} did not terminate within {} seconds, forcing shutdown",
+            name, SHUTDOWN_TIMEOUT_SECONDS);
+        executor.shutdownNow();
+        if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+          LOG.error("Executor {} did not terminate after forced shutdown", name);
+        }
+      }
+    } catch (InterruptedException e) {
+      LOG.warn("Interrupted while waiting for {} to terminate", name);
+      executor.shutdownNow();
+      Thread.currentThread().interrupt();
     }
   }
 
   /**
-   * Wait on results of all tasks.
-   * @param results Set of Futures.
-   * @param events Events.
-   * @return List of failed task names
-   * @throws ExecutionException execution Exception
-   * @throws InterruptedException Interrupted Exception
+   * For a given list of {@code Callable} tasks process them and add any failed task to the provided list.
+   * The tasks are executed in parallel, but will wait for the tasks to complete i.e. the longest
+   * time taken by this method will be the time taken by the longest task in the list.
+   * @param tasks       A list of tasks to execute.
+   * @param events      A batch of {@link OMUpdateEventBatch} events to fetch sequence number of last event in batch.
+   * @param failedTasks Reference of the list to which we want to add the failed tasks for retry/reprocessing
    */
-  private List<String> processTaskResults(List<Future<Pair<String, Boolean>>>
-                                              results,
-                                          OMUpdateEventBatch events)
-      throws ExecutionException, InterruptedException {
-    List<String> failedTasks = new ArrayList<>();
-    for (Future<Pair<String, Boolean>> f : results) {
-      String taskName = f.get().getLeft();
-      if (!f.get().getRight()) {
-        LOG.info("Failed task : {}", taskName);
-        failedTasks.add(f.get().getLeft());
-      } else {
-        taskFailureCounter.get(taskName).set(0);
-        storeLastCompletedTransaction(taskName, events.getLastSequenceNumber());
+  private void processTasks(
+      Collection<NamedCallableTask<ReconOmTask.TaskResult>> tasks,
+      OMUpdateEventBatch events, List<ReconOmTask.TaskResult> failedTasks) {
+    List<CompletableFuture<Void>> futures = tasks.stream()
+        .map(task -> CompletableFuture.supplyAsync(() -> {
+          // Track task delta processing duration
+          long taskStartTime = Time.monotonicNow();
+
+          try {
+            ReconOmTask.TaskResult result = task.call();
+
+            // Update task delta processing duration
+            long taskDuration = Time.monotonicNow() - taskStartTime;
+            taskMetrics.updateTaskDeltaProcessingDuration(task.getTaskName(), taskDuration);
+
+            return result;
+          } catch (Exception e) {
+            if (e instanceof InterruptedException) {
+              Thread.currentThread().interrupt();
+            }
+            // Wrap the exception with the task name
+            throw new TaskExecutionException(task.getTaskName(), e);
+          }
+        }, executorService).thenAccept(result -> {
+          String taskName = result.getTaskName();
+          ReconTaskStatusUpdater taskStatusUpdater =
+              taskStatusUpdaterManager.getTaskStatusUpdater(taskName);
+          if (!result.isTaskSuccess()) {
+            LOG.error("Task {} failed", taskName);
+
+            // Track task delta processing failure
+            taskMetrics.incrTaskDeltaProcessingFailures(taskName);
+
+            failedTasks.add(new ReconOmTask.TaskResult.Builder()
+                .setTaskName(taskName)
+                .setSubTaskSeekPositions(result.getSubTaskSeekPositions())
+                .build());
+            taskStatusUpdater.setLastTaskRunStatus(-1);
+          } else {
+            // Track task delta processing success
+            taskMetrics.incrTaskDeltaProcessingSuccess(taskName);
+
+            taskStatusUpdater.setLastTaskRunStatus(0);
+            taskStatusUpdater.setLastUpdatedSeqNumber(events.getLastSequenceNumber());
+          }
+          taskStatusUpdater.recordRunCompletion();
+        }).exceptionally(ex -> {
+          LOG.error("Task failed with exception: ", ex);
+          if (ex.getCause() instanceof TaskExecutionException) {
+            TaskExecutionException taskEx = (TaskExecutionException) ex.getCause();
+            String taskName = taskEx.getTaskName();
+            LOG.error("The above error occurred while trying to execute task: {}", taskName);
+
+            // Track task delta processing failure
+            taskMetrics.incrTaskDeltaProcessingFailures(taskName);
+
+            ReconTaskStatusUpdater taskStatusUpdater =
+                taskStatusUpdaterManager.getTaskStatusUpdater(taskName);
+            taskStatusUpdater.setLastTaskRunStatus(-1);
+            taskStatusUpdater.recordRunCompletion();
+          }
+          return null;
+        })).collect(Collectors.toList());
+
+    try {
+      CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+    } catch (CompletionException ce) {
+      LOG.error("Completing all tasks failed with exception ", ce);
+    } catch (CancellationException ce) {
+      LOG.error("Some tasks were cancelled with exception", ce);
+    }
+  }
+  
+  /**
+   * Async thread that continuously processes buffered events.
+   */
+  private void processBufferedEventsAsync() {
+    LOG.info("Started async buffered event processing thread");
+    
+    while (running && !Thread.currentThread().isInterrupted()) {
+      try {
+        ReconEvent event = eventBuffer.poll(1000); // 1 second timeout
+        if (event != null) {
+          LOG.debug("Processing buffered event of type {} with {} events", 
+              event.getEventType(), event.getEventCount());
+          processReconEvent(event);
+        }
+      } catch (Exception e) {
+        LOG.error("Error in async event processing thread", e);
+        // Continue processing other events
       }
     }
-    return failedTasks;
+    
+    LOG.info("Async buffered event processing thread stopped");
+  }
+  
+  /**
+   * Process a single Recon event (used by async processing thread).
+   */
+  @VisibleForTesting
+  void processReconEvent(ReconEvent event) {
+    switch (event.getEventType()) {
+    case OM_UPDATE_BATCH:
+      processOMUpdateBatch((OMUpdateEventBatch) event);
+      break;
+    case TASK_REINITIALIZATION:
+      processReInitializationEvent((ReconTaskReInitializationEvent) event);
+      break;
+    default:
+      LOG.warn("Unknown event type: {}", event.getEventType());
+      break;
+    }
+  }
+  
+  /**
+   * Process an OM update batch event (used by async processing thread).
+   */
+  private void processOMUpdateBatch(OMUpdateEventBatch events) {
+    if (events.isEmpty()) {
+      return;
+    }
+
+    Collection<NamedCallableTask<ReconOmTask.TaskResult>> tasks = new ArrayList<>();
+    List<ReconOmTask.TaskResult> failedTasks = new ArrayList<>();
+
+    for (Map.Entry<String, ReconOmTask> taskEntry : reconOmTasks.entrySet()) {
+      ReconOmTask task = taskEntry.getValue();
+      ReconTaskStatusUpdater taskStatusUpdater = taskStatusUpdaterManager.getTaskStatusUpdater(task.getTaskName());
+      taskStatusUpdater.recordRunStart();
+      tasks.add(new NamedCallableTask<>(task.getTaskName(), () -> task.process(events, Collections.emptyMap())));
+    }
+
+    processTasks(tasks, events, failedTasks);
+
+    // Handle failed tasks with retry logic
+    List<ReconOmTask.TaskResult> retryFailedTasks = new ArrayList<>();
+    if (!failedTasks.isEmpty()) {
+      LOG.warn("Some tasks failed while processing buffered events, retrying...");
+      tasks.clear();
+
+      for (ReconOmTask.TaskResult taskResult : failedTasks) {
+        ReconOmTask task = reconOmTasks.get(taskResult.getTaskName());
+        tasks.add(new NamedCallableTask<>(task.getTaskName(),
+            () -> task.process(events, taskResult.getSubTaskSeekPositions())));
+      }
+      processTasks(tasks, events, retryFailedTasks);
+
+      if (!retryFailedTasks.isEmpty()) {
+        LOG.warn("Some tasks still failed after retry while processing buffered events, signaling for " +
+            "task reinitialization");
+        // Set flag to indicate delta tasks failed even after retry
+        tasksFailed.compareAndSet(false, true);
+      }
+    }
+  }
+  
+  @Override
+  public boolean hasEventBufferOverflowed() {
+    return eventBuffer.getDroppedBatches() > 0;
+  }
+
+  /**
+   * Reset the event buffer overflow flag after full snapshot is completed.
+   */
+  public void resetEventBufferOverflowFlag() {
+    eventBuffer.resetDroppedBatches();
+  }
+  
+  @Override
+  public boolean hasTasksFailed() {
+    return tasksFailed.get();
+  }
+
+  /**
+   * Reset the task(s) failure flag after reinitialization is completed.
+   */
+  public void resetTasksFailureFlag() {
+    tasksFailed.compareAndSet(true, false);
+  }
+
+  @Override
+  public synchronized ReconTaskController.ReInitializationResult queueReInitializationEvent(
+      ReconTaskReInitializationEvent.ReInitializationReason reason) {
+    LOG.info("Queueing task reinitialization event due to: {} (retry attempt count: {})", reason,
+        eventProcessRetryCount.get());
+
+    // Track reprocess submission
+    controllerMetrics.incrTotalReprocessSubmittedToQueue();
+
+    if (reason == ReconTaskReInitializationEvent.ReInitializationReason.MANUAL_OM_DB_REBUILD) {
+      lastRetryTimestamp.set(0);
+    }
+
+    ReInitializationResult reInitializationResult = validateRetryCountAndDelay();
+    if (null != reInitializationResult) {
+      return reInitializationResult;
+    }
+
+    // Drain all events in buffer and cleanup any existing checkpoints before falling back to full snapshot.
+    // Events can be present in queue when reinit checkpoint creation fails multiple times because only after
+    // successful creation of checkpoint, we are clearing the event buffer.
+    drainEventBufferAndCleanExistingCheckpoints();
+
+    // Try checkpoint creation (single attempt per iteration)
+    ReconOMMetadataManager checkpointedOMMetadataManager = null;
+    // Whether the checkpoint has been handed off to the event buffer. If not,
+    // this method owns its cleanup (the finally block below).
+    boolean handedOff = false;
+
+    try {
+      LOG.info("Attempting checkpoint creation (retry attempt: {})", eventProcessRetryCount.get() + 1);
+      try {
+        checkpointedOMMetadataManager = createOMCheckpoint(currentOMMetadataManager);
+        LOG.info("Checkpoint creation succeeded");
+      } catch (IOException e) {
+        LOG.error("Checkpoint creation failed: {}", e.getMessage());
+        handleEventFailure();
+        return ReInitializationResult.RETRY_LATER;
+      }
+
+      // Create and queue the reinitialization event with checkpointed metadata manager
+      ReconTaskReInitializationEvent reinitEvent =
+          new ReconTaskReInitializationEvent(reason, checkpointedOMMetadataManager);
+      // If reinitialization event queued successfully, reset event buffer overflow flag and task failure flag,
+      // so that we can resume queuing the delta events.
+      if (eventBuffer.offer(reinitEvent)) {
+        // The downstream consumer now owns the checkpoint and its cleanup.
+        handedOff = true;
+        resetEventFlags();
+        LOG.info("Successfully queued reinitialization event after {} retries", eventProcessRetryCount.get() + 1);
+        return ReconTaskController.ReInitializationResult.SUCCESS;
+      }
+
+      // Buffer full - drop the event and clean up the fresh checkpoint (in finally) to avoid leaking it.
+      LOG.warn("Failed to queue reinitialization event (buffer full); discarding fresh checkpoint at {}",
+          checkpointedOMMetadataManager.getStore() != null
+              ? checkpointedOMMetadataManager.getStore().getDbLocation() : "<unknown>");
+      handleEventFailure();
+      return ReInitializationResult.RETRY_LATER;
+    } finally {
+      if (!handedOff && checkpointedOMMetadataManager != null) {
+        cleanupCheckpoint(checkpointedOMMetadataManager);
+      }
+    }
+  }
+
+  private ReconTaskController.ReInitializationResult validateRetryCountAndDelay() {
+    // Check if we should retry based on timing for iteration-based retries
+    long currentTime = clock.millis();
+    if (eventProcessRetryCount.get() > 0) {
+      // Check if 2 seconds have passed since last iteration
+      long timeSinceLastRetry = currentTime - lastRetryTimestamp.get();
+      if (timeSinceLastRetry < RETRY_DELAY_MS) {
+        LOG.debug("Skipping retry, only {}ms since last retry attempt (need {}ms)",
+            timeSinceLastRetry, RETRY_DELAY_MS);
+        return ReInitializationResult.RETRY_LATER;
+      }
+      LOG.info("Attempting retry (retry attempt count: {}, delay: {}ms)",
+          eventProcessRetryCount.get() + 1, timeSinceLastRetry);
+    }
+    return getEventRetryResult();
+  }
+
+  /**
+   * Handle iteration failure by updating retry counters.
+   */
+  private void handleEventFailure() {
+    long currentTime = clock.millis();
+    lastRetryTimestamp.set(currentTime);
+    eventProcessRetryCount.getAndIncrement();
+    tasksFailed.compareAndSet(false, true);
+    LOG.error("Event processing failed {} times.", eventProcessRetryCount);
+  }
+  
+  /**
+   * Determine the appropriate retry result based on current event retry count.
+   */
+  private ReconTaskController.ReInitializationResult getEventRetryResult() {
+    if (eventProcessRetryCount.get() >= MAX_EVENT_PROCESS_RETRIES) {
+      LOG.warn("Maximum iteration retries ({}) exceeded, resetting counters and signaling full snapshot fallback",
+          MAX_EVENT_PROCESS_RETRIES);
+      resetRetryCounters();
+      return ReconTaskController.ReInitializationResult.MAX_RETRIES_EXCEEDED;
+    }
+    return null;
+  }
+
+  public void drainEventBufferAndCleanExistingCheckpoints() {
+    // First drain all events to check for any ReconTaskReInitializationEvent that need checkpoint cleanup
+    List<ReconEvent> drainedEvents = new ArrayList<>();
+    int drainedCount = eventBuffer.drainTo(drainedEvents);
+    
+    if (drainedCount > 0) {
+      LOG.info("Drained {} events from buffer before clearing. Checking for checkpoint cleanup.", drainedCount);
+      
+      // Check for any ReconTaskReInitializationEvent and cleanup their checkpoints
+      for (ReconEvent event : drainedEvents) {
+        if (event instanceof ReconTaskReInitializationEvent) {
+          ReconTaskReInitializationEvent reinitEvent = (ReconTaskReInitializationEvent) event;
+          ReconOMMetadataManager checkpointedManager = reinitEvent.getCheckpointedOMMetadataManager();
+          if (checkpointedManager != null) {
+            LOG.info("Cleaning up unprocessed checkpoint from drained ReconTaskReInitializationEvent");
+            cleanupCheckpoint(checkpointedManager);
+          }
+        }
+      }
+    }
+  }
+
+  @Override
+  public void updateOMMetadataManager(ReconOMMetadataManager omMetadataManager) {
+    LOG.debug("Updating OM metadata manager");
+    this.currentOMMetadataManager = omMetadataManager;
+  }
+
+  /**
+   * Create a checkpoint of the current OM metadata manager.
+   * This method creates a snapshot of the current OM database state
+   * to prevent data inconsistency during reinitialization.
+   *
+   * @param omMetaManager the OM metadata manager to checkpoint
+   * @return a checkpointed ReconOMMetadataManager instance
+   * @throws IOException if checkpoint creation fails
+   */
+  public ReconOMMetadataManager createOMCheckpoint(ReconOMMetadataManager omMetaManager)
+      throws IOException {
+    // Create temporary directory for checkpoint
+    String parentPath = cleanTempCheckPointPath(omMetaManager);
+    
+    // Create checkpoint. getCheckpoint returns null when RocksDB fails to snapshot
+    // (e.g. a manually placed OM DB that is incomplete or corrupt).
+    DBCheckpoint checkpoint = omMetaManager.getStore().getCheckpoint(parentPath, true);
+    if (checkpoint == null) {
+      throw new IOException("Failed to create OM DB checkpoint at " + parentPath
+          + "; the on-disk OM DB may be incomplete or corrupt.");
+    }
+
+    return omMetaManager.createCheckpointReconMetadataManager(configuration, checkpoint);
+  }
+
+  /**
+   * Clean and prepare temporary checkpoint path.
+   * Similar to QuotaRepairTask.cleanTempCheckPointPath.
+   * 
+   * @param omMetaManager the OM metadata manager
+   * @return path to temporary checkpoint directory
+   * @throws IOException if directory operations fail
+   */
+  private String cleanTempCheckPointPath(ReconOMMetadataManager omMetaManager) throws IOException {
+    if (omMetaManager == null || omMetaManager.getStore() == null) {
+      throw new IOException("OM DB store is not initialized yet; cannot create "
+          + "reinitialization checkpoint. A full OM snapshot must be fetched first.");
+    }
+    File dbLocation = omMetaManager.getStore().getDbLocation();
+    if (dbLocation == null) {
+      throw new IOException("OM DB location is null");
+    }
+    String tempData = dbLocation.getParent();
+    if (tempData == null) {
+      throw new IOException("Parent OM DB dir is null");
+    }
+    File reinitTmpPath =
+        Paths.get(tempData, "temp-recon-reinit-checkpoint" + "_" + UUID.randomUUID()).toFile();
+    FileUtils.deleteDirectory(reinitTmpPath);
+    FileUtils.forceMkdir(reinitTmpPath);
+    return reinitTmpPath.toString();
+  }
+  
+  /**
+   * Process a task reinitialization event asynchronously.
+   */
+  private void processReInitializationEvent(ReconTaskReInitializationEvent event) {
+    LOG.info("Processing reinitialization event: reason={}, timestamp={}", 
+        event.getReason(), event.getTimestamp());
+    resetTasksFailureFlag();
+    // Use the checkpointed OM metadata manager for reinitialization to prevent data inconsistency
+    ReconOMMetadataManager checkpointedOMMetadataManager =
+        event.getCheckpointedOMMetadataManager();
+    try {
+      if (checkpointedOMMetadataManager != null) {
+        LOG.info("Starting async task reinitialization with checkpointed OM metadata manager due to: {}",
+                 event.getReason());
+        boolean isRunSuccessful = reInitializeTasks(checkpointedOMMetadataManager, null);
+        if (!isRunSuccessful) {
+          // Setting this taskFailed flag as true here will block consuming delta events and stop buffering events
+          // in eventBuffer until we successfully queue a new reinit event again.
+          handleEventFailure();
+          LOG.error("Task reinitialization failed, tasksFailed flag set to true");
+        } else {
+          resetRetryCounters();
+          LOG.info("Completed async task reinitialization");
+        }
+      } else {
+        LOG.error("Checkpointed OM metadata manager is null, cannot perform reinitialization");
+        return;
+      }
+      LOG.info("Completed processing reinitialization event: {}", event.getReason());
+    } catch (Exception e) {
+      LOG.error("Error processing reinitialization event", e);
+    } finally {
+      // Clean up the checkpointed metadata manager and its files after use
+      cleanupCheckpoint(checkpointedOMMetadataManager);
+    }
+  }
+
+  public void resetEventFlags() {
+    // Reset appropriate flags based on the reason
+    resetEventBufferOverflowFlag();
+    resetTasksFailureFlag();
+  }
+
+  @Override
+  public int getEventBufferSize() {
+    return eventBuffer.getQueueSize();
+  }
+
+  /**
+   * Get the number of batches that have been dropped due to buffer overflow.
+   * This is used by the overflow detection logic.
+   *
+   * @return the number of dropped batches
+   */
+  @VisibleForTesting
+  public long getDroppedBatches() {
+    return eventBuffer.getDroppedBatches();
+  }
+  
+  /**
+   * Reset retry counters - for testing purposes.
+   */
+  @VisibleForTesting
+  public void resetRetryCounters() {
+    eventProcessRetryCount.set(0);
+    lastRetryTimestamp.set(0);
+  }
+  
+  /**
+   * Get current iteration retry count - for testing purposes.
+   */
+  @VisibleForTesting  
+  int getEventProcessRetryCount() {
+    return eventProcessRetryCount.get();
+  }
+  
+  /**
+   * Get tasksFailed flag - for testing purposes.
+   */
+  @VisibleForTesting
+  AtomicBoolean getTasksFailedFlag() {
+    return tasksFailed;
+  }
+  
+  /**
+   * Clean up any pre-existing checkpoint directories from previous runs.
+   * This method looks for and removes any leftover temporary checkpoint directories
+   * that may not have been cleaned up properly during previous shutdowns.
+   */
+  private void cleanupPreExistingCheckpoints() {
+    try {
+      // The DB store is only initialized after Recon downloads its first DB
+      // snapshot from the OM. On a fresh startup it may still be null.
+      if (currentOMMetadataManager == null || currentOMMetadataManager.getStore() == null) {
+        LOG.debug("No current OM metadata manager or DB store not yet initialized, "
+            + "skipping pre-existing checkpoint cleanup");
+        return;
+      }
+
+      // Get the base directory where checkpoints are created
+      File dbLocation = currentOMMetadataManager.getStore().getDbLocation();
+      if (dbLocation == null || dbLocation.getParent() == null) {
+        LOG.debug("Cannot determine checkpoint base directory, skipping pre-existing checkpoint cleanup");
+        return;
+      }
+      
+      String baseDirectory = dbLocation.getParent();
+      File baseDir = new File(baseDirectory);
+      
+      if (!baseDir.exists() || !baseDir.isDirectory()) {
+        LOG.debug("Base directory {} does not exist, skipping pre-existing checkpoint cleanup", baseDirectory);
+        return;
+      }
+      
+      // Look for temporary checkpoint directories matching our naming pattern
+      File[] checkpointDirs = baseDir.listFiles((dir, name) -> 
+          name.startsWith("temp-recon-reinit-checkpoint"));
+      
+      if (checkpointDirs != null && checkpointDirs.length > 0) {
+        LOG.info("Found {} pre-existing checkpoint directories to clean up", checkpointDirs.length);
+        
+        for (File checkpointDir : checkpointDirs) {
+          try {
+            if (checkpointDir.exists() && checkpointDir.isDirectory()) {
+              FileUtils.deleteDirectory(checkpointDir);
+              LOG.info("Cleaned up pre-existing checkpoint directory: {}", checkpointDir);
+            }
+          } catch (IOException e) {
+            LOG.warn("Failed to clean up pre-existing checkpoint directory: {}", checkpointDir, e);
+          }
+        }
+      } else {
+        LOG.debug("No pre-existing checkpoint directories found");
+      }
+      
+    } catch (Exception e) {
+      LOG.warn("Failed to cleanup pre-existing checkpoint directories", e);
+    }
+  }
+  
+  /**
+   * Cleanup checkpointed OM metadata manager and associated checkpoint files.
+   * This method closes the database connections and removes the temporary checkpoint files.
+   *
+   * @param checkpointedManager the checkpointed OM metadata manager to clean up
+   */
+  private void cleanupCheckpoint(ReconOMMetadataManager checkpointedManager) {
+    if (checkpointedManager == null) {
+      return;
+    }
+    // Get the checkpoint location before closing.
+    File checkpointLocation = null;
+    try {
+      if (checkpointedManager.getStore() != null &&
+          checkpointedManager.getStore().getDbLocation() != null) {
+        // The checkpoint location is typically the parent directory of the DB location
+        checkpointLocation = checkpointedManager.getStore().getDbLocation().getParentFile();
+      }
+    } catch (Exception e) {
+      LOG.warn("Failed to get checkpoint location for cleanup", e);
+    }
+
+    // Close the database connections first, but always attempt to delete the
+    // checkpoint files afterwards - even if stop() throws - so the directory
+    // (a full copy of the OM DB) is never leaked.
+    try {
+      checkpointedManager.stop();
+      LOG.debug("Closed checkpointed OM metadata manager database connections");
+    } catch (Exception e) {
+      LOG.warn("Failed to stop checkpointed OM metadata manager", e);
+    } finally {
+      if (checkpointLocation != null && checkpointLocation.exists()) {
+        try {
+          FileUtils.deleteDirectory(checkpointLocation);
+          long cleaned = checkpointCleanupCount.incrementAndGet();
+          if (cleaned % CHECKPOINT_CLEANUP_LOG_SAMPLE_RATE == 1) {
+            LOG.info("Cleaned up checkpoint directory: {} (total cleaned so far: {})",
+                checkpointLocation, cleaned);
+          } else {
+            LOG.debug("Cleaned up checkpoint directory: {}", checkpointLocation);
+          }
+        } catch (IOException e) {
+          LOG.warn("Failed to cleanup checkpoint directory: {}", checkpointLocation, e);
+        }
+      }
+    }
+  }
+
+  @VisibleForTesting
+  public OMUpdateEventBuffer getEventBuffer() {
+    return eventBuffer;
   }
 }

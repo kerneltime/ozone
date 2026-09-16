@@ -1,22 +1,24 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.hadoop.hdds.scm.server;
 
+import jakarta.annotation.Nonnull;
+import jakarta.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -32,8 +34,6 @@ import org.apache.hadoop.hdds.scm.server.SCMDatanodeHeartbeatDispatcher.Containe
 import org.apache.hadoop.hdds.scm.server.SCMDatanodeHeartbeatDispatcher.ContainerReportFromDatanode;
 import org.apache.hadoop.hdds.server.events.FixedThreadPoolWithAffinityExecutor.IQueueMetrics;
 import org.apache.hadoop.util.Time;
-import org.jetbrains.annotations.NotNull;
-import org.jetbrains.annotations.Nullable;
 
 /**
  * Customized queue to handle FCR and ICR from datanode optimally,
@@ -48,13 +48,13 @@ public class ContainerReportQueue
    * i.e. report execution from multiple datanode will be executed in same
    * order as added to queue.
    */
-  private LinkedBlockingQueue<String> orderingQueue
+  private final LinkedBlockingQueue<String> orderingQueue
       = new LinkedBlockingQueue<>();
-  private Map<String, List<ContainerReport>> dataMap = new HashMap<>();
+  private final Map<String, List<ContainerReport>> dataMap = new HashMap<>();
 
   private int capacity = 0;
 
-  private AtomicInteger droppedCount = new AtomicInteger();
+  private final AtomicInteger droppedCount = new AtomicInteger();
 
   public ContainerReportQueue() {
     this(100000);
@@ -159,7 +159,7 @@ public class ContainerReportQueue
     return null;
   }
 
-  public boolean addValue(@NotNull ContainerReport value) {
+  public boolean addValue(@Nonnull ContainerReport value) {
     synchronized (this) {
       if (remainingCapacity() == 0) {
         return false;
@@ -177,7 +177,7 @@ public class ContainerReportQueue
   }
 
   @Override
-  public boolean add(@NotNull ContainerReport value) {
+  public boolean add(@Nonnull ContainerReport value) {
     Objects.requireNonNull(value);
     synchronized (this) {
       if (remainingCapacity() == 0) {
@@ -189,7 +189,7 @@ public class ContainerReportQueue
   }
 
   @Override
-  public boolean offer(@NotNull ContainerReport value) {
+  public boolean offer(@Nonnull ContainerReport value) {
     Objects.requireNonNull(value);
     synchronized (this) {
       return addValue(value);
@@ -229,16 +229,16 @@ public class ContainerReportQueue
   }
 
   @Override
-  public void put(@NotNull ContainerReport value) throws InterruptedException {
+  public void put(@Nonnull ContainerReport value) throws InterruptedException {
     Objects.requireNonNull(value);
     while (!addValue(value)) {
-      Thread.currentThread().sleep(10);
+      Thread.sleep(10);
     }
   }
 
   @Override
   public boolean offer(ContainerReport value, long timeout,
-                       @NotNull TimeUnit unit) throws InterruptedException {
+                       @Nonnull TimeUnit unit) throws InterruptedException {
     Objects.requireNonNull(value);
     long timeoutMillis = unit.toMillis(timeout);
     while (timeoutMillis > 0) {
@@ -246,14 +246,14 @@ public class ContainerReportQueue
         return true;
       }
       long startTime = Time.monotonicNow();
-      Thread.currentThread().sleep(10);
+      Thread.sleep(10);
       long timeDiff = Time.monotonicNow() - startTime;
       timeoutMillis -= timeDiff;
     }
     return false;
   }
 
-  @NotNull
+  @Nullable
   @Override
   public ContainerReport take() throws InterruptedException {
     String uuid = orderingQueue.take();
@@ -264,7 +264,7 @@ public class ContainerReportQueue
 
   @Nullable
   @Override
-  public ContainerReport poll(long timeout, @NotNull TimeUnit unit)
+  public ContainerReport poll(long timeout, @Nonnull TimeUnit unit)
       throws InterruptedException {
     String uuid = orderingQueue.poll(timeout, unit);
     synchronized (this) {
@@ -286,25 +286,25 @@ public class ContainerReportQueue
   }
 
   @Override
-  public boolean containsAll(@NotNull Collection<?> c) {
+  public boolean containsAll(@Nonnull Collection<?> c) {
     // no need support this
     throw new UnsupportedOperationException("not supported");
   }
 
   @Override
-  public boolean addAll(@NotNull Collection<? extends ContainerReport> c) {
+  public boolean addAll(@Nonnull Collection<? extends ContainerReport> c) {
     // no need support this
     throw new UnsupportedOperationException("not supported");
   }
 
   @Override
-  public boolean removeAll(@NotNull Collection<?> c) {
+  public boolean removeAll(@Nonnull Collection<?> c) {
     // no need support this
     throw new UnsupportedOperationException("not supported");
   }
 
   @Override
-  public boolean retainAll(@NotNull Collection<?> c) {
+  public boolean retainAll(@Nonnull Collection<?> c) {
     // no need support this
     throw new UnsupportedOperationException("not supported");
   }
@@ -336,35 +336,35 @@ public class ContainerReportQueue
     throw new UnsupportedOperationException("not supported");
   }
 
-  @NotNull
+  @Nonnull
   @Override
   public Iterator<ContainerReport> iterator() {
     // no need support this
     throw new UnsupportedOperationException("not supported");
   }
 
-  @NotNull
+  @Nonnull
   @Override
   public Object[] toArray() {
     // no need support this
     throw new UnsupportedOperationException("not supported");
   }
 
-  @NotNull
+  @Nonnull
   @Override
-  public <T> T[] toArray(@NotNull T[] a) {
+  public <T> T[] toArray(@Nonnull T[] a) {
     // no need support this
     throw new UnsupportedOperationException("not supported");
   }
 
   @Override
-  public int drainTo(@NotNull Collection<? super ContainerReport> c) {
+  public int drainTo(@Nonnull Collection<? super ContainerReport> c) {
     // no need support this
     throw new UnsupportedOperationException("not supported");
   }
 
   @Override
-  public int drainTo(@NotNull Collection<? super ContainerReport> c,
+  public int drainTo(@Nonnull Collection<? super ContainerReport> c,
                      int maxElements) {
     // no need support this
     throw new UnsupportedOperationException("not supported");

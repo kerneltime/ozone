@@ -1,13 +1,12 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,12 +17,16 @@
 
 package org.apache.hadoop.hdds.ratis;
 
-import org.apache.hadoop.hdds.conf.OzoneConfiguration;
-import org.apache.ratis.conf.RaftProperties;
-import org.junit.jupiter.api.Test;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+
+import org.apache.hadoop.hdds.conf.OzoneConfiguration;
+import org.apache.hadoop.hdds.protocol.DatanodeDetails;
+import org.apache.hadoop.hdds.protocol.DatanodeID;
+import org.apache.hadoop.hdds.protocol.MockDatanodeDetails;
+import org.apache.ratis.conf.RaftProperties;
+import org.apache.ratis.protocol.RaftPeer;
+import org.junit.jupiter.api.Test;
 
 /**
  * Test RatisHelper class.
@@ -77,7 +80,6 @@ public class TestRatisHelper {
 
   }
 
-
   @Test
   public void testCreateRaftGrpcPropertiesForServer() {
 
@@ -123,5 +125,16 @@ public class TestRatisHelper {
     assertEquals("30s", raftProperties.get("raft.server.rpc.request.timeout"));
     assertNull(raftProperties.get("raft.client.rpc.request.timeout"));
 
+  }
+
+  @Test
+  public void testRaftPeerAddressBracketsIpv6() {
+    // hdds.datanode.use.datanode.hostname defaults to false, so the datanode
+    // IP is used for the raft peer address. An IPv6 literal must be bracketed
+    // for the Ratis/gRPC peer target to be parsed correctly.
+    DatanodeDetails dn = MockDatanodeDetails.createDatanodeDetails(
+        DatanodeID.randomID(), "dn-ipv6", "2001:db8::1", "/default-rack");
+    RaftPeer peer = RatisHelper.toRaftPeer(dn);
+    assertEquals("[2001:db8::1]:0", peer.getAddress());
   }
 }

@@ -1,22 +1,29 @@
 /*
  * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with this
- * work for additional information regarding copyright ownership.  The ASF
- * licenses this file to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- * <p/>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p/>
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations under
- * the License.
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
+
 package org.apache.hadoop.hdds.scm.ha;
 
+import static org.apache.hadoop.ozone.OzoneConsts.TRANSACTION_INFO_KEY;
+
 import com.google.common.base.Preconditions;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import org.apache.hadoop.hdds.scm.block.DeletedBlockLog;
 import org.apache.hadoop.hdds.scm.block.DeletedBlockLogImpl;
 import org.apache.hadoop.hdds.scm.metadata.SCMMetadataStore;
@@ -24,15 +31,12 @@ import org.apache.hadoop.hdds.scm.server.StorageContainerManager;
 import org.apache.hadoop.hdds.utils.IOUtils;
 import org.apache.hadoop.hdds.utils.TransactionInfo;
 import org.apache.hadoop.hdds.utils.db.BatchOperation;
+import org.apache.hadoop.hdds.utils.db.CodecException;
+import org.apache.hadoop.hdds.utils.db.RocksDatabaseException;
 import org.apache.hadoop.hdds.utils.db.Table;
 import org.apache.ratis.statemachine.SnapshotInfo;
-
-import java.io.IOException;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
-
-import static org.apache.hadoop.ozone.OzoneConsts.TRANSACTION_INFO_KEY;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * This is a transaction buffer that buffers SCM DB operations for Pipeline and
@@ -41,6 +45,8 @@ import static org.apache.hadoop.ozone.OzoneConsts.TRANSACTION_INFO_KEY;
  * operation in DB.
  */
 public class SCMHADBTransactionBufferImpl implements SCMHADBTransactionBuffer {
+
+  private static final Logger LOG = LoggerFactory.getLogger(SCMHADBTransactionBufferImpl.class);
   private final StorageContainerManager scm;
   private SCMMetadataStore metadataStore;
   private BatchOperation currentBatchOperation;
@@ -48,11 +54,11 @@ public class SCMHADBTransactionBufferImpl implements SCMHADBTransactionBuffer {
   private final AtomicReference<SnapshotInfo> latestSnapshot
       = new AtomicReference<>();
   private final AtomicLong txFlushPending = new AtomicLong(0);
+  private final AtomicInteger applyingTransactions = new AtomicInteger(0);
   private long lastSnapshotTimeMs = 0;
   private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
 
-  public SCMHADBTransactionBufferImpl(StorageContainerManager scm)
-      throws IOException {
+  public SCMHADBTransactionBufferImpl(StorageContainerManager scm) throws RocksDatabaseException, CodecException {
     this.scm = scm;
     init();
   }
@@ -62,8 +68,8 @@ public class SCMHADBTransactionBufferImpl implements SCMHADBTransactionBuffer {
   }
 
   @Override
-  public <KEY, VALUE> void addToBuffer(
-      Table<KEY, VALUE> table, KEY key, VALUE value) throws IOException {
+  public <KEY, VALUE> void addToBuffer(Table<KEY, VALUE> table, KEY key, VALUE value)
+      throws RocksDatabaseException, CodecException {
     rwLock.readLock().lock();
     try {
       txFlushPending.getAndIncrement();
@@ -74,8 +80,7 @@ public class SCMHADBTransactionBufferImpl implements SCMHADBTransactionBuffer {
   }
 
   @Override
-  public <KEY, VALUE> void removeFromBuffer(Table<KEY, VALUE> table, KEY key)
-      throws IOException {
+  public <KEY, VALUE> void removeFromBuffer(Table<KEY, VALUE> table, KEY key) throws CodecException {
     rwLock.readLock().lock();
     try {
       txFlushPending.getAndIncrement();
@@ -107,6 +112,8 @@ public class SCMHADBTransactionBufferImpl implements SCMHADBTransactionBuffer {
 
   @Override
   public void setLatestSnapshot(SnapshotInfo latestSnapshot) {
+    LOG.info("{}: Set latest Snapshot to {}",
+        scm.getScmHAManager().getRatisServer().getDivision().getId(), latestSnapshot);
     this.latestSnapshot.set(latestSnapshot);
   }
 
@@ -116,35 +123,79 @@ public class SCMHADBTransactionBufferImpl implements SCMHADBTransactionBuffer {
   }
 
   @Override
-  public void flush() throws IOException {
+  public void flush() throws RocksDatabaseException, CodecException {
     rwLock.writeLock().lock();
     try {
-      // write latest trx info into trx table in the same batch
-      Table<String, TransactionInfo> transactionInfoTable
-          = metadataStore.getTransactionInfoTable();
-      transactionInfoTable.putWithBatch(currentBatchOperation,
-          TRANSACTION_INFO_KEY, latestTrxInfo);
-
-      metadataStore.getStore().commitBatchOperation(currentBatchOperation);
-      currentBatchOperation.close();
-      this.latestSnapshot.set(latestTrxInfo.toSnapshotInfo());
-      // reset batch operation
-      currentBatchOperation = metadataStore.getStore().initBatchOperation();
-
-      DeletedBlockLog deletedBlockLog = scm.getScmBlockManager()
-          .getDeletedBlockLog();
-      Preconditions.checkArgument(
-          deletedBlockLog instanceof DeletedBlockLogImpl);
-      ((DeletedBlockLogImpl) deletedBlockLog).onFlush();
+      flushUnderWriteLock();
     } finally {
-      txFlushPending.set(0);
-      lastSnapshotTimeMs = scm.getSystemClock().millis();
       rwLock.writeLock().unlock();
     }
   }
 
   @Override
-  public void init() throws IOException {
+  public void flushIfNeeded(long snapshotWaitTime)
+      throws RocksDatabaseException, CodecException {
+    rwLock.writeLock().lock();
+    try {
+      if (applyingTransactions.get() > 0) {
+        return;
+      }
+      long timeDiff = scm.getSystemClock().millis() - lastSnapshotTimeMs;
+      if (txFlushPending.get() > 0 && timeDiff > snapshotWaitTime) {
+        LOG.debug("Running TransactionFlushTask");
+        flushUnderWriteLock();
+      }
+    } finally {
+      rwLock.writeLock().unlock();
+    }
+  }
+
+  private void flushUnderWriteLock()
+      throws RocksDatabaseException, CodecException {
+    // write latest trx info into trx table in the same batch
+    Table<String, TransactionInfo> transactionInfoTable
+        = metadataStore.getTransactionInfoTable();
+    transactionInfoTable.putWithBatch(currentBatchOperation,
+        TRANSACTION_INFO_KEY, latestTrxInfo);
+
+    metadataStore.getStore().commitBatchOperation(currentBatchOperation);
+    currentBatchOperation.close();
+    this.latestSnapshot.set(latestTrxInfo.toSnapshotInfo());
+    // reset batch operation
+    currentBatchOperation = metadataStore.getStore().initBatchOperation();
+
+    DeletedBlockLog deletedBlockLog = scm.getScmBlockManager()
+        .getDeletedBlockLog();
+    Preconditions.checkArgument(
+        deletedBlockLog instanceof DeletedBlockLogImpl);
+    ((DeletedBlockLogImpl) deletedBlockLog).onFlush();
+
+    txFlushPending.set(0);
+    lastSnapshotTimeMs = scm.getSystemClock().millis();
+  }
+
+  @Override
+  public void beginApplyingTransaction() {
+    applyingTransactions.incrementAndGet();
+  }
+
+  @Override
+  public void endApplyingTransaction() {
+    applyingTransactions.decrementAndGet();
+  }
+
+  @Override
+  public void lock() {
+    rwLock.readLock().lock();
+  }
+
+  @Override
+  public void unlock() {
+    rwLock.readLock().unlock();
+  }
+
+  @Override
+  public void init() throws RocksDatabaseException, CodecException {
     metadataStore = scm.getScmMetadataStore();
 
     rwLock.writeLock().lock();
@@ -185,7 +236,7 @@ public class SCMHADBTransactionBufferImpl implements SCMHADBTransactionBuffer {
   }
 
   @Override
-  public void close() throws IOException {
+  public void close() {
     if (currentBatchOperation != null) {
       currentBatchOperation.close();
     }

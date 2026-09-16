@@ -1,22 +1,26 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.hadoop.ozone.s3;
 
+import java.io.IOException;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.NoSuchElementException;
 import javax.servlet.Filter;
 import javax.servlet.FilterChain;
 import javax.servlet.FilterConfig;
@@ -25,9 +29,6 @@ import javax.servlet.ServletRequest;
 import javax.servlet.ServletResponse;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletRequestWrapper;
-import java.io.IOException;
-import java.util.Enumeration;
-import java.util.NoSuchElementException;
 
 /**
  * Filter to accept queries with empty string content-type (ruby sdk).
@@ -56,6 +57,9 @@ public class EmptyContentTypeFilter implements Filter {
           if (name.equalsIgnoreCase("Content-Type")) {
             return null;
           }
+          if (name.equalsIgnoreCase(HeaderPreprocessor.ORIGINAL_CONTENT_TYPE)) {
+            return "";
+          }
           return super.getHeader(name);
         }
 
@@ -63,6 +67,9 @@ public class EmptyContentTypeFilter implements Filter {
         public Enumeration<String> getHeaders(String name) {
           if ("Content-Type".equalsIgnoreCase(name)) {
             return null;
+          }
+          if (HeaderPreprocessor.ORIGINAL_CONTENT_TYPE.equalsIgnoreCase(name)) {
+            return Collections.enumeration(Collections.singletonList(""));
           }
           return super.getHeaders(name);
         }
@@ -84,8 +91,8 @@ public class EmptyContentTypeFilter implements Filter {
   }
 
   /**
-   * Enumeration Wrapper which removes Content-Type from the original
-   * enumeration.
+   * Enumeration Wrapper which replaces Content-Type with the internal header
+   * used to preserve its original value.
    */
   public static class EnumerationWrapper implements Enumeration<String> {
 
@@ -93,24 +100,27 @@ public class EmptyContentTypeFilter implements Filter {
 
     private String nextElement;
 
+    private boolean contentTypeReplaced;
+
     public EnumerationWrapper(Enumeration<String> original) {
       this.original = original;
       step();
     }
 
     private void step() {
-      if (original.hasMoreElements()) {
+      while (original.hasMoreElements()) {
         nextElement = original.nextElement();
-      } else {
-        nextElement = null;
-      }
-      if ("Content-Type".equalsIgnoreCase(nextElement)) {
-        if (original.hasMoreElements()) {
-          nextElement = original.nextElement();
+        if ("Content-Type".equalsIgnoreCase(nextElement)) {
+          if (!contentTypeReplaced) {
+            nextElement = HeaderPreprocessor.ORIGINAL_CONTENT_TYPE;
+            contentTypeReplaced = true;
+            return;
+          }
         } else {
-          nextElement = null;
+          return;
         }
       }
+      nextElement = null;
     }
 
     @Override

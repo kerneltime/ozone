@@ -1,30 +1,63 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- *  with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
  *      http://www.apache.org/licenses/LICENSE-2.0
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package org.apache.hadoop.ozone.container.keyvalue.impl;
 
+import static org.apache.hadoop.hdds.scm.storage.BlockDataStreamOutput.PUT_BLOCK_REQUEST_LENGTH_MAX;
+import static org.apache.hadoop.hdds.scm.storage.BlockDataStreamOutput.executePutBlockClose;
+import static org.apache.hadoop.hdds.scm.storage.BlockDataStreamOutput.getProtoLength;
+import static org.apache.hadoop.ozone.container.keyvalue.impl.KeyValueStreamDataChannel.writeBuffers;
+import static org.apache.hadoop.ozone.container.keyvalue.impl.KeyValueStreamDataChannel.writeFully;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.WritableByteChannel;
+import java.nio.file.Files;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicReference;
+import org.apache.commons.lang3.RandomUtils;
+import org.apache.hadoop.hdds.fs.SpaceUsageSource;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.BlockData;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ContainerCommandRequestProto;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.DatanodeBlockID;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.PutBlockRequestProto;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.Type;
 import org.apache.hadoop.hdds.ratis.ContainerCommandRequestMessage;
-import org.apache.hadoop.ozone.container.keyvalue.impl.KeyValueStreamDataChannel.Buffers;
+import org.apache.hadoop.hdds.scm.container.common.helpers.StorageContainerException;
+import org.apache.hadoop.ozone.ClientVersion;
+import org.apache.hadoop.ozone.container.common.helpers.ContainerMetrics;
+import org.apache.hadoop.ozone.container.common.impl.ContainerData;
+import org.apache.hadoop.ozone.container.common.volume.HddsVolume;
 import org.apache.hadoop.ozone.container.keyvalue.impl.KeyValueStreamDataChannel.WriteMethod;
 import org.apache.ratis.client.api.DataStreamOutput;
 import org.apache.ratis.io.FilePositionCount;
@@ -38,39 +71,19 @@ import org.apache.ratis.protocol.RaftClientReply;
 import org.apache.ratis.thirdparty.io.netty.buffer.ByteBuf;
 import org.apache.ratis.thirdparty.io.netty.buffer.Unpooled;
 import org.apache.ratis.util.ReferenceCountedObject;
+import org.apache.ratis.util.function.CheckedConsumer;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.channels.WritableByteChannel;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
-import java.util.Random;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadLocalRandom;
-
-import static org.apache.hadoop.hdds.scm.storage.BlockDataStreamOutput.PUT_BLOCK_REQUEST_LENGTH_MAX;
-import static org.apache.hadoop.hdds.scm.storage.BlockDataStreamOutput.executePutBlockClose;
-import static org.apache.hadoop.hdds.scm.storage.BlockDataStreamOutput.getProtoLength;
-import static org.apache.hadoop.ozone.container.keyvalue.impl.KeyValueStreamDataChannel.closeBuffers;
-import static org.apache.hadoop.ozone.container.keyvalue.impl.KeyValueStreamDataChannel.readPutBlockRequest;
-import static org.apache.hadoop.ozone.container.keyvalue.impl.KeyValueStreamDataChannel.writeBuffers;
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-
 /** For testing {@link KeyValueStreamDataChannel}. */
 public class TestKeyValueStreamDataChannel {
-  public static final Logger LOG =
+  private static final Logger LOG =
       LoggerFactory.getLogger(TestKeyValueStreamDataChannel.class);
 
-  static final ContainerCommandRequestProto PUT_BLOCK_PROTO
+  private static final ContainerCommandRequestProto PUT_BLOCK_PROTO
       = ContainerCommandRequestProto.newBuilder()
       .setCmdType(Type.PutBlock)
       .setPutBlock(PutBlockRequestProto.newBuilder().setBlockData(
@@ -78,10 +91,62 @@ public class TestKeyValueStreamDataChannel {
               .setContainerID(222).setLocalID(333).build()).build()))
       .setDatanodeUuid("datanodeId")
       .setContainerID(111L)
+      .setVersion(ClientVersion.CURRENT.toProtoValue())
       .build();
   static final int PUT_BLOCK_PROTO_SIZE = PUT_BLOCK_PROTO.toByteString().size();
+
   static {
     LOG.info("PUT_BLOCK_PROTO_SIZE = {}", PUT_BLOCK_PROTO_SIZE);
+  }
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  public void testClosePutBlockBehavior(boolean commitPutBlockOnClose) throws Exception {
+    File tempFile = File.createTempFile("test-kv-close-" + commitPutBlockOnClose, ".tmp");
+    tempFile.deleteOnExit();
+    AtomicReference<ContainerCommandRequestProto> processed = new AtomicReference<>();
+    KeyValueStreamDataChannel channel = newChannel(tempFile, commitPutBlockOnClose, processed);
+    final byte[] data = RandomUtils.secure().randomBytes(50);
+    final ByteBuffer putBlockBuf = ContainerCommandRequestMessage.toMessage(
+        PUT_BLOCK_PROTO, null).getContent().asReadOnlyByteBuffer();
+    final ByteBuffer protoLengthBuf =
+        getProtoLength(putBlockBuf, PUT_BLOCK_REQUEST_LENGTH_MAX);
+
+    write(channel, data);
+    write(channel, putBlockBuf.duplicate());
+    write(channel, protoLengthBuf.duplicate());
+
+    assertThat(processed.get()).isNull();
+    channel.close();
+
+    if (commitPutBlockOnClose) {
+      assertEquals(PUT_BLOCK_PROTO, processed.get());
+      assertEquals(PUT_BLOCK_PROTO, channel.getPutBlockRequest());
+      assertTrue(channel.isLinked());
+    } else {
+      assertThat(processed.get()).isNull();
+      assertFalse(channel.isLinked());
+    }
+    assertEquals(data.length, tempFile.length());
+    assertArrayEquals(data, Files.readAllBytes(tempFile.toPath()));
+  }
+
+  @Test
+  public void testReadPutBlockRequestBufferTooShort() {
+    final ByteBuf buf = Unpooled.buffer(2);
+    buf.writeByte(1);
+    buf.writeByte(2);
+    assertThrows(IOException.class, () -> KeyValueStreamDataChannel.readPutBlockRequest(buf));
+    buf.release();
+  }
+
+  @Test
+  public void testReadPutBlockRequestInvalidProtoLength() {
+    final ByteBuf buf = Unpooled.buffer(8);
+    buf.writeInt(1);
+    buf.writeInt(100);
+    assertThrows(IOException.class, () -> KeyValueStreamDataChannel.readPutBlockRequest(buf));
+    buf.release();
   }
 
   @Test
@@ -101,8 +166,31 @@ public class TestKeyValueStreamDataChannel {
     buf.writeBytes(putBlockBuf);
     buf.writeBytes(protoLengthBuf);
 
-    final ContainerCommandRequestProto proto = readPutBlockRequest(buf);
+    final ContainerCommandRequestProto proto = KeyValueStreamDataChannel.readPutBlockRequest(buf);
     assertEquals(PUT_BLOCK_PROTO, proto);
+  }
+
+  @Test
+  public void testVolumeFullCase() throws Exception {
+    File tempFile = File.createTempFile("test-kv-stream", ".tmp");
+    tempFile.deleteOnExit();
+    HddsVolume mockVolume = mock(HddsVolume.class);
+    when(mockVolume.getStorageID()).thenReturn("storageId");
+    when(mockVolume.getCurrentUsage()).thenReturn(new SpaceUsageSource.Fixed(100L, 0L, 100L));
+    ContainerData mockContainerData = mock(ContainerData.class);
+    when(mockContainerData.getContainerID()).thenReturn(123L);
+    when(mockContainerData.getVolume()).thenReturn(mockVolume);
+    ContainerMetrics mockMetrics = mock(ContainerMetrics.class);
+    KeyValueStreamDataChannel writeChannel =
+        new KeyValueStreamDataChannel(tempFile, mockContainerData, null, mockMetrics);
+    assertThrows(StorageContainerException.class,
+        () -> writeChannel.assertSpaceAvailability(1));
+    final ByteBuffer putBlockBuf = ContainerCommandRequestMessage.toMessage(
+        PUT_BLOCK_PROTO, null).getContent().asReadOnlyByteBuffer();
+    ReferenceCountedObject<ByteBuffer> wrap = ReferenceCountedObject.wrap(putBlockBuf);
+    wrap.retain();
+    assertThrows(StorageContainerException.class, () -> writeChannel.write(wrap));
+    wrap.release();
   }
 
   @Test
@@ -143,15 +231,13 @@ public class TestKeyValueStreamDataChannel {
     assertThat(max).isGreaterThanOrEqualTo(PUT_BLOCK_PROTO_SIZE);
 
     // random data
-    final byte[] data = new byte[dataSize];
-    final Random random = new Random(seed);
-    random.nextBytes(data);
+    final byte[] data = RandomUtils.secure().randomBytes(dataSize);
 
     // write output
     final Buffers buffers = new Buffers(max);
     final Output out = new Output(buffers);
     for (int offset = 0; offset < dataSize;) {
-      final int randomLength = random.nextInt(4 * max);
+      final int randomLength = RandomUtils.secure().randomInt(1, 4 * max);
       final int length = Math.min(randomLength, dataSize - offset);
       LOG.info("{}: offset = {}, length = {}", name, offset, length);
       final ByteBuffer b = ByteBuffer.wrap(data, offset, length);
@@ -227,6 +313,21 @@ public class TestKeyValueStreamDataChannel {
       }
       return CompletableFuture.completedFuture(
           new Reply(true, 0, putBlockRequest));
+    }
+
+    static ContainerCommandRequestProto closeBuffers(
+        Buffers buffers, WriteMethod writeMethod) throws IOException {
+      final ReferenceCountedObject<ByteBuf> ref = buffers.pollAll();
+      final ByteBuf buf = ref.retain();
+      final ContainerCommandRequestProto putBlockRequest;
+      try {
+        putBlockRequest = KeyValueStreamDataChannel.readPutBlockRequest(buf);
+        // write the remaining data
+        writeFully(buf.nioBuffer(), writeMethod);
+      } finally {
+        ref.release();
+      }
+      return putBlockRequest;
     }
 
     @Override
@@ -311,5 +412,34 @@ public class TestKeyValueStreamDataChannel {
     final CompletableFuture<DataStreamReply> f = new CompletableFuture<>();
     f.completeExceptionally(t);
     return f;
+  }
+
+  private static KeyValueStreamDataChannel newChannel(
+      File tempFile, boolean commitPutBlockOnClose,
+      AtomicReference<ContainerCommandRequestProto> processed) throws Exception {
+    HddsVolume mockVolume = mock(HddsVolume.class);
+    when(mockVolume.getStorageID()).thenReturn("storageId");
+    when(mockVolume.getCurrentUsage()).thenReturn(new SpaceUsageSource.Fixed(1000L, 1000L, 0L));
+    ContainerData mockContainerData = mock(ContainerData.class);
+    when(mockContainerData.getContainerID()).thenReturn(123L);
+    when(mockContainerData.getVolume()).thenReturn(mockVolume);
+    ContainerMetrics mockMetrics = mock(ContainerMetrics.class);
+    CheckedConsumer<ContainerCommandRequestProto, IOException> putBlock =
+        commitPutBlockOnClose ? processed::set : null;
+    return new KeyValueStreamDataChannel(tempFile, mockContainerData, putBlock, mockMetrics);
+  }
+
+  private static void write(KeyValueStreamDataChannel channel, byte[] data)
+      throws IOException {
+    write(channel, ByteBuffer.wrap(data));
+  }
+
+  private static void write(KeyValueStreamDataChannel channel, ByteBuffer buf)
+      throws IOException {
+    ReferenceCountedObject<ByteBuffer> ref =
+        ReferenceCountedObject.wrap(buf, () -> { }, () -> { });
+    ref.retain();
+    channel.write(ref);
+    ref.release();
   }
 }

@@ -1,23 +1,26 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- *  with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
  *
  *      http://www.apache.org/licenses/LICENSE-2.0
  *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package org.apache.hadoop.hdds.scm.storage;
 
+import static java.util.Collections.singletonList;
+import static org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.Result.BLOCK_TOKEN_VERIFICATION_FAILED;
+
+import io.opentelemetry.api.trace.Span;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -28,7 +31,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.function.Function;
-
 import org.apache.hadoop.hdds.annotation.InterfaceStability;
 import org.apache.hadoop.hdds.client.BlockID;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
@@ -40,6 +42,9 @@ import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.CloseConta
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ContainerCommandRequestProto;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ContainerCommandResponseProto;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.DatanodeBlockID;
+import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.EchoRequestProto;
+import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.EchoResponseProto;
+import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.FinalizeBlockRequestProto;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.GetBlockRequestProto;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.GetBlockResponseProto;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.GetSmallFileRequestProto;
@@ -50,6 +55,7 @@ import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ListBlockR
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.PutBlockRequestProto;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.PutSmallFileRequestProto;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.PutSmallFileResponseProto;
+import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ReadBlockRequestProto;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ReadChunkRequestProto;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ReadChunkResponseProto;
 import org.apache.hadoop.hdds.protocol.datanode.proto.ContainerProtos.ReadContainerRequestProto;
@@ -64,25 +70,24 @@ import org.apache.hadoop.hdds.scm.container.common.helpers.ContainerNotOpenExcep
 import org.apache.hadoop.hdds.scm.container.common.helpers.StorageContainerException;
 import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
 import org.apache.hadoop.hdds.security.token.OzoneBlockTokenIdentifier;
+import org.apache.hadoop.hdds.tracing.TracingUtil;
 import org.apache.hadoop.ozone.common.Checksum;
 import org.apache.hadoop.ozone.common.ChecksumData;
 import org.apache.hadoop.security.token.Token;
-
 import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.ratis.thirdparty.com.google.protobuf.ByteString;
 import org.apache.ratis.util.function.CheckedFunction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static java.util.Collections.singletonList;
-
 /**
  * Implementation of all container protocol calls performed by Container
  * clients.
  */
 public final class ContainerProtocolCalls  {
-  private static final Logger LOG =
-      LoggerFactory.getLogger(ContainerProtocolCalls.class);
+  private static final Logger LOG = LoggerFactory.getLogger(ContainerProtocolCalls.class);
+
+  private static final List<Validator> VALIDATORS = createValidators();
 
   /**
    * There is no need to instantiate this class.
@@ -127,6 +132,10 @@ public final class ContainerProtocolCalls  {
     if (token != null) {
       builder.setEncodedToken(token.encodeToUrlString());
     }
+    String traceId = TracingUtil.exportCurrentSpan();
+    if (traceId != null) {
+      builder.setTraceID(traceId);
+    }
 
     ContainerCommandRequestProto request = builder.build();
     ContainerCommandResponseProto response =
@@ -145,6 +154,17 @@ public final class ContainerProtocolCalls  {
       try {
         return op.apply(d);
       } catch (IOException e) {
+        Span span = TracingUtil.getActiveSpan();
+        if (e instanceof StorageContainerException) {
+          StorageContainerException sce = (StorageContainerException)e;
+          // Block token expired. There's no point retrying other DN.
+          // Throw the exception to request a new block token right away.
+          if (sce.getResult() == BLOCK_TOKEN_VERIFICATION_FAILED) {
+            span.addEvent("block token verification failed at DN " + d);
+            throw e;
+          }
+        }
+        span.addEvent("failed to connect to DN " + d);
         excluded.add(d);
         if (excluded.size() < pipeline.size()) {
           LOG.warn(toErrorMessage.apply(d)
@@ -161,51 +181,94 @@ public final class ContainerProtocolCalls  {
    *
    * @param xceiverClient client to perform call
    * @param validators functions to validate the response
-   * @param datanodeBlockID blockID to identify container
+   * @param blockID blockID to identify container
    * @param token a token for this block (may be null)
    * @return container protocol get block response
    * @throws IOException if there is an I/O error while performing the call
    */
   public static GetBlockResponseProto getBlock(XceiverClientSpi xceiverClient,
-      List<Validator> validators,
-      DatanodeBlockID datanodeBlockID,
-      Token<? extends TokenIdentifier> token) throws IOException {
-    GetBlockRequestProto.Builder readBlockRequest = GetBlockRequestProto
-        .newBuilder()
-        .setBlockID(datanodeBlockID);
+      List<Validator> validators, BlockID blockID, Token<? extends TokenIdentifier> token,
+      Pipeline pipeline) throws IOException {
     ContainerCommandRequestProto.Builder builder = ContainerCommandRequestProto
         .newBuilder()
         .setCmdType(Type.GetBlock)
-        .setContainerID(datanodeBlockID.getContainerID())
-        .setGetBlock(readBlockRequest);
+        .setContainerID(blockID.getContainerID());
     if (token != null) {
       builder.setEncodedToken(token.encodeToUrlString());
     }
 
     return tryEachDatanode(xceiverClient.getPipeline(),
-        d -> getBlock(xceiverClient, validators, builder, d),
-        d -> toErrorMessage(datanodeBlockID, d));
+        d -> getBlock(xceiverClient, validators, builder, blockID, d, pipeline),
+        d -> toErrorMessage(blockID, d));
   }
 
-  static String toErrorMessage(DatanodeBlockID blockId, DatanodeDetails d) {
+  static String toErrorMessage(BlockID blockId, DatanodeDetails d) {
     return String.format("Failed to get block #%s in container #%s from %s",
         blockId.getLocalID(), blockId.getContainerID(), d);
   }
 
   public static GetBlockResponseProto getBlock(XceiverClientSpi xceiverClient,
-      DatanodeBlockID datanodeBlockID,
-      Token<? extends TokenIdentifier> token) throws IOException {
-    return getBlock(xceiverClient, getValidatorList(), datanodeBlockID, token);
+      BlockID datanodeBlockID,
+      Token<? extends TokenIdentifier> token, Pipeline pipeline) throws IOException {
+    return getBlock(xceiverClient, getValidatorList(), datanodeBlockID, token, pipeline);
+  }
+
+  /**
+   * Gets block metadata from a datanode.
+   * <p>
+   *
+   * @param xceiverClient client to perform call
+   * @param blockID blockID to identify container
+   * @param token a token for this block (may be null)
+   * @param datanode datanode to query
+   * @return container protocol get block response
+   * @throws IOException if there is an I/O error while performing the call
+   */
+  public static GetBlockResponseProto getBlockFromDatanode(
+      XceiverClientSpi xceiverClient,
+      BlockID blockID,
+      Token<? extends TokenIdentifier> token,
+      DatanodeDetails datanode,
+      Pipeline pipeline) throws IOException {
+    ContainerCommandRequestProto.Builder builder = ContainerCommandRequestProto
+        .newBuilder()
+        .setCmdType(Type.GetBlock)
+        .setContainerID(blockID.getContainerID());
+    if (token != null) {
+      builder.setEncodedToken(token.encodeToUrlString());
+    }
+    return getBlock(xceiverClient, getValidatorList(), builder, blockID, datanode, pipeline);
   }
 
   private static GetBlockResponseProto getBlock(XceiverClientSpi xceiverClient,
       List<Validator> validators,
-      ContainerCommandRequestProto.Builder builder,
-      DatanodeDetails datanode) throws IOException {
+      ContainerCommandRequestProto.Builder builder, BlockID blockID,
+      DatanodeDetails datanode, Pipeline pipeline) throws IOException {
+    String traceId = TracingUtil.exportCurrentSpan();
+    if (traceId != null) {
+      builder.setTraceID(traceId);
+    }
+    final int replicaIndex = pipeline.getReplicaIndex(datanode);
+    final DatanodeBlockID.Builder datanodeBlockID = blockID.getDatanodeBlockIDProtobufBuilder(replicaIndex);
+    final GetBlockRequestProto.Builder readBlockRequest = GetBlockRequestProto.newBuilder()
+        .setBlockID(datanodeBlockID.build());
     final ContainerCommandRequestProto request = builder
-        .setDatanodeUuid(datanode.getUuidString()).build();
+        .setDatanodeUuid(datanode.getUuidString())
+        .setGetBlock(readBlockRequest).build();
     ContainerCommandResponseProto response =
         xceiverClient.sendCommand(request, validators);
+    return response.getGetBlock();
+  }
+
+  public static GetBlockResponseProto getBlock(XceiverClientSpi xceiverClient,
+      List<Validator> validators, ContainerCommandRequestProto.Builder builder,
+      DatanodeDetails datanode) throws IOException {
+    String traceId = TracingUtil.exportCurrentSpan();
+    if (traceId != null) {
+      builder.setTraceID(traceId);
+    }
+    final ContainerCommandRequestProto request = builder.setDatanodeUuid(datanode.getUuidString()).build();
+    ContainerCommandResponseProto response = xceiverClient.sendCommand(request, validators);
     return response.getGetBlock();
   }
 
@@ -237,6 +300,10 @@ public final class ContainerProtocolCalls  {
     if (token != null) {
       builder.setEncodedToken(token.encodeToUrlString());
     }
+    String traceId = TracingUtil.exportCurrentSpan();
+    if (traceId != null) {
+      builder.setTraceID(traceId);
+    }
     ContainerCommandRequestProto request = builder.build();
     ContainerCommandResponseProto response =
         xceiverClient.sendCommand(request, getValidatorList());
@@ -248,65 +315,85 @@ public final class ContainerProtocolCalls  {
    *
    * @param xceiverClient client to perform call
    * @param containerBlockData block data to identify container
-   * @param token a token for this block (may be null)
+   * @param eof whether this is the last putBlock for the same block
+   * @param tokenString a serialized token for this block (may be null)
    * @return putBlockResponse
+   * @throws IOException if there is an error while performing the call
+   */
+  public static XceiverClientReply putBlockAsync(XceiverClientSpi xceiverClient,
+                                                 BlockData containerBlockData,
+                                                 boolean eof,
+                                                 String tokenString)
+      throws IOException, InterruptedException, ExecutionException {
+    return putBlockAsync(xceiverClient, containerBlockData, eof, tokenString, true);
+  }
+
+  public static XceiverClientReply putBlockAsync(XceiverClientSpi xceiverClient,
+                                                 BlockData containerBlockData,
+                                                 boolean eof,
+                                                 String tokenString,
+                                                 boolean containerAutoCreate)
+      throws IOException, InterruptedException, ExecutionException {
+    final ContainerCommandRequestProto request = getPutBlockRequest(
+        xceiverClient.getPipeline(), containerBlockData, eof, tokenString,
+        containerAutoCreate);
+    return xceiverClient.sendCommandAsync(request);
+  }
+
+  /**
+   * Calls the container protocol to finalize a container block.
+   *
+   * @param xceiverClient client to perform call
+   * @param blockID block ID to identify block
+   * @param token a token for this block (may be null)
+   * @return FinalizeBlockResponseProto
    * @throws IOException if there is an I/O error while performing the call
    */
-  public static ContainerProtos.PutBlockResponseProto putBlock(
-      XceiverClientSpi xceiverClient, BlockData containerBlockData,
+  public static ContainerProtos.FinalizeBlockResponseProto finalizeBlock(
+      XceiverClientSpi xceiverClient, DatanodeBlockID blockID,
       Token<OzoneBlockTokenIdentifier> token)
       throws IOException {
-    PutBlockRequestProto.Builder createBlockRequest =
-        PutBlockRequestProto.newBuilder().setBlockData(containerBlockData);
+    FinalizeBlockRequestProto.Builder finalizeBlockRequest =
+        FinalizeBlockRequestProto.newBuilder().setBlockID(blockID);
     String id = xceiverClient.getPipeline().getFirstNode().getUuidString();
     ContainerCommandRequestProto.Builder builder =
-        ContainerCommandRequestProto.newBuilder().setCmdType(Type.PutBlock)
-            .setContainerID(containerBlockData.getBlockID().getContainerID())
+        ContainerCommandRequestProto.newBuilder().setCmdType(Type.FinalizeBlock)
+            .setContainerID(blockID.getContainerID())
             .setDatanodeUuid(id)
-            .setPutBlock(createBlockRequest);
+            .setFinalizeBlock(finalizeBlockRequest);
     if (token != null) {
       builder.setEncodedToken(token.encodeToUrlString());
     }
     ContainerCommandRequestProto request = builder.build();
     ContainerCommandResponseProto response =
         xceiverClient.sendCommand(request, getValidatorList());
-    return response.getPutBlock();
-  }
-
-  /**
-   * Calls the container protocol to put a container block.
-   *
-   * @param xceiverClient client to perform call
-   * @param containerBlockData block data to identify container
-   * @param eof whether this is the last putBlock for the same block
-   * @param token a token for this block (may be null)
-   * @return putBlockResponse
-   * @throws IOException if there is an error while performing the call
-   */
-  public static XceiverClientReply putBlockAsync(XceiverClientSpi xceiverClient,
-      BlockData containerBlockData, boolean eof,
-      Token<? extends TokenIdentifier> token)
-      throws IOException, InterruptedException, ExecutionException {
-    final ContainerCommandRequestProto request = getPutBlockRequest(
-        xceiverClient.getPipeline(), containerBlockData, eof, token);
-    return xceiverClient.sendCommandAsync(request);
+    return response.getFinalizeBlock();
   }
 
   public static ContainerCommandRequestProto getPutBlockRequest(
       Pipeline pipeline, BlockData containerBlockData, boolean eof,
-      Token<? extends TokenIdentifier> token) throws IOException {
+      String tokenString) throws IOException {
+    return getPutBlockRequest(pipeline, containerBlockData, eof, tokenString, true);
+  }
+
+  public static ContainerCommandRequestProto getPutBlockRequest(
+      Pipeline pipeline, BlockData containerBlockData, boolean eof,
+      String tokenString, boolean containerAutoCreate) throws IOException {
     PutBlockRequestProto.Builder createBlockRequest =
         PutBlockRequestProto.newBuilder()
             .setBlockData(containerBlockData)
             .setEof(eof);
+    if (!containerAutoCreate) {
+      createBlockRequest.setContainerAutoCreate(false);
+    }
     final String id = pipeline.getFirstNode().getUuidString();
     ContainerCommandRequestProto.Builder builder =
         ContainerCommandRequestProto.newBuilder().setCmdType(Type.PutBlock)
             .setContainerID(containerBlockData.getBlockID().getContainerID())
             .setDatanodeUuid(id)
             .setPutBlock(createBlockRequest);
-    if (token != null) {
-      builder.setEncodedToken(token.encodeToUrlString());
+    if (tokenString != null) {
+      builder.setEncodedToken(tokenString);
     }
     return builder.build();
   }
@@ -323,12 +410,12 @@ public final class ContainerProtocolCalls  {
    * @throws IOException if there is an I/O error while performing the call
    */
   public static ContainerProtos.ReadChunkResponseProto readChunk(
-      XceiverClientSpi xceiverClient, ChunkInfo chunk, BlockID blockID,
+      XceiverClientSpi xceiverClient, ChunkInfo chunk, DatanodeBlockID blockID,
       List<Validator> validators,
       Token<? extends TokenIdentifier> token) throws IOException {
     ReadChunkRequestProto.Builder readChunkRequest =
         ReadChunkRequestProto.newBuilder()
-            .setBlockID(blockID.getDatanodeBlockIDProtobuf())
+            .setBlockID(blockID)
             .setChunkData(chunk)
             .setReadChunkVersion(ContainerProtos.ReadChunkVersion.V1);
     ContainerCommandRequestProto.Builder builder =
@@ -339,21 +426,31 @@ public final class ContainerProtocolCalls  {
       builder.setEncodedToken(token.encodeToUrlString());
     }
 
-    return tryEachDatanode(xceiverClient.getPipeline(),
-        d -> readChunk(xceiverClient, chunk, blockID,
-            validators, builder, d),
-        d -> toErrorMessage(chunk, blockID, d));
+    try (TracingUtil.TraceCloseable ignored = TracingUtil.createActivatedSpan("readChunk")) {
+      Span span = TracingUtil.getActiveSpan();
+      span.setAttribute("offset", chunk.getOffset())
+          .setAttribute("length", chunk.getLen())
+          .setAttribute("block", blockID.toString());
+      return tryEachDatanode(xceiverClient.getPipeline(),
+          d -> readChunk(xceiverClient, chunk, blockID,
+              validators, builder, d),
+          d -> toErrorMessage(chunk, blockID, d));
+    }
   }
 
   private static ContainerProtos.ReadChunkResponseProto readChunk(
-      XceiverClientSpi xceiverClient, ChunkInfo chunk, BlockID blockID,
+      XceiverClientSpi xceiverClient, ChunkInfo chunk, DatanodeBlockID blockID,
       List<Validator> validators,
       ContainerCommandRequestProto.Builder builder,
       DatanodeDetails d) throws IOException {
-    final ContainerCommandRequestProto request = builder
-        .setDatanodeUuid(d.getUuidString()).build();
+    ContainerCommandRequestProto.Builder requestBuilder = builder
+        .setDatanodeUuid(d.getUuidString());
+    String traceId = TracingUtil.exportCurrentSpan();
+    if (traceId != null) {
+      requestBuilder = requestBuilder.setTraceID(traceId);
+    }
     ContainerCommandResponseProto reply =
-        xceiverClient.sendCommand(request, validators);
+        xceiverClient.sendCommand(requestBuilder.build(), validators);
     final ReadChunkResponseProto response = reply.getReadChunk();
     final long readLen = getLen(response);
     if (readLen != chunk.getLen()) {
@@ -363,7 +460,7 @@ public final class ContainerProtocolCalls  {
     return response;
   }
 
-  static String toErrorMessage(ChunkInfo chunk, BlockID blockId,
+  static String toErrorMessage(ChunkInfo chunk, DatanodeBlockID blockId,
       DatanodeDetails d) {
     return String.format("Failed to read chunk %s (len=%s) %s from %s",
         chunk.getChunkName(), chunk.getLen(), blockId, d);
@@ -387,25 +484,41 @@ public final class ContainerProtocolCalls  {
    * @param chunk information about chunk to write
    * @param blockID ID of the block
    * @param data the data of the chunk to write
-   * @param token a token for this block (may be null)
+   * @param tokenString serialized block token
    * @throws IOException if there is an I/O error while performing the call
    */
+  @SuppressWarnings("parameternumber")
   public static XceiverClientReply writeChunkAsync(
       XceiverClientSpi xceiverClient, ChunkInfo chunk, BlockID blockID,
-      ByteString data, Token<? extends TokenIdentifier> token,
-      int replicationIndex
-  )
+      ByteString data, String tokenString,
+      int replicationIndex, BlockData blockData, boolean close)
       throws IOException, ExecutionException, InterruptedException {
-    WriteChunkRequestProto.Builder writeChunkRequest =
-        WriteChunkRequestProto.newBuilder()
-            .setBlockID(DatanodeBlockID.newBuilder()
-                .setContainerID(blockID.getContainerID())
-                .setLocalID(blockID.getLocalID())
-                .setBlockCommitSequenceId(blockID.getBlockCommitSequenceId())
-                .setReplicaIndex(replicationIndex)
-                .build())
-            .setChunkData(chunk)
-            .setData(data);
+    return writeChunkAsync(xceiverClient, chunk, blockID, data, tokenString,
+        replicationIndex, blockData, close, true);
+  }
+
+  @SuppressWarnings("parameternumber")
+  public static XceiverClientReply writeChunkAsync(
+      XceiverClientSpi xceiverClient, ChunkInfo chunk, BlockID blockID,
+      ByteString data, String tokenString,
+      int replicationIndex, BlockData blockData, boolean close,
+      boolean containerAutoCreate)
+      throws IOException, ExecutionException, InterruptedException {
+
+    final WriteChunkRequestProto.Builder writeChunkRequest = WriteChunkRequestProto.newBuilder()
+        .setBlockID(blockID.getDatanodeBlockIDProtobufBuilder(replicationIndex))
+        .setChunkData(chunk)
+        .setData(data);
+    if (blockData != null) {
+      PutBlockRequestProto.Builder createBlockRequest =
+          PutBlockRequestProto.newBuilder()
+              .setBlockData(blockData)
+              .setEof(close);
+      writeChunkRequest.setBlock(createBlockRequest);
+    }
+    if (!containerAutoCreate) {
+      writeChunkRequest.setContainerAutoCreate(false);
+    }
     String id = xceiverClient.getPipeline().getFirstNode().getUuidString();
     ContainerCommandRequestProto.Builder builder =
         ContainerCommandRequestProto.newBuilder()
@@ -413,8 +526,9 @@ public final class ContainerProtocolCalls  {
             .setContainerID(blockID.getContainerID())
             .setDatanodeUuid(id)
             .setWriteChunk(writeChunkRequest);
-    if (token != null) {
-      builder.setEncodedToken(token.encodeToUrlString());
+
+    if (tokenString != null) {
+      builder.setEncodedToken(tokenString);
     }
     ContainerCommandRequestProto request = builder.build();
     return xceiverClient.sendCommandAsync(request);
@@ -507,6 +621,7 @@ public final class ContainerProtocolCalls  {
       String encodedToken) throws IOException {
     createContainer(client, containerID, encodedToken, null, 0);
   }
+
   /**
    * createContainer call that creates a container on the datanode.
    * @param client  - client
@@ -536,6 +651,11 @@ public final class ContainerProtocolCalls  {
     if (encodedToken != null) {
       request.setEncodedToken(encodedToken);
     }
+    String traceId = TracingUtil.exportCurrentSpan();
+    if (traceId != null) {
+      request.setTraceID(traceId);
+    }
+
     request.setCmdType(ContainerProtos.Type.CreateContainer);
     request.setContainerID(containerID);
     request.setCreateContainer(createRequest.build());
@@ -565,6 +685,10 @@ public final class ContainerProtocolCalls  {
     if (encodedToken != null) {
       request.setEncodedToken(encodedToken);
     }
+    String traceId = TracingUtil.exportCurrentSpan();
+    if (traceId != null) {
+      request.setTraceID(traceId);
+    }
     client.sendCommand(request.build(), getValidatorList());
   }
 
@@ -586,6 +710,10 @@ public final class ContainerProtocolCalls  {
     request.setDatanodeUuid(id);
     if (encodedToken != null) {
       request.setEncodedToken(encodedToken);
+    }
+    String traceId = TracingUtil.exportCurrentSpan();
+    if (traceId != null) {
+      request.setTraceID(traceId);
     }
     client.sendCommand(request.build(), getValidatorList());
   }
@@ -609,6 +737,10 @@ public final class ContainerProtocolCalls  {
     request.setDatanodeUuid(id);
     if (encodedToken != null) {
       request.setEncodedToken(encodedToken);
+    }
+    String traceId = TracingUtil.exportCurrentSpan();
+    if (traceId != null) {
+      request.setTraceID(traceId);
     }
     ContainerCommandResponseProto response =
         client.sendCommand(request.build(), getValidatorList());
@@ -645,10 +777,106 @@ public final class ContainerProtocolCalls  {
     if (token != null) {
       builder.setEncodedToken(token.encodeToUrlString());
     }
+    String traceId = TracingUtil.exportCurrentSpan();
+    if (traceId != null) {
+      builder.setTraceID(traceId);
+    }
     ContainerCommandRequestProto request = builder.build();
     ContainerCommandResponseProto response =
         client.sendCommand(request, getValidatorList());
     return response.getGetSmallFile();
+  }
+
+  /**
+   * Send an echo to DataNode.
+   *
+   * @return EchoResponseProto
+   */
+  public static EchoResponseProto echo(XceiverClientSpi client, String encodedContainerID,
+      long containerID, ByteString payloadReqBytes, int payloadRespSizeKB, int sleepTimeMs, boolean readOnly)
+      throws IOException {
+    return echo(client, encodedContainerID, containerID, payloadReqBytes, payloadRespSizeKB,
+        sleepTimeMs, readOnly, null, 0, false);
+  }
+
+  /**
+   * Send an echo to DataNode with clientId and callId in request.
+   *
+   * @return EchoResponseProto
+   */
+  @SuppressWarnings("checkstyle:parameternumber")
+  public static EchoResponseProto echo(XceiverClientSpi client, String encodedContainerID,
+      long containerID, ByteString payloadReqBytes, int payloadRespSizeKB, int sleepTimeMs, boolean readOnly,
+      ByteString clientId, long callID, boolean noValidation) throws IOException {
+    ContainerProtos.EchoRequestProto getEcho =
+        EchoRequestProto
+            .newBuilder()
+            .setPayload(payloadReqBytes)
+            .setPayloadSizeResp(payloadRespSizeKB)
+            .setSleepTimeMs(sleepTimeMs)
+            .setReadOnly(readOnly)
+            .build();
+    String id = client.getPipeline().getClosestNode().getUuidString();
+
+    ContainerCommandRequestProto.Builder builder = ContainerCommandRequestProto
+        .newBuilder()
+        .setCmdType(Type.Echo)
+        .setContainerID(containerID)
+        .setDatanodeUuid(id)
+        .setEcho(getEcho);
+    if (clientId != null) {
+      builder.setClientId(clientId).setCallId(callID);
+    }
+    if (!encodedContainerID.isEmpty()) {
+      builder.setEncodedToken(encodedContainerID);
+    }
+    String traceId = TracingUtil.exportCurrentSpan();
+    if (traceId != null) {
+      builder.setTraceID(traceId);
+    }
+    ContainerCommandRequestProto request = builder.build();
+    ContainerCommandResponseProto response =
+        client.sendCommand(request, noValidation ? new ArrayList<>() : getValidatorList());
+    return response.getEcho();
+  }
+
+  /**
+   * Gets the container checksum info for a container from a datanode. This method does not deserialize the checksum
+   * info.
+   *
+   * @param client - client that communicates with the container
+   * @param containerID - Container Id of the container
+   * @param encodedContainerID - Encoded token if security is enabled
+   *
+   * @throws IOException For errors communicating with the datanode.
+   * @throws StorageContainerException For errors obtaining the checksum info, including the file being missing or
+   * empty on the datanode, or the datanode not having a replica of the container.
+   */
+  public static ContainerProtos.GetContainerChecksumInfoResponseProto getContainerChecksumInfo(
+      XceiverClientSpi client, long containerID, String encodedContainerID) throws IOException {
+    ContainerProtos.GetContainerChecksumInfoRequestProto containerChecksumRequestProto =
+        ContainerProtos.GetContainerChecksumInfoRequestProto
+            .newBuilder()
+            .setContainerID(containerID)
+            .build();
+    String id = client.getPipeline().getClosestNode().getUuidString();
+
+    ContainerCommandRequestProto.Builder builder = ContainerCommandRequestProto
+        .newBuilder()
+        .setCmdType(Type.GetContainerChecksumInfo)
+        .setContainerID(containerID)
+        .setDatanodeUuid(id)
+        .setGetContainerChecksumInfo(containerChecksumRequestProto);
+    if (encodedContainerID != null) {
+      builder.setEncodedToken(encodedContainerID);
+    }
+    String traceId = TracingUtil.exportCurrentSpan();
+    if (traceId != null) {
+      builder.setTraceID(traceId);
+    }
+    ContainerCommandRequestProto request = builder.build();
+    ContainerCommandResponseProto response = client.sendCommand(request, getValidatorList());
+    return response.getGetContainerChecksumInfo();
   }
 
   /**
@@ -674,11 +902,9 @@ public final class ContainerProtocolCalls  {
         response.getMessage(), response.getResult());
   }
 
-  public static List<Validator> getValidatorList() {
+  private static List<Validator> getValidatorList() {
     return VALIDATORS;
   }
-
-  private static final List<Validator> VALIDATORS = createValidators();
 
   private static List<Validator> createValidators() {
     return singletonList(
@@ -692,37 +918,6 @@ public final class ContainerProtocolCalls  {
     validators.addAll(defaults);
     validators.add(validator);
     return Collections.unmodifiableList(validators);
-  }
-
-  public static HashMap<DatanodeDetails, GetBlockResponseProto>
-      getBlockFromAllNodes(
-      XceiverClientSpi xceiverClient,
-      DatanodeBlockID datanodeBlockID,
-      Token<OzoneBlockTokenIdentifier> token)
-      throws IOException, InterruptedException {
-    GetBlockRequestProto.Builder readBlockRequest = GetBlockRequestProto
-            .newBuilder()
-            .setBlockID(datanodeBlockID);
-    HashMap<DatanodeDetails, GetBlockResponseProto> datanodeToResponseMap
-            = new HashMap<>();
-    String id = xceiverClient.getPipeline().getFirstNode().getUuidString();
-    ContainerCommandRequestProto.Builder builder = ContainerCommandRequestProto
-        .newBuilder()
-        .setCmdType(Type.GetBlock)
-        .setContainerID(datanodeBlockID.getContainerID())
-        .setDatanodeUuid(id)
-        .setGetBlock(readBlockRequest);
-    if (token != null) {
-      builder.setEncodedToken(token.encodeToUrlString());
-    }
-    ContainerCommandRequestProto request = builder.build();
-    Map<DatanodeDetails, ContainerCommandResponseProto> responses =
-            xceiverClient.sendCommandOnAllNodes(request);
-    for (Map.Entry<DatanodeDetails, ContainerCommandResponseProto> entry:
-           responses.entrySet()) {
-      datanodeToResponseMap.put(entry.getKey(), entry.getValue().getGetBlock());
-    }
-    return datanodeToResponseMap;
   }
 
   public static HashMap<DatanodeDetails, ReadContainerResponseProto>
@@ -740,6 +935,10 @@ public final class ContainerProtocolCalls  {
     if (encodedToken != null) {
       request.setEncodedToken(encodedToken);
     }
+    String traceId = TracingUtil.exportCurrentSpan();
+    if (traceId != null) {
+      request.setTraceID(traceId);
+    }
     Map<DatanodeDetails, ContainerCommandResponseProto> responses =
         client.sendCommandOnAllNodes(request.build());
     for (Map.Entry<DatanodeDetails, ContainerCommandResponseProto> entry :
@@ -750,4 +949,26 @@ public final class ContainerProtocolCalls  {
     return datanodeToResponseMap;
   }
 
+  public static ContainerCommandRequestProto buildReadBlockCommandProto(
+      BlockID blockID, long offset, long length, int responseDataSize,
+      Token<? extends TokenIdentifier> token, Pipeline pipeline)
+      throws IOException {
+    final DatanodeDetails datanode = pipeline.getClosestNode();
+    final int replicaIndex = pipeline.getReplicaIndex(datanode);
+    final ReadBlockRequestProto.Builder readBlockRequest = ReadBlockRequestProto.newBuilder()
+        .setOffset(offset)
+        .setLength(length)
+        .setResponseDataSize(responseDataSize)
+        .setBlockID(blockID.getDatanodeBlockIDProtobufBuilder(replicaIndex));
+    final ContainerCommandRequestProto.Builder builder =
+        ContainerCommandRequestProto.newBuilder().setCmdType(Type.ReadBlock)
+            .setContainerID(blockID.getContainerID());
+    if (token != null) {
+      builder.setEncodedToken(token.encodeToUrlString());
+    }
+
+    return builder.setDatanodeUuid(datanode.getUuidString())
+        .setReadBlock(readBlockRequest)
+        .build();
+  }
 }

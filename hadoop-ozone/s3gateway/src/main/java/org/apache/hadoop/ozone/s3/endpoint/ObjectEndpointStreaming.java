@@ -1,49 +1,54 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.hadoop.ozone.s3.endpoint;
 
+import static org.apache.hadoop.ozone.audit.AuditLogger.PerformanceStringBuilder;
+import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.INVALID_REQUEST;
+import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.NO_SUCH_UPLOAD;
+import static org.apache.hadoop.ozone.s3.util.S3Utils.validateSignatureHeader;
+import static org.apache.hadoop.ozone.s3.util.S3Utils.wrapInQuotes;
+
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.security.DigestInputStream;
+import java.security.MessageDigest;
+import java.util.Map;
+import java.util.function.Consumer;
+import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.Response;
 import javax.xml.bind.DatatypeConverter;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.hadoop.hdds.client.ReplicationConfig;
+import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.client.OzoneBucket;
-import org.apache.hadoop.ozone.client.io.KeyDataStreamOutput;
-import org.apache.hadoop.ozone.client.io.KeyMetadataAware;
 import org.apache.hadoop.ozone.client.io.OzoneDataStreamOutput;
+import org.apache.hadoop.ozone.om.OmConfig;
 import org.apache.hadoop.ozone.om.exceptions.OMException;
-import org.apache.hadoop.ozone.om.helpers.OmMultipartCommitUploadPartInfo;
+import org.apache.hadoop.ozone.s3.MultiDigestInputStream;
 import org.apache.hadoop.ozone.s3.exception.OS3Exception;
 import org.apache.hadoop.ozone.s3.exception.S3ErrorTable;
 import org.apache.hadoop.ozone.s3.metrics.S3GatewayMetrics;
+import org.apache.hadoop.ozone.s3.util.S3Consts;
+import org.apache.hadoop.ozone.s3.util.S3Utils;
 import org.apache.hadoop.util.Time;
+import org.apache.ratis.util.function.CheckedRunnable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.IOException;
-import java.io.InputStream;
-import java.nio.ByteBuffer;
-import java.security.DigestInputStream;
-import java.util.Map;
-
-import static org.apache.hadoop.ozone.audit.AuditLogger.PerformanceStringBuilder;
-import static org.apache.hadoop.ozone.om.OMConfigKeys.OZONE_OM_ENABLE_FILESYSTEM_PATHS;
-import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.INVALID_REQUEST;
-import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.NO_SUCH_UPLOAD;
 
 /**
  * Key level rest endpoints for Streaming.
@@ -62,12 +67,18 @@ final class ObjectEndpointStreaming {
       OzoneBucket bucket, String keyPath,
       long length, ReplicationConfig replicationConfig,
       int chunkSize, Map<String, String> keyMetadata,
-      DigestInputStream body, PerformanceStringBuilder perf)
+      Map<String, String> tags, MultiDigestInputStream body,
+      HttpHeaders headers, boolean isSignedPayload,
+      PerformanceStringBuilder perf,
+      S3ConditionalRequest.WriteConditions writeConditions,
+      boolean derivedKeyPiggyBacking, Consumer<ByteBuffer> onKeyOpened)
       throws IOException, OS3Exception {
 
     try {
       return putKeyWithStream(bucket, keyPath,
-          length, chunkSize, replicationConfig, keyMetadata, body, perf);
+          length, chunkSize, replicationConfig, keyMetadata, tags, body,
+          headers, isSignedPayload, perf, writeConditions,
+          derivedKeyPiggyBacking, onKeyOpened);
     } catch (IOException ex) {
       LOG.error("Exception occurred in PutObject", ex);
       if (ex instanceof OMException) {
@@ -77,10 +88,12 @@ final class ObjectEndpointStreaming {
               keyPath);
           os3Exception.setErrorMessage("An error occurred (InvalidRequest) " +
               "when calling the PutObject/MPU PartUpload operation: " +
-              OZONE_OM_ENABLE_FILESYSTEM_PATHS + " is enabled Keys are" +
+              OmConfig.Keys.ENABLE_FILESYSTEM_PATHS + " is enabled Keys are" +
               " considered as Unix Paths. Path has Violated FS Semantics " +
               "which caused put operation to fail.");
           throw os3Exception;
+        } else if ((((OMException) ex).getResult() == OMException.ResultCodes.TOKEN_EXPIRED)) {
+          throw S3ErrorTable.newError(S3ErrorTable.EXPIRED_TOKEN, keyPath);
         } else if ((((OMException) ex).getResult() ==
             OMException.ResultCodes.PERMISSION_DENIED)) {
           throw S3ErrorTable.newError(S3ErrorTable.ACCESS_DENIED, keyPath);
@@ -98,105 +111,149 @@ final class ObjectEndpointStreaming {
       int bufferSize,
       ReplicationConfig replicationConfig,
       Map<String, String> keyMetadata,
-      DigestInputStream body, PerformanceStringBuilder perf)
-      throws IOException {
+      Map<String, String> tags,
+      MultiDigestInputStream body,
+      HttpHeaders headers,
+      boolean isSignedPayload,
+      PerformanceStringBuilder perf,
+      S3ConditionalRequest.WriteConditions writeConditions,
+      boolean derivedKeyPiggyBacking, Consumer<ByteBuffer> onKeyOpened)
+      throws IOException, OS3Exception {
     long startNanos = Time.monotonicNowNanos();
+    final String amzContentSha256Header = validateSignatureHeader(headers, keyPath, isSignedPayload);
     long writeLen;
-    String eTag;
-    try (OzoneDataStreamOutput streamOutput = bucket.createStreamKey(keyPath,
-        length, replicationConfig, keyMetadata)) {
+    String md5Hash;
+    try (S3ObjectStreamingWriteGuard writeGuard =
+        new S3ObjectStreamingWriteGuard(openStreamKeyForPut(bucket,
+            keyPath, length, replicationConfig, keyMetadata, tags,
+            writeConditions, derivedKeyPiggyBacking), length, keyPath)) {
       long metadataLatencyNs = METRICS.updatePutKeyMetadataStats(startNanos);
-      writeLen = writeToStreamOutput(streamOutput, body, bufferSize, length);
-      eTag = DatatypeConverter.printHexBinary(body.getMessageDigest().digest())
+      writeGuard.onKeyOpened(onKeyOpened);
+      writeLen = writeGuard.copyFrom(body, bufferSize);
+      md5Hash = DatatypeConverter.printHexBinary(body.getMessageDigest(OzoneConsts.MD5_HASH).digest())
           .toLowerCase();
       perf.appendMetaLatencyNanos(metadataLatencyNs);
-      ((KeyMetadataAware)streamOutput).getMetadata().put("ETag", eTag);
+      writeGuard.getMetadata().put(OzoneConsts.ETAG, md5Hash);
+
+      String clientContentMD5 = headers.getHeaderString(S3Consts.CHECKSUM_HEADER);
+      if (clientContentMD5 != null) {
+        CheckedRunnable<IOException> checkContentMD5Hook = () -> {
+          S3Utils.validateContentMD5(clientContentMD5, md5Hash, keyPath);
+        };
+        writeGuard.addPreCommit(checkContentMD5Hook);
+      }
+
+      // If sha256Digest exists, this request must validate x-amz-content-sha256
+      MessageDigest sha256Digest = body.getMessageDigest(OzoneConsts.FILE_HASH);
+      if (sha256Digest != null) {
+        final String actualSha256 = DatatypeConverter.printHexBinary(
+            sha256Digest.digest()).toLowerCase();
+        CheckedRunnable<IOException> checkSha256Hook = () -> {
+          if (!amzContentSha256Header.equals(actualSha256)) {
+            throw S3ErrorTable.newError(S3ErrorTable.X_AMZ_CONTENT_SHA256_MISMATCH, keyPath);
+          }
+        };
+        writeGuard.addPreCommit(checkSha256Hook);
+      }
     }
-    return Pair.of(eTag, writeLen);
+    return Pair.of(md5Hash, writeLen);
   }
 
   @SuppressWarnings("checkstyle:ParameterNumber")
-  public static long copyKeyWithStream(
+  private static OzoneDataStreamOutput openStreamKeyForPut(OzoneBucket bucket,
+      String keyPath, long length, ReplicationConfig replicationConfig,
+      Map<String, String> keyMetadata, Map<String, String> tags,
+      S3ConditionalRequest.WriteConditions writeConditions,
+      boolean derivedKeyPiggyBacking) throws IOException {
+    // Only signed multi-chunk uploads ask OM to piggyback the derived key; every
+    // other stream PUT passes false.
+    if (writeConditions.hasIfNoneMatch()) {
+      return bucket.createStreamKeyIfNotExists(keyPath, length, replicationConfig, keyMetadata, tags,
+          derivedKeyPiggyBacking);
+    }
+    if (writeConditions.hasIfMatch()) {
+      return bucket.rewriteStreamKeyIfMatch(keyPath, length, writeConditions.getExpectedETag(),
+          replicationConfig, keyMetadata, tags, derivedKeyPiggyBacking);
+    }
+    return bucket.createStreamKey(keyPath, length, replicationConfig, keyMetadata, tags, derivedKeyPiggyBacking);
+  }
+
+  @SuppressWarnings("checkstyle:ParameterNumber")
+  public static CopyResult copyKeyWithStream(
       OzoneBucket bucket,
       String keyPath,
       long length,
       int bufferSize,
       ReplicationConfig replicationConfig,
       Map<String, String> keyMetadata,
-      InputStream body, PerformanceStringBuilder perf, long startNanos)
+      DigestInputStream body, PerformanceStringBuilder perf, long startNanos,
+      Map<String, String> tags,
+      S3ConditionalRequest.WriteConditions writeConditions)
       throws IOException {
-    long writeLen = 0;
-    try (OzoneDataStreamOutput streamOutput = bucket.createStreamKey(keyPath,
-        length, replicationConfig, keyMetadata)) {
+    long writeLen;
+    String eTag;
+    final OzoneDataStreamOutput streamOutput = openStreamKeyForPut(bucket,
+        keyPath, length, replicationConfig, keyMetadata, tags,
+        writeConditions, false);
+    try (S3ObjectStreamingWriteGuard writeGuard =
+        new S3ObjectStreamingWriteGuard(streamOutput, length, keyPath)) {
       long metadataLatencyNs =
           METRICS.updateCopyKeyMetadataStats(startNanos);
+      writeLen = writeGuard.copyFrom(body, bufferSize);
+      eTag = DatatypeConverter.printHexBinary(body.getMessageDigest().digest())
+          .toLowerCase();
       perf.appendMetaLatencyNanos(metadataLatencyNs);
-      writeLen = writeToStreamOutput(streamOutput, body, bufferSize, length);
+      writeGuard.getMetadata().put(OzoneConsts.ETAG, eTag);
     }
-    return writeLen;
-  }
 
-  private static long writeToStreamOutput(OzoneDataStreamOutput streamOutput,
-                                          InputStream body, int bufferSize,
-                                          long length)
-      throws IOException {
-    final byte[] buffer = new byte[bufferSize];
-    long n = 0;
-    while (n < length) {
-      final int toRead = Math.toIntExact(Math.min(bufferSize, length - n));
-      final int readLength = body.read(buffer, 0, toRead);
-      if (readLength == -1) {
-        break;
-      }
-      streamOutput.write(ByteBuffer.wrap(buffer, 0, readLength));
-      n += readLength;
-    }
-    return n;
+    return new CopyResult(eTag, writeLen, streamOutput.getModificationTime());
   }
 
   @SuppressWarnings("checkstyle:ParameterNumber")
   public static Response createMultipartKey(OzoneBucket ozoneBucket, String key,
       long length, int partNumber, String uploadID, int chunkSize,
-      DigestInputStream body, PerformanceStringBuilder perf)
+      MultiDigestInputStream body, PerformanceStringBuilder perf, HttpHeaders headers,
+      boolean derivedKeyPiggyBacking, Consumer<ByteBuffer> onKeyOpened)
       throws IOException, OS3Exception {
     long startNanos = Time.monotonicNowNanos();
     String eTag;
-    // OmMultipartCommitUploadPartInfo can only be gotten after the
-    // OzoneDataStreamOutput is closed, so we need to save the
-    // KeyDataStreamOutput in the OzoneDataStreamOutput and use it to get the
-    // OmMultipartCommitUploadPartInfo after OzoneDataStreamOutput is closed.
-    KeyDataStreamOutput keyDataStreamOutput = null;
     try {
-      try (OzoneDataStreamOutput streamOutput = ozoneBucket
-          .createMultipartStreamKey(key, length, partNumber, uploadID)) {
+      // Only signed multi-chunk uploads ask OM to piggyback the derived key.
+      try (S3ObjectStreamingWriteGuard writeGuard = new S3ObjectStreamingWriteGuard(
+          ozoneBucket.createMultipartStreamKey(key, length, partNumber, uploadID, derivedKeyPiggyBacking),
+          length, key)) {
         long metadataLatencyNs = METRICS.updatePutKeyMetadataStats(startNanos);
-        long putLength =
-            writeToStreamOutput(streamOutput, body, chunkSize, length);
+        writeGuard.onKeyOpened(onKeyOpened);
+        long putLength = writeGuard.copyFrom(body, chunkSize);
         eTag = DatatypeConverter.printHexBinary(
-            body.getMessageDigest().digest()).toLowerCase();
-        ((KeyMetadataAware)streamOutput).getMetadata().put("ETag", eTag);
+            body.getMessageDigest(OzoneConsts.MD5_HASH).digest()).toLowerCase();
+        String clientContentMD5 = headers.getHeaderString(S3Consts.CHECKSUM_HEADER);
+        if (clientContentMD5 != null) {
+          CheckedRunnable<IOException> checkContentMD5Hook = () -> {
+            S3Utils.validateContentMD5(clientContentMD5, eTag, key);
+          };
+          writeGuard.addPreCommit(checkContentMD5Hook);
+        }
+        writeGuard.getMetadata().put(OzoneConsts.ETAG, eTag);
         METRICS.incPutKeySuccessLength(putLength);
         perf.appendMetaLatencyNanos(metadataLatencyNs);
         perf.appendSizeBytes(putLength);
-        keyDataStreamOutput = streamOutput.getKeyDataStreamOutput();
       }
     } catch (OMException ex) {
       if (ex.getResult() ==
           OMException.ResultCodes.NO_SUCH_MULTIPART_UPLOAD_ERROR) {
         throw S3ErrorTable.newError(NO_SUCH_UPLOAD,
             uploadID);
+      } else if (ex.getResult() == OMException.ResultCodes.TOKEN_EXPIRED) {
+        throw S3ErrorTable.newError(S3ErrorTable.EXPIRED_TOKEN, ozoneBucket.getName() + "/" + key);
       } else if (ex.getResult() == OMException.ResultCodes.PERMISSION_DENIED) {
         throw S3ErrorTable.newError(S3ErrorTable.ACCESS_DENIED,
             ozoneBucket.getName() + "/" + key);
       }
       throw ex;
-    } finally {
-      if (keyDataStreamOutput != null) {
-        OmMultipartCommitUploadPartInfo commitUploadPartInfo =
-            keyDataStreamOutput.getCommitUploadPartInfo();
-        eTag = commitUploadPartInfo.getPartName();
-      }
     }
-    return Response.ok().header("ETag", eTag).build();
+    return Response.ok()
+        .header(HttpHeaders.ETAG, wrapInQuotes(eTag))
+        .build();
   }
 }

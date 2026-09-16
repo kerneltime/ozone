@@ -21,13 +21,13 @@ Library             BuiltIn
 Resource            ../commonlib.robot
 Resource            ../ozone-lib/freon.robot
 Test Timeout        5 minutes
+Suite Setup         Get Security Enabled From Config
 
 *** Variables ***
 ${ENDPOINT_URL}       http://recon:9888
 ${API_ENDPOINT_URL}   ${ENDPOINT_URL}/api/v1
-${ADMIN_API_ENDPOINT_URL}   ${API_ENDPOINT_URL}/containers
-${UNHEALTHY_ENDPOINT_URL}   ${API_ENDPOINT_URL}/containers/unhealthy
-${NON_ADMIN_API_ENDPOINT_URL}   ${API_ENDPOINT_URL}/clusterState
+${VOLUME}     vol1
+${BUCKET}     bucket1
 
 *** Keywords ***
 Check if Recon picks up container from OM
@@ -57,6 +57,32 @@ Check http return code
                             Should contain      ${result}       200
                         END
 
+Check if the listKeys api responds OK
+    [Arguments]     ${volume}    ${bucket}
+    Run Keyword if     '${SECURITY_ENABLED}' == 'true'     Kinit as ozone admin
+    ${result} =        Execute         curl --negotiate -u : -LSs ${API_ENDPOINT_URL}/keys/listKeys?startPrefix=/${volume}/${bucket}&limit=1000
+    Should contain  ${result}   "OK"
+    Should contain  ${result}   "keys"
+    Should contain  ${result}   "${volume}"
+    Should contain  ${result}   "${bucket}"
+
+
+Verify admin-only API
+    [arguments]    ${path}
+
+    Execute    kdestroy
+    Check http return code    ${API_ENDPOINT_URL}${path}    401
+
+    kinit as non admin
+    Check http return code    ${API_ENDPOINT_URL}${path}    403
+
+    kinit as ozone admin
+    Check http return code    ${API_ENDPOINT_URL}${path}    200
+
+    kinit as recon admin
+    Check http return code    ${API_ENDPOINT_URL}${path}    200
+
+
 *** Test Cases ***
 Check if Recon picks up OM data
     Execute    ozone sh volume create recon
@@ -67,21 +93,22 @@ Check if Recon picks up OM data
     Execute    ozone sh bucket create recon/api --layout=LEGACY
     Freon OCKG    n=10    args=-s 1025 -v recon -b api
     Wait Until Keyword Succeeds     90sec      10sec        Check if Recon picks up container from OM
+    Wait Until Keyword Succeeds     90sec      10sec        Check if the listKeys api responds OK       recon   api
 
 Check if Recon picks up DN heartbeats
     ${result} =         Execute                             curl --negotiate -u : -LSs ${API_ENDPOINT_URL}/datanodes
                         Should contain      ${result}       datanodes
-                        Should contain      ${result}       datanode_1
-                        Should contain      ${result}       datanode_2
-                        Should contain      ${result}       datanode_3
+                        Should Match Regexp    ${result}    datanode[-_]1
+                        Should Match Regexp    ${result}    datanode[-_]2
+                        Should Match Regexp    ${result}    datanode[-_]3
 
     ${result} =         Execute                             curl --negotiate -u : -LSs ${API_ENDPOINT_URL}/pipelines
                         Should contain      ${result}       pipelines
                         Should contain      ${result}       RATIS
                         Should contain      ${result}       OPEN
-                        Should contain      ${result}       datanode_1
-                        Should contain      ${result}       datanode_2
-                        Should contain      ${result}       datanode_3
+                        Should Match Regexp    ${result}    datanode[-_]1
+                        Should Match Regexp    ${result}    datanode[-_]2
+                        Should Match Regexp    ${result}    datanode[-_]3
 
     ${result} =         Execute                             curl --negotiate -u : -LSs ${API_ENDPOINT_URL}/clusterState
                         Should contain      ${result}       \"totalDatanodes\"
@@ -105,34 +132,13 @@ Check web UI access
     Check http return code      ${ENDPOINT_URL}     200
 
 Check admin only api access
-    Execute    kdestroy
-    Check http return code      ${ADMIN_API_ENDPOINT_URL}       401
-
-    kinit as non admin
-    Check http return code      ${ADMIN_API_ENDPOINT_URL}       403
-
-    kinit as ozone admin
-    Check http return code      ${ADMIN_API_ENDPOINT_URL}       200
-
-    kinit as recon admin
-    Check http return code      ${ADMIN_API_ENDPOINT_URL}       200
-
-Check unhealthy, (admin) api access
-    Execute    kdestroy
-    Check http return code      ${UNHEALTHY_ENDPOINT_URL}       401
-
-    kinit as non admin
-    Check http return code      ${UNHEALTHY_ENDPOINT_URL}       403
-
-    kinit as ozone admin
-    Check http return code      ${UNHEALTHY_ENDPOINT_URL}       200
-
-    kinit as recon admin
-    Check http return code      ${UNHEALTHY_ENDPOINT_URL}       200
-
-Check normal api access
-    Execute    kdestroy
-    Check http return code      ${NON_ADMIN_API_ENDPOINT_URL}   401
-
-    kinit as non admin
-    Check http return code      ${NON_ADMIN_API_ENDPOINT_URL}   200
+    Verify admin-only API    /buckets
+    Verify admin-only API    /clusterState
+    Verify admin-only API    /containers
+    Verify admin-only API    /datanodes
+    Verify admin-only API    /keys/open/summary
+    Verify admin-only API    /pendingDeletion?component=om&limit=1
+    Verify admin-only API    /pipelines
+    Verify admin-only API    /task/status
+    Verify admin-only API    /utilization/fileCount
+    Verify admin-only API    /volumes

@@ -1,14 +1,13 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,55 +17,74 @@
 
 package org.apache.hadoop.ozone.recon.scm;
 
+import static org.apache.hadoop.hdds.recon.ReconConfigKeys.RECON_SCM_CONFIG_PREFIX;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_EVENT_REPORT_EXEC_WAIT_THRESHOLD_DEFAULT;
+import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_EVENT_REPORT_QUEUE_WAIT_THRESHOLD_DEFAULT;
+import static org.apache.hadoop.hdds.scm.server.StorageContainerManager.buildRpcServerStartMessage;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.HDDS_SCM_CLIENT_FAILOVER_MAX_RETRY;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.HDDS_SCM_CLIENT_MAX_RETRY_TIMEOUT;
+import static org.apache.hadoop.ozone.OzoneConfigKeys.HDDS_SCM_CLIENT_RPC_TIME_OUT;
+import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_SCM_CLIENT_FAILOVER_MAX_RETRY_DEFAULT;
+import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_SCM_CLIENT_FAILOVER_MAX_RETRY_KEY;
+import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_SCM_CLIENT_MAX_RETRY_TIMEOUT_DEFAULT;
+import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_SCM_CLIENT_MAX_RETRY_TIMEOUT_KEY;
+import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_SCM_CLIENT_RPC_TIME_OUT_DEFAULT;
+import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_SCM_CLIENT_RPC_TIME_OUT_KEY;
+import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_SCM_CONTAINER_SYNC_TASK_INITIAL_DELAY;
+import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_SCM_CONTAINER_SYNC_TASK_INITIAL_DELAY_DEFAULT;
+import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_SCM_CONTAINER_SYNC_TASK_INTERVAL_DEFAULT;
+import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_SCM_CONTAINER_SYNC_TASK_INTERVAL_DELAY;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import com.google.inject.Inject;
+import com.google.inject.Singleton;
 import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.time.Clock;
 import java.time.ZoneId;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
-import com.google.inject.Singleton;
+import javax.sql.DataSource;
 import org.apache.commons.io.FileUtils;
-import org.apache.hadoop.fs.CommonConfigurationKeys;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.hdds.conf.ReconfigurationHandler;
 import org.apache.hadoop.hdds.protocol.DatanodeDetails;
-import org.apache.hadoop.hdds.protocol.proto.HddsProtos;
+import org.apache.hadoop.hdds.protocol.DatanodeID;
 import org.apache.hadoop.hdds.scm.PlacementPolicy;
 import org.apache.hadoop.hdds.scm.ScmUtils;
 import org.apache.hadoop.hdds.scm.block.BlockManager;
 import org.apache.hadoop.hdds.scm.container.CloseContainerEventHandler;
 import org.apache.hadoop.hdds.scm.container.ContainerActionsHandler;
-import org.apache.hadoop.hdds.scm.container.ContainerInfo;
 import org.apache.hadoop.hdds.scm.container.ContainerManager;
 import org.apache.hadoop.hdds.scm.container.ContainerReportHandler;
 import org.apache.hadoop.hdds.scm.container.IncrementalContainerReportHandler;
-import org.apache.hadoop.hdds.scm.container.common.helpers.ContainerWithPipeline;
-import org.apache.hadoop.hdds.scm.container.replication.ContainerReplicaPendingOps;
-import org.apache.hadoop.hdds.scm.container.replication.ReplicationManager;
 import org.apache.hadoop.hdds.scm.container.balancer.ContainerBalancer;
 import org.apache.hadoop.hdds.scm.container.placement.algorithms.ContainerPlacementPolicyFactory;
 import org.apache.hadoop.hdds.scm.container.placement.algorithms.SCMContainerPlacementMetrics;
+import org.apache.hadoop.hdds.scm.container.replication.ContainerReplicaPendingOps;
+import org.apache.hadoop.hdds.scm.container.replication.ReplicationManager;
 import org.apache.hadoop.hdds.scm.events.SCMEvents;
-import org.apache.hadoop.hdds.scm.ha.SCMHAManagerStub;
 import org.apache.hadoop.hdds.scm.ha.SCMContext;
-import org.apache.hadoop.hdds.scm.ha.SCMNodeDetails;
 import org.apache.hadoop.hdds.scm.ha.SCMHAManager;
+import org.apache.hadoop.hdds.scm.ha.SCMHAManagerStub;
+import org.apache.hadoop.hdds.scm.ha.SCMNodeDetails;
 import org.apache.hadoop.hdds.scm.ha.SequenceIdGenerator;
 import org.apache.hadoop.hdds.scm.metadata.SCMDBTransactionBufferImpl;
+import org.apache.hadoop.hdds.scm.metadata.SCMMetadataStore;
 import org.apache.hadoop.hdds.scm.net.NetworkTopology;
 import org.apache.hadoop.hdds.scm.net.NetworkTopologyImpl;
 import org.apache.hadoop.hdds.scm.node.DeadNodeHandler;
@@ -76,57 +94,39 @@ import org.apache.hadoop.hdds.scm.node.StaleNodeHandler;
 import org.apache.hadoop.hdds.scm.pipeline.Pipeline;
 import org.apache.hadoop.hdds.scm.pipeline.PipelineActionHandler;
 import org.apache.hadoop.hdds.scm.pipeline.PipelineManager;
+import org.apache.hadoop.hdds.scm.safemode.SCMSafeModeManager;
 import org.apache.hadoop.hdds.scm.server.OzoneStorageContainerManager;
+import org.apache.hadoop.hdds.scm.server.SCMDatanodeHeartbeatDispatcher.ContainerReport;
+import org.apache.hadoop.hdds.scm.server.SCMDatanodeHeartbeatDispatcher.ContainerReportFromDatanode;
+import org.apache.hadoop.hdds.scm.server.SCMDatanodeHeartbeatDispatcher.IncrementalContainerReportFromDatanode;
 import org.apache.hadoop.hdds.scm.server.SCMStorageConfig;
 import org.apache.hadoop.hdds.server.events.EventQueue;
 import org.apache.hadoop.hdds.server.events.FixedThreadPoolWithAffinityExecutor;
 import org.apache.hadoop.hdds.upgrade.HDDSLayoutVersionManager;
 import org.apache.hadoop.hdds.utils.IOUtils;
 import org.apache.hadoop.hdds.utils.db.DBCheckpoint;
-import org.apache.hadoop.hdds.utils.db.DBColumnFamilyDefinition;
 import org.apache.hadoop.hdds.utils.db.DBStore;
 import org.apache.hadoop.hdds.utils.db.DBStoreBuilder;
 import org.apache.hadoop.hdds.utils.db.Table;
 import org.apache.hadoop.hdds.utils.db.Table.KeyValue;
 import org.apache.hadoop.hdds.utils.db.TableIterator;
+import org.apache.hadoop.ozone.recon.ReconContext;
 import org.apache.hadoop.ozone.recon.ReconServerConfigKeys;
 import org.apache.hadoop.ozone.recon.ReconUtils;
 import org.apache.hadoop.ozone.recon.fsck.ContainerHealthTask;
+import org.apache.hadoop.ozone.recon.fsck.ReconReplicationManager;
 import org.apache.hadoop.ozone.recon.fsck.ReconSafeModeMgrTask;
+import org.apache.hadoop.ozone.recon.metrics.ReconScmContainerSyncMetrics;
 import org.apache.hadoop.ozone.recon.persistence.ContainerHealthSchemaManager;
 import org.apache.hadoop.ozone.recon.spi.ReconContainerMetadataManager;
 import org.apache.hadoop.ozone.recon.spi.StorageContainerServiceProvider;
 import org.apache.hadoop.ozone.recon.tasks.ContainerSizeCountTask;
 import org.apache.hadoop.ozone.recon.tasks.ReconTaskConfig;
-import com.google.inject.Inject;
-
-import static org.apache.hadoop.hdds.recon.ReconConfigKeys.RECON_SCM_CONFIG_PREFIX;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_EVENT_REPORT_EXEC_WAIT_THRESHOLD_DEFAULT;
-import static org.apache.hadoop.hdds.scm.ScmConfigKeys.OZONE_SCM_EVENT_REPORT_QUEUE_WAIT_THRESHOLD_DEFAULT;
-import static org.apache.hadoop.hdds.scm.server.StorageContainerManager.buildRpcServerStartMessage;
-import static org.apache.hadoop.ozone.OzoneConfigKeys.HDDS_SCM_CLIENT_FAILOVER_MAX_RETRY;
-import static org.apache.hadoop.ozone.OzoneConfigKeys.HDDS_SCM_CLIENT_MAX_RETRY_TIMEOUT;
-import static org.apache.hadoop.ozone.OzoneConfigKeys.HDDS_SCM_CLIENT_RPC_TIME_OUT;
-import static org.apache.hadoop.ozone.OzoneConsts.OZONE_URI_DELIMITER;
-import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_SCM_CLIENT_FAILOVER_MAX_RETRY_DEFAULT;
-import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_SCM_CLIENT_FAILOVER_MAX_RETRY_KEY;
-import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_SCM_CLIENT_MAX_RETRY_TIMEOUT_DEFAULT;
-import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_SCM_CLIENT_MAX_RETRY_TIMEOUT_KEY;
-import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_SCM_CLIENT_RPC_TIME_OUT_DEFAULT;
-import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_SCM_CLIENT_RPC_TIME_OUT_KEY;
-import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_SCM_SNAPSHOT_TASK_INITIAL_DELAY;
-import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_SCM_SNAPSHOT_TASK_INITIAL_DELAY_DEFAULT;
-import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_SCM_SNAPSHOT_TASK_INTERVAL_DEFAULT;
-import static org.apache.hadoop.ozone.recon.ReconServerConfigKeys.OZONE_RECON_SCM_SNAPSHOT_TASK_INTERVAL_DELAY;
-
-import org.apache.hadoop.hdds.scm.server.SCMDatanodeHeartbeatDispatcher.ContainerReport;
-import org.apache.hadoop.hdds.scm.server.SCMDatanodeHeartbeatDispatcher.ContainerReportFromDatanode;
-import org.apache.hadoop.hdds.scm.server.SCMDatanodeHeartbeatDispatcher.IncrementalContainerReportFromDatanode;
-
+import org.apache.hadoop.ozone.recon.tasks.updater.ReconTaskStatusUpdaterManager;
+import org.apache.hadoop.util.Time;
+import org.apache.ozone.recon.schema.UtilizationSchemaDefinition;
+import org.apache.ozone.recon.schema.generated.tables.daos.ContainerCountBySizeDao;
 import org.apache.ratis.util.ExitUtils;
-import org.hadoop.ozone.recon.schema.UtilizationSchemaDefinition;
-import org.hadoop.ozone.recon.schema.tables.daos.ContainerCountBySizeDao;
-import org.hadoop.ozone.recon.schema.tables.daos.ReconTaskStatusDao;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -141,54 +141,214 @@ public class ReconStorageContainerManagerFacade
 
   private static final Logger LOG = LoggerFactory
       .getLogger(ReconStorageContainerManagerFacade.class);
-  public static final long CONTAINER_METADATA_SIZE = 1 * 1024 * 1024L;
 
   private final OzoneConfiguration ozoneConfiguration;
   private final ReconDatanodeProtocolServer datanodeProtocolServer;
   private final EventQueue eventQueue;
   private final SCMContext scmContext;
+  // This will hold the recon related information like health status and errors in initialization of modules if any,
+  // which can later be used for alerts integration or displaying some meaningful info to user on Recon UI.
+  private final ReconContext reconContext;
   private final SCMStorageConfig scmStorageConfig;
   private final SCMNodeDetails reconNodeDetails;
   private final SCMHAManager scmhaManager;
   private final SequenceIdGenerator sequenceIdGen;
+  private final ReconScmTask containerHealthTask;
+  private final DataSource dataSource;
+  private final ContainerHealthSchemaManager containerHealthSchemaManager;
 
   private DBStore dbStore;
   private ReconNodeManager nodeManager;
   private ReconPipelineManager pipelineManager;
   private ReconContainerManager containerManager;
-  private NetworkTopology clusterMap;
   private StorageContainerServiceProvider scmServiceProvider;
   private Set<ReconScmTask> reconScmTasks = new HashSet<>();
-  private SCMContainerPlacementMetrics placementMetrics;
-  private PlacementPolicy containerPlacementPolicy;
-  private HDDSLayoutVersionManager scmLayoutVersionManager;
   private ReconSafeModeManager safeModeManager;
   private ReconSafeModeMgrTask reconSafeModeMgrTask;
   private ContainerSizeCountTask containerSizeCountTask;
   private ContainerCountBySizeDao containerCountBySizeDao;
-  private ScheduledExecutorService scheduler;
+  private ReconReplicationManager reconReplicationManager;
 
   private AtomicBoolean isSyncDataFromSCMRunning;
   private final String threadNamePrefix;
+  private final ReconStorageContainerSyncHelper containerSyncHelper;
+  private final ReconScmContainerSyncMetrics containerSyncMetrics;
+  private final ExecutorService scmSnapshotExecutor;
+  private final Object scmSnapshotLock = new Object();
+  private Future<?> scmSnapshotFuture;
+  private ScmDbSnapshotSyncStatus scmSnapshotStatus =
+      ScmDbSnapshotSyncStatus.IDLE;
+  private ScmDbSnapshotSyncPhase scmSnapshotPhase =
+      ScmDbSnapshotSyncPhase.NONE;
+  private long scmSnapshotStartedAt;
+  private long scmSnapshotFinishedAt;
+  private boolean scmSnapshotCancelAllowed;
+  private boolean scmSnapshotTaskStarted;
+  private String scmSnapshotLastError;
+
+  /**
+   * Status values for an explicitly triggered SCM DB snapshot sync.
+   */
+  public enum ScmDbSnapshotSyncStatus {
+    IDLE,
+    IN_PROGRESS,
+    SUCCESS,
+    FAILED,
+    CANCELLED
+  }
+
+  /**
+   * Phase values for an explicitly triggered SCM DB snapshot sync.
+   */
+  public enum ScmDbSnapshotSyncPhase {
+    NONE,
+    DOWNLOADING_CHECKPOINT,
+    INITIALIZING_DB,
+    SWAPPING_DB,
+    COMPLETED,
+    FAILED,
+    CANCELLED
+  }
+
+  /**
+   * Response payload for the SCM DB snapshot sync status endpoint.
+   */
+  public static final class ScmDbSnapshotStatusResponse {
+    private final ScmDbSnapshotSyncStatus status;
+    private final ScmDbSnapshotSyncPhase phase;
+    private final long startedAt;
+    private final long finishedAt;
+    private final long durationMs;
+    private final boolean cancelAllowed;
+    private final String lastError;
+
+    public ScmDbSnapshotStatusResponse(ScmDbSnapshotSyncStatus status,
+        ScmDbSnapshotSyncPhase phase, long startedAt, long finishedAt,
+        boolean cancelAllowed, String lastError) {
+      this.status = status;
+      this.phase = phase;
+      this.startedAt = startedAt;
+      this.finishedAt = finishedAt;
+      long endTime = finishedAt > 0 ? finishedAt : System.currentTimeMillis();
+      this.durationMs = startedAt > 0 ? endTime - startedAt : 0;
+      this.cancelAllowed = cancelAllowed;
+      this.lastError = lastError;
+    }
+
+    public ScmDbSnapshotSyncStatus getStatus() {
+      return status;
+    }
+
+    public ScmDbSnapshotSyncPhase getPhase() {
+      return phase;
+    }
+
+    public long getStartedAt() {
+      return startedAt;
+    }
+
+    public long getFinishedAt() {
+      return finishedAt;
+    }
+
+    public long getDurationMs() {
+      return durationMs;
+    }
+
+    public boolean isCancelAllowed() {
+      return cancelAllowed;
+    }
+
+    public String getLastError() {
+      return lastError;
+    }
+  }
+
+  /**
+   * Response payload for the SCM DB snapshot sync trigger endpoint.
+   */
+  public static final class ScmDbSnapshotTriggerResponse {
+    private final boolean accepted;
+    private final ScmDbSnapshotSyncStatus status;
+    private final String message;
+
+    public ScmDbSnapshotTriggerResponse(boolean accepted,
+        ScmDbSnapshotSyncStatus status, String message) {
+      this.accepted = accepted;
+      this.status = status;
+      this.message = message;
+    }
+
+    public boolean isAccepted() {
+      return accepted;
+    }
+
+    public ScmDbSnapshotSyncStatus getStatus() {
+      return status;
+    }
+
+    public String getMessage() {
+      return message;
+    }
+  }
+
+  /**
+   * Response payload for the SCM DB snapshot sync cancellation endpoint.
+   */
+  public static final class ScmDbSnapshotCancelResponse {
+    private final boolean cancelled;
+    private final ScmDbSnapshotSyncStatus status;
+    private final ScmDbSnapshotSyncPhase phase;
+    private final String message;
+
+    public ScmDbSnapshotCancelResponse(boolean cancelled,
+        ScmDbSnapshotSyncStatus status, ScmDbSnapshotSyncPhase phase,
+        String message) {
+      this.cancelled = cancelled;
+      this.status = status;
+      this.phase = phase;
+      this.message = message;
+    }
+
+    public boolean isCancelled() {
+      return cancelled;
+    }
+
+    public ScmDbSnapshotSyncStatus getStatus() {
+      return status;
+    }
+
+    public ScmDbSnapshotSyncPhase getPhase() {
+      return phase;
+    }
+
+    public String getMessage() {
+      return message;
+    }
+  }
 
   // To Do :- Refactor the constructor in a separate JIRA
   @Inject
   @SuppressWarnings({"checkstyle:ParameterNumber", "checkstyle:MethodLength"})
   public ReconStorageContainerManagerFacade(OzoneConfiguration conf,
-      StorageContainerServiceProvider scmServiceProvider,
-      ReconTaskStatusDao reconTaskStatusDao,
-      ContainerCountBySizeDao containerCountBySizeDao,
-      UtilizationSchemaDefinition utilizationSchemaDefinition,
-      ContainerHealthSchemaManager containerHealthSchemaManager,
-      ReconContainerMetadataManager reconContainerMetadataManager,
-      ReconUtils reconUtils,
-      ReconSafeModeManager safeModeManager) throws IOException {
+                                            StorageContainerServiceProvider scmServiceProvider,
+                                            ContainerCountBySizeDao containerCountBySizeDao,
+                                            UtilizationSchemaDefinition utilizationSchemaDefinition,
+                                            ReconContainerMetadataManager reconContainerMetadataManager,
+                                            ReconUtils reconUtils,
+                                            ReconSafeModeManager safeModeManager,
+                                            ReconContext reconContext,
+                                            DataSource dataSource,
+                                            ReconTaskStatusUpdaterManager taskStatusUpdaterManager,
+                                            ContainerHealthSchemaManager containerHealthSchemaManager)
+      throws IOException {
     reconNodeDetails = reconUtils.getReconNodeDetails(conf);
     this.threadNamePrefix = reconNodeDetails.threadNamePrefix();
     this.eventQueue = new EventQueue(threadNamePrefix);
     eventQueue.setSilent(true);
+    this.reconContext = reconContext;
     this.scmContext = new SCMContext.Builder()
-        .setIsPreCheckComplete(true)
+        .setSafeModeStatus(SCMSafeModeManager.SafeModeStatus.OUT_OF_SAFE_MODE)
         .setSCM(this)
         .build();
     this.ozoneConfiguration = getReconScmConfiguration(conf);
@@ -210,24 +370,23 @@ public class ReconStorageContainerManagerFacade
         scmClientFailOverMaxRetryCount);
 
     this.scmStorageConfig = new ReconStorageConfig(conf, reconUtils);
-    this.clusterMap = new NetworkTopologyImpl(conf);
-    this.dbStore = DBStoreBuilder
-        .createDBStore(ozoneConfiguration, new ReconSCMDBDefinition());
+    NetworkTopology clusterMap = new NetworkTopologyImpl(conf);
+    this.dbStore = DBStoreBuilder.createDBStore(ozoneConfiguration, ReconSCMDBDefinition.get());
 
-    this.scmLayoutVersionManager =
+    HDDSLayoutVersionManager scmLayoutVersionManager =
         new HDDSLayoutVersionManager(scmStorageConfig.getLayoutVersion());
     this.scmhaManager = SCMHAManagerStub.getInstance(
         true, new SCMDBTransactionBufferImpl());
     this.sequenceIdGen = new SequenceIdGenerator(
         conf, scmhaManager, ReconSCMDBDefinition.SEQUENCE_ID.getTable(dbStore));
+    reconContext.setClusterId(scmStorageConfig.getClusterID());
     this.nodeManager =
         new ReconNodeManager(conf, scmStorageConfig, eventQueue, clusterMap,
             ReconSCMDBDefinition.NODES.getTable(dbStore),
-            this.scmLayoutVersionManager);
-    placementMetrics = SCMContainerPlacementMetrics.create();
-    this.containerPlacementPolicy =
-        ContainerPlacementPolicyFactory.getPolicy(conf, nodeManager,
-            clusterMap, true, placementMetrics);
+            scmLayoutVersionManager, reconContext);
+    SCMContainerPlacementMetrics placementMetrics = SCMContainerPlacementMetrics.create();
+    PlacementPolicy containerPlacementPolicy = ContainerPlacementPolicyFactory.getPolicy(conf, nodeManager,
+        clusterMap, true, placementMetrics);
     this.datanodeProtocolServer = new ReconDatanodeProtocolServer(
         conf, this, eventQueue);
     this.pipelineManager = ReconPipelineManager.newReconPipelineManager(
@@ -237,15 +396,22 @@ public class ReconStorageContainerManagerFacade
         scmhaManager,
         scmContext);
     ContainerReplicaPendingOps pendingOps = new ContainerReplicaPendingOps(
-        Clock.system(ZoneId.systemDefault()));
+        Clock.system(ZoneId.systemDefault()),
+        conf.getObject(ReplicationManager.ReplicationManagerConfiguration.class));
     this.containerManager = new ReconContainerManager(conf,
         dbStore,
         ReconSCMDBDefinition.CONTAINERS.getTable(dbStore),
         pipelineManager, scmServiceProvider,
-        containerHealthSchemaManager, reconContainerMetadataManager,
+        containerHealthSchemaManager,
+        reconContainerMetadataManager,
         scmhaManager, sequenceIdGen, pendingOps);
     this.scmServiceProvider = scmServiceProvider;
     this.isSyncDataFromSCMRunning = new AtomicBoolean();
+    this.scmSnapshotExecutor = Executors.newSingleThreadExecutor(
+        new ThreadFactoryBuilder()
+            .setNameFormat(threadNamePrefix + "-SCM-Snapshot-Trigger-%d")
+            .setDaemon(true)
+            .build());
     this.containerCountBySizeDao = containerCountBySizeDao;
     NodeReportHandler nodeReportHandler =
         new NodeReportHandler(nodeManager);
@@ -256,34 +422,55 @@ public class ReconStorageContainerManagerFacade
             pipelineManager, scmContext, conf, scmServiceProvider);
 
     PipelineActionHandler pipelineActionHandler =
-        new PipelineActionHandler(pipelineManager, scmContext, conf);
+        new PipelineActionHandler(pipelineManager, scmContext);
 
     ReconTaskConfig reconTaskConfig = conf.getObject(ReconTaskConfig.class);
-    PipelineSyncTask pipelineSyncTask = new PipelineSyncTask(
-        pipelineManager,
-        nodeManager,
-        scmServiceProvider,
-        reconTaskStatusDao,
-        reconTaskConfig);
-    ContainerHealthTask containerHealthTask = new ContainerHealthTask(
-        containerManager, scmServiceProvider, reconTaskStatusDao,
-        containerHealthSchemaManager, containerPlacementPolicy, reconTaskConfig,
-        reconContainerMetadataManager);
+    PipelineSyncTask pipelineSyncTask = new PipelineSyncTask(pipelineManager, nodeManager,
+        scmServiceProvider, reconTaskConfig, taskStatusUpdaterManager);
 
-    this.containerSizeCountTask = new ContainerSizeCountTask(
-        containerManager,
-        scmServiceProvider,
-        reconTaskStatusDao,
+    // Create ContainerHealthTask (always runs, writes to UNHEALTHY_CONTAINERS)
+    LOG.info("Creating ContainerHealthTask");
+    containerHealthTask = new ContainerHealthTask(
         reconTaskConfig,
-        containerCountBySizeDao,
-        utilizationSchemaDefinition);
+        taskStatusUpdaterManager,
+        this  // ReconStorageContainerManagerFacade - provides access to ReconReplicationManager
+    );
+
+    this.containerSizeCountTask = new ContainerSizeCountTask(containerManager,
+        reconTaskConfig, containerCountBySizeDao, utilizationSchemaDefinition, taskStatusUpdaterManager);
+
+    this.containerHealthSchemaManager = containerHealthSchemaManager;
+    this.dataSource = dataSource;
+
+    // Initialize Recon's ReplicationManager for local health checks
+    try {
+      LOG.info("Creating ReconReplicationManager");
+      this.reconReplicationManager = new ReconReplicationManager(
+          ReconReplicationManager.InitContext.newBuilder()
+              .setRmConf(conf.getObject(ReplicationManager.ReplicationManagerConfiguration.class))
+              .setConf(conf)
+              .setContainerManager(containerManager)
+              // Use same placement policy for both Ratis and EC in Recon.
+              .setRatisContainerPlacement(containerPlacementPolicy)
+              .setEcContainerPlacement(containerPlacementPolicy)
+              .setEventPublisher(eventQueue)
+              .setScmContext(scmContext)
+              .setNodeManager(nodeManager)
+              .setClock(Clock.system(ZoneId.systemDefault()))
+              .build(),
+          containerHealthSchemaManager
+      );
+      LOG.info("Successfully created ReconReplicationManager");
+    } catch (IOException e) {
+      LOG.error("Failed to create ReconReplicationManager", e);
+      throw e;
+    }
 
     StaleNodeHandler staleNodeHandler =
-        new ReconStaleNodeHandler(nodeManager, pipelineManager, conf,
-            pipelineSyncTask);
+        new ReconStaleNodeHandler(nodeManager, pipelineManager, pipelineSyncTask);
     DeadNodeHandler deadNodeHandler = new ReconDeadNodeHandler(nodeManager,
         pipelineManager, containerManager, scmServiceProvider,
-        containerHealthTask, pipelineSyncTask, containerSizeCountTask);
+        containerHealthTask, pipelineSyncTask);
 
     ContainerReportHandler containerReportHandler =
         new ReconContainerReportHandler(nodeManager, containerManager);
@@ -356,6 +543,14 @@ public class ReconStorageContainerManagerFacade
     reconSafeModeMgrTask = new ReconSafeModeMgrTask(
         containerManager, nodeManager, safeModeManager,
         reconTaskConfig, ozoneConfiguration);
+
+    containerSyncMetrics = ReconScmContainerSyncMetrics.create();
+    containerSyncHelper = new ReconStorageContainerSyncHelper(
+        scmServiceProvider,
+        ozoneConfiguration,
+        containerManager,
+        containerSyncMetrics
+    );
   }
 
   /**
@@ -389,9 +584,9 @@ public class ReconStorageContainerManagerFacade
           "Recon ScmDatanodeProtocol RPC server",
           getDatanodeProtocolServer().getDatanodeRpcAddress()));
     }
-    scheduler = Executors.newScheduledThreadPool(1,
+    ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1,
         new ThreadFactoryBuilder().setNameFormat(threadNamePrefix +
-                "SyncSCMContainerInfo-%d")
+                                                     "SyncSCMContainerInfo-%d")
             .build());
     boolean isSCMSnapshotEnabled = ozoneConfiguration.getBoolean(
         ReconServerConfigKeys.OZONE_RECON_SCM_SNAPSHOT_ENABLED,
@@ -402,40 +597,47 @@ public class ReconStorageContainerManagerFacade
     } else {
       initializePipelinesFromScm();
     }
-    LOG.debug("Started the SCM Container Info sync scheduler.");
-    long interval = ozoneConfiguration.getTimeDuration(
-        OZONE_RECON_SCM_SNAPSHOT_TASK_INTERVAL_DELAY,
-        OZONE_RECON_SCM_SNAPSHOT_TASK_INTERVAL_DEFAULT, TimeUnit.MILLISECONDS);
-    long initialDelay = ozoneConfiguration.getTimeDuration(
-        OZONE_RECON_SCM_SNAPSHOT_TASK_INITIAL_DELAY,
-        OZONE_RECON_SCM_SNAPSHOT_TASK_INITIAL_DELAY_DEFAULT,
+    // -----------------------------------------------------------------------
+    // Scheduler (SCM container sync): runs on the configured interval.
+    // Each cycle directly runs SCM container reconciliation. The sync itself already
+    // fetches the SCM state counts needed for pagination, so a separate drift
+    // preflight would duplicate SCM calls before doing the same work.
+    // -----------------------------------------------------------------------
+    long syncInterval = ozoneConfiguration.getTimeDuration(
+        OZONE_RECON_SCM_CONTAINER_SYNC_TASK_INTERVAL_DELAY,
+        OZONE_RECON_SCM_CONTAINER_SYNC_TASK_INTERVAL_DEFAULT, TimeUnit.MILLISECONDS);
+    long syncInitialDelay = ozoneConfiguration.getTimeDuration(
+        OZONE_RECON_SCM_CONTAINER_SYNC_TASK_INITIAL_DELAY,
+        OZONE_RECON_SCM_CONTAINER_SYNC_TASK_INITIAL_DELAY_DEFAULT,
         TimeUnit.MILLISECONDS);
-    // This periodic sync with SCM container cache is needed because during
-    // the window when recon will be down and any container being added
-    // newly and went missing, that container will not be reported as missing by
-    // recon till there is a difference of container count equivalent to
-    // threshold value defined in "ozone.recon.scm.container.threshold"
-    // between SCM container cache and recon container cache.
+    LOG.debug("Started the SCM Container Info sync scheduler (interval={}ms, initialDelay={}ms).",
+        syncInterval, syncInitialDelay);
     scheduler.scheduleWithFixedDelay(() -> {
+      if (!isSyncDataFromSCMRunning.compareAndSet(false, true)) {
+        LOG.debug("SCM container info sync is already running; skipping this cycle.");
+        return;
+      }
       try {
-        boolean isSuccess = syncWithSCMContainerInfo();
-        if (!isSuccess) {
-          LOG.debug("SCM container info sync is already running.");
+        boolean success = runScmContainerSyncWithMetrics();
+        if (!success) {
+          LOG.warn("SCM container sync completed with one or more phase failures. "
+              + "Check logs above for details.");
         }
       } catch (Throwable t) {
-        LOG.error("Unexpected exception while syncing data from SCM.", t);
+        LOG.error("Unexpected exception during periodic SCM container sync.", t);
       } finally {
         isSyncDataFromSCMRunning.compareAndSet(true, false);
       }
     },
-        initialDelay,
-        interval,
+        syncInitialDelay,
+        syncInterval,
         TimeUnit.MILLISECONDS);
     getDatanodeProtocolServer().start();
     reconSafeModeMgrTask.start();
     if (!this.safeModeManager.getInSafeMode()) {
       this.reconScmTasks.forEach(ReconScmTask::start);
     }
+    LOG.info("Successfully started Recon Storage Container Manager.");
   }
 
   /**
@@ -465,10 +667,11 @@ public class ReconStorageContainerManagerFacade
       LOG.error("SCM Event Queue stop failed", ex);
     }
     IOUtils.cleanupWithLogger(LOG, nodeManager);
-    IOUtils.cleanupWithLogger(LOG, containerManager);
     IOUtils.cleanupWithLogger(LOG, pipelineManager);
     LOG.info("Flushing container replica history to DB.");
     containerManager.flushReplicaHistoryMapToDB(true);
+    containerSyncMetrics.unRegister();
+    scmSnapshotExecutor.shutdownNow();
     IOUtils.close(LOG, dbStore);
   }
 
@@ -511,127 +714,277 @@ public class ReconStorageContainerManagerFacade
       }
     } catch (IOException e) {
       LOG.error("Exception encountered while getting SCM DB.");
-    } finally {
-      isSyncDataFromSCMRunning.compareAndSet(true, false);
+      reconContext.updateHealthStatus(new AtomicBoolean(false));
+      reconContext.updateErrors(ReconContext.ErrorCode.INTERNAL_ERROR);
     }
   }
 
   public void updateReconSCMDBWithNewSnapshot() throws IOException {
     if (isSyncDataFromSCMRunning.compareAndSet(false, true)) {
-      DBCheckpoint dbSnapshot = scmServiceProvider.getSCMDBSnapshot();
-      if (dbSnapshot != null && dbSnapshot.getCheckpointLocation() != null) {
-        LOG.info("Got new checkpoint from SCM : " +
-            dbSnapshot.getCheckpointLocation());
-        try {
-          initializeNewRdbStore(dbSnapshot.getCheckpointLocation().toFile());
-        } catch (IOException e) {
-          LOG.error("Unable to refresh Recon SCM DB Snapshot. ", e);
-        }
-      } else {
-        LOG.error("Null snapshot location got from SCM.");
+      try {
+        updateReconSCMDBWithNewSnapshotWithoutGuard();
+      } finally {
+        isSyncDataFromSCMRunning.compareAndSet(true, false);
       }
     } else {
       LOG.warn("SCM DB sync is already running.");
     }
   }
 
-  public boolean syncWithSCMContainerInfo()
+  private void updateReconSCMDBWithNewSnapshotWithoutGuard()
       throws IOException {
+    DBCheckpoint dbSnapshot = scmServiceProvider.getSCMDBSnapshot();
+    if (dbSnapshot != null && dbSnapshot.getCheckpointLocation() != null) {
+      LOG.info("Got new checkpoint from SCM : {}",
+          dbSnapshot.getCheckpointLocation());
+      initializeNewRdbStore(dbSnapshot.getCheckpointLocation().toFile());
+    } else {
+      throw new IOException("Null snapshot location got from SCM.");
+    }
+  }
+
+  public ScmDbSnapshotTriggerResponse triggerScmDbSnapshotSync() {
+    synchronized (scmSnapshotLock) {
+      if (!isSyncDataFromSCMRunning.compareAndSet(false, true)) {
+        return new ScmDbSnapshotTriggerResponse(false, scmSnapshotStatus,
+            "SCM DB sync is already running.");
+      }
+      scmSnapshotStatus = ScmDbSnapshotSyncStatus.IN_PROGRESS;
+      scmSnapshotPhase = ScmDbSnapshotSyncPhase.DOWNLOADING_CHECKPOINT;
+      scmSnapshotStartedAt = System.currentTimeMillis();
+      scmSnapshotFinishedAt = 0;
+      scmSnapshotCancelAllowed = true;
+      scmSnapshotTaskStarted = false;
+      scmSnapshotLastError = null;
+      scmSnapshotFuture = scmSnapshotExecutor.submit(this::runScmSnapshotSync);
+      return new ScmDbSnapshotTriggerResponse(true, scmSnapshotStatus,
+          "SCM DB snapshot sync started.");
+    }
+  }
+
+  public ScmDbSnapshotStatusResponse getScmDbSnapshotSyncStatus() {
+    synchronized (scmSnapshotLock) {
+      return new ScmDbSnapshotStatusResponse(scmSnapshotStatus,
+          scmSnapshotPhase, scmSnapshotStartedAt, scmSnapshotFinishedAt,
+          scmSnapshotCancelAllowed, scmSnapshotLastError);
+    }
+  }
+
+  public ScmDbSnapshotCancelResponse cancelScmDbSnapshotSync() {
+    synchronized (scmSnapshotLock) {
+      if (scmSnapshotStatus != ScmDbSnapshotSyncStatus.IN_PROGRESS) {
+        return new ScmDbSnapshotCancelResponse(false, scmSnapshotStatus,
+            scmSnapshotPhase, "No SCM DB snapshot sync is running.");
+      }
+      if (!scmSnapshotCancelAllowed) {
+        return new ScmDbSnapshotCancelResponse(false, scmSnapshotStatus,
+            scmSnapshotPhase,
+            "Cancellation is not allowed after DB initialization has started.");
+      }
+      boolean cancelled = scmSnapshotFuture != null &&
+          scmSnapshotFuture.cancel(true);
+      if (cancelled) {
+        scmSnapshotStatus = ScmDbSnapshotSyncStatus.CANCELLED;
+        scmSnapshotPhase = ScmDbSnapshotSyncPhase.CANCELLED;
+        scmSnapshotFinishedAt = System.currentTimeMillis();
+        scmSnapshotCancelAllowed = false;
+        if (!scmSnapshotTaskStarted) {
+          isSyncDataFromSCMRunning.compareAndSet(true, false);
+        }
+      }
+      return new ScmDbSnapshotCancelResponse(cancelled, scmSnapshotStatus,
+          scmSnapshotPhase, cancelled ? "SCM DB snapshot sync cancelled." :
+          "Unable to cancel SCM DB snapshot sync.");
+    }
+  }
+
+  private void runScmSnapshotSync() {
+    File checkpointLocation = null;
+    boolean initialized = false;
+    try {
+      synchronized (scmSnapshotLock) {
+        scmSnapshotTaskStarted = true;
+        if (scmSnapshotStatus == ScmDbSnapshotSyncStatus.CANCELLED) {
+          return;
+        }
+      }
+      DBCheckpoint dbSnapshot = scmServiceProvider.getSCMDBSnapshot();
+      if (Thread.currentThread().isInterrupted()) {
+        throw new InterruptedException("SCM DB snapshot sync interrupted.");
+      }
+      if (dbSnapshot == null || dbSnapshot.getCheckpointLocation() == null) {
+        throw new IOException("Null snapshot location got from SCM.");
+      }
+      checkpointLocation = dbSnapshot.getCheckpointLocation().toFile();
+      synchronized (scmSnapshotLock) {
+        if (scmSnapshotStatus == ScmDbSnapshotSyncStatus.CANCELLED) {
+          return;
+        }
+        scmSnapshotPhase = ScmDbSnapshotSyncPhase.INITIALIZING_DB;
+        scmSnapshotCancelAllowed = false;
+      }
+      initializeNewRdbStore(checkpointLocation);
+      initialized = true;
+      synchronized (scmSnapshotLock) {
+        scmSnapshotStatus = ScmDbSnapshotSyncStatus.SUCCESS;
+        scmSnapshotPhase = ScmDbSnapshotSyncPhase.COMPLETED;
+        scmSnapshotFinishedAt = System.currentTimeMillis();
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      markScmSnapshotCancelled();
+    } catch (Throwable t) {
+      LOG.error("Unable to refresh Recon SCM DB Snapshot.", t);
+      synchronized (scmSnapshotLock) {
+        if (scmSnapshotStatus != ScmDbSnapshotSyncStatus.CANCELLED) {
+          scmSnapshotStatus = ScmDbSnapshotSyncStatus.FAILED;
+          scmSnapshotPhase = ScmDbSnapshotSyncPhase.FAILED;
+          scmSnapshotLastError = t.getMessage();
+          scmSnapshotFinishedAt = System.currentTimeMillis();
+        }
+      }
+    } finally {
+      cleanupFailedOrCancelledCheckpoint(checkpointLocation, initialized);
+      synchronized (scmSnapshotLock) {
+        scmSnapshotCancelAllowed = false;
+      }
+      isSyncDataFromSCMRunning.compareAndSet(true, false);
+    }
+  }
+
+  private void markScmSnapshotCancelled() {
+    synchronized (scmSnapshotLock) {
+      scmSnapshotStatus = ScmDbSnapshotSyncStatus.CANCELLED;
+      scmSnapshotPhase = ScmDbSnapshotSyncPhase.CANCELLED;
+      scmSnapshotFinishedAt = System.currentTimeMillis();
+      scmSnapshotCancelAllowed = false;
+    }
+  }
+
+  private void cleanupFailedOrCancelledCheckpoint(File checkpointLocation,
+      boolean initialized) {
+    if (checkpointLocation == null || initialized) {
+      return;
+    }
+    synchronized (scmSnapshotLock) {
+      if (scmSnapshotStatus != ScmDbSnapshotSyncStatus.FAILED &&
+          scmSnapshotStatus != ScmDbSnapshotSyncStatus.CANCELLED) {
+        return;
+      }
+    }
+    try {
+      FileUtils.deleteDirectory(checkpointLocation);
+    } catch (IOException e) {
+      LOG.warn("Unable to clean up SCM DB snapshot checkpoint directory {}.",
+          checkpointLocation, e);
+    }
+  }
+
+  /**
+   * Runs targeted reconciliation immediately rather than waiting for the next
+   * scheduled cycle.
+   */
+  public boolean triggerSCMContainerSync() {
     if (isSyncDataFromSCMRunning.compareAndSet(false, true)) {
       try {
-        List<ContainerInfo> containers = containerManager.getContainers();
-
-        long totalContainerCount = scmServiceProvider.getContainerCount(
-            HddsProtos.LifeCycleState.CLOSED);
-        long containerCountPerCall =
-            getContainerCountPerCall(totalContainerCount);
-        long startContainerId = 1;
-        long retrievedContainerCount = 0;
-        if (totalContainerCount > 0) {
-          while (retrievedContainerCount < totalContainerCount) {
-            List<ContainerInfo> listOfContainers = scmServiceProvider.
-                getListOfContainers(startContainerId,
-                    Long.valueOf(containerCountPerCall).intValue(),
-                    HddsProtos.LifeCycleState.CLOSED);
-            if (null != listOfContainers && listOfContainers.size() > 0) {
-              LOG.info("Got list of containers from SCM : " +
-                  listOfContainers.size());
-              listOfContainers.forEach(containerInfo -> {
-                long containerID = containerInfo.getContainerID();
-                boolean isContainerPresentAtRecon =
-                    containers.contains(containerInfo);
-                if (!isContainerPresentAtRecon) {
-                  try {
-                    ContainerWithPipeline containerWithPipeline =
-                        scmServiceProvider.getContainerWithPipeline(
-                            containerID);
-                    containerManager.addNewContainer(containerWithPipeline);
-                  } catch (IOException e) {
-                    LOG.error("Could not get container with pipeline " +
-                        "for container : {}", containerID);
-                  }
-                }
-              });
-              startContainerId = listOfContainers.get(
-                  listOfContainers.size() - 1).getContainerID() + 1;
-            } else {
-              LOG.info("No containers found at SCM in CLOSED state");
-              return false;
-            }
-            retrievedContainerCount += containerCountPerCall;
-          }
-        }
-      } catch (IOException e) {
-        LOG.error("Unable to refresh Recon SCM DB Snapshot. ", e);
-        return false;
+        return runScmContainerSyncWithMetrics();
+      } finally {
+        isSyncDataFromSCMRunning.compareAndSet(true, false);
       }
     } else {
       LOG.debug("SCM DB sync is already running.");
       return false;
     }
-    return true;
   }
 
-  private long getContainerCountPerCall(long totalContainerCount) {
-    // Assumption of size of 1 container info object here is 1 MB
-    long containersMetaDataTotalRpcRespSizeMB =
-        CONTAINER_METADATA_SIZE * totalContainerCount;
-    long hadoopRPCSize = ozoneConfiguration.getInt(
-        CommonConfigurationKeys.IPC_MAXIMUM_DATA_LENGTH,
-        CommonConfigurationKeys.IPC_MAXIMUM_DATA_LENGTH_DEFAULT);
-    long containerCountPerCall = containersMetaDataTotalRpcRespSizeMB <=
-        hadoopRPCSize ? totalContainerCount :
-        Math.round(Math.floor(
-            hadoopRPCSize / (double) CONTAINER_METADATA_SIZE));
-    return containerCountPerCall;
-  }
-
-  private void deleteOldSCMDB() throws IOException {
-    if (dbStore != null) {
-      File oldDBLocation = dbStore.getDbLocation();
-      if (oldDBLocation.exists()) {
-        LOG.info("Cleaning up old SCM snapshot db at {}.",
-            oldDBLocation.getAbsolutePath());
-        FileUtils.deleteDirectory(oldDBLocation);
-      }
+  private boolean runScmContainerSyncWithMetrics() {
+    long startTime = Time.monotonicNow();
+    containerSyncMetrics.setScmContainerSyncStatus(
+        ReconScmContainerSyncMetrics.SCM_CONTAINER_SYNC_STATUS_IN_PROGRESS);
+    try {
+      boolean success = containerSyncHelper.syncWithSCMContainerInfo();
+      containerSyncMetrics.setScmContainerSyncStatus(success
+          ? ReconScmContainerSyncMetrics.SCM_CONTAINER_SYNC_STATUS_SUCCESS
+          : ReconScmContainerSyncMetrics.SCM_CONTAINER_SYNC_STATUS_FAILURE);
+      return success;
+    } catch (RuntimeException | Error e) {
+      containerSyncMetrics.setScmContainerSyncStatus(
+          ReconScmContainerSyncMetrics.SCM_CONTAINER_SYNC_STATUS_FAILURE);
+      throw e;
+    } finally {
+      containerSyncMetrics.setScmContainerSyncDurationMs(
+          Time.monotonicNow() - startTime);
     }
   }
 
-  private void initializeNewRdbStore(File dbFile) throws IOException {
+  private void cleanupOldSCMDB(File oldDbLocation, File newDbLocation) {
+    if (oldDbLocation == null || !oldDbLocation.exists() ||
+        oldDbLocation.equals(newDbLocation)) {
+      return;
+    }
     try {
-      DBStore newStore = createDBAndAddSCMTablesAndCodecs(
-          dbFile, new ReconSCMDBDefinition());
-      Table<UUID, DatanodeDetails> nodeTable =
-          ReconSCMDBDefinition.NODES.getTable(dbStore);
-      Table<UUID, DatanodeDetails> newNodeTable =
-          ReconSCMDBDefinition.NODES.getTable(newStore);
-      try (TableIterator<UUID, ? extends KeyValue<UUID,
-          DatanodeDetails>> iterator = nodeTable.iterator()) {
-        while (iterator.hasNext()) {
-          KeyValue<UUID, DatanodeDetails> keyValue = iterator.next();
-          newNodeTable.put(keyValue.getKey(), keyValue.getValue());
+      LOG.info("Cleaning up old SCM snapshot db at {}.",
+          oldDbLocation.getAbsolutePath());
+      FileUtils.deleteDirectory(oldDbLocation);
+    } catch (IOException e) {
+      LOG.warn("Unable to clean up old SCM snapshot db at {}.",
+          oldDbLocation.getAbsolutePath(), e);
+    }
+  }
+
+  /**
+   * Moves the active snapshot to Recon's stable SCM DB name so that the next
+   * Recon restart reopens the snapshot-backed DB instead of creating a new one.
+   */
+  private File renameSnapshotToReconScmDb(File dbFile) throws IOException {
+    File reconScmDb = new File(dbFile.getParentFile(),
+        ReconSCMDBDefinition.RECON_SCM_DB_NAME);
+    if (dbFile.equals(reconScmDb)) {
+      return dbFile;
+    }
+    if (reconScmDb.exists()) {
+      FileUtils.deleteDirectory(reconScmDb);
+    }
+    if (!dbFile.renameTo(reconScmDb)) {
+      throw new IOException("Unable to rename SCM snapshot db from " +
+          dbFile.getAbsolutePath() + " to " + reconScmDb.getAbsolutePath());
+    }
+    LOG.info("SCM snapshot linked to Recon DB at {}.",
+        reconScmDb.getAbsolutePath());
+    return reconScmDb;
+  }
+
+  private void initializeNewRdbStore(File dbFile) throws IOException {
+    final DBStore oldStore = dbStore;
+    final File oldDbLocation = oldStore != null ? oldStore.getDbLocation() :
+        null;
+    Map<DatanodeID, DatanodeDetails> preservedNodes = new HashMap<>();
+    DBStore newStore = null;
+    try {
+      if (oldStore != null) {
+        final Table<DatanodeID, DatanodeDetails> nodeTable =
+            ReconSCMDBDefinition.NODES.getTable(oldStore);
+        try (TableIterator<DatanodeID, Table.KeyValue<DatanodeID, DatanodeDetails>> iterator = nodeTable.iterator()) {
+          while (iterator.hasNext()) {
+            final KeyValue<DatanodeID, DatanodeDetails> keyValue =
+                iterator.next();
+            preservedNodes.put(keyValue.getKey(), keyValue.getValue());
+          }
         }
       }
+
+      IOUtils.close(LOG, oldStore);
+      File activeDbLocation = renameSnapshotToReconScmDb(dbFile);
+
+      newStore = DBStoreBuilder.newBuilder(ozoneConfiguration,
+          ReconSCMDBDefinition.get(), activeDbLocation).build();
+      final Table<DatanodeID, DatanodeDetails> newNodeTable =
+          ReconSCMDBDefinition.NODES.getTable(newStore);
+      for (Map.Entry<DatanodeID, DatanodeDetails> entry :
+          preservedNodes.entrySet()) {
+        newNodeTable.put(entry.getKey(), entry.getValue());
+      }
+
       sequenceIdGen.reinitialize(
           ReconSCMDBDefinition.SEQUENCE_ID.getTable(newStore));
       pipelineManager.reinitialize(
@@ -640,37 +993,15 @@ public class ReconStorageContainerManagerFacade
           ReconSCMDBDefinition.CONTAINERS.getTable(newStore));
       nodeManager.reinitialize(
           ReconSCMDBDefinition.NODES.getTable(newStore));
-      IOUtils.close(LOG, dbStore);
-      deleteOldSCMDB();
       dbStore = newStore;
-      File newDb = new File(dbFile.getParent() +
-          OZONE_URI_DELIMITER + ReconSCMDBDefinition.RECON_SCM_DB_NAME);
-      boolean success = dbFile.renameTo(newDb);
-      if (success) {
-        LOG.info("SCM snapshot linked to Recon DB.");
-      }
+      cleanupOldSCMDB(oldDbLocation, activeDbLocation);
       LOG.info("Created SCM DB handle from snapshot at {}.",
-          dbFile.getAbsolutePath());
-    } catch (IOException ioEx) {
-      LOG.error("Unable to initialize Recon SCM DB snapshot store.", ioEx);
+          activeDbLocation.getAbsolutePath());
+    } catch (IOException | RuntimeException ex) {
+      IOUtils.close(LOG, newStore);
+      LOG.error("Unable to initialize Recon SCM DB snapshot store.", ex);
+      throw ex;
     }
-  }
-
-  private DBStore createDBAndAddSCMTablesAndCodecs(File dbFile,
-      ReconSCMDBDefinition definition) throws IOException {
-    DBStoreBuilder dbStoreBuilder =
-        DBStoreBuilder.newBuilder(ozoneConfiguration)
-            .setName(dbFile.getName())
-            .setPath(dbFile.toPath().getParent());
-    for (DBColumnFamilyDefinition columnFamily :
-        definition.getColumnFamilies()) {
-      dbStoreBuilder.addTable(columnFamily.getName());
-      dbStoreBuilder.addCodec(columnFamily.getKeyType(),
-          columnFamily.getKeyCodec());
-      dbStoreBuilder.addCodec(columnFamily.getValueType(),
-          columnFamily.getValueCodec());
-    }
-    return dbStoreBuilder.build();
   }
 
   @Override
@@ -695,7 +1026,7 @@ public class ReconStorageContainerManagerFacade
 
   @Override
   public ReplicationManager getReplicationManager() {
-    return null;
+    return reconReplicationManager;
   }
 
   @Override
@@ -718,6 +1049,21 @@ public class ReconStorageContainerManagerFacade
     return null;
   }
 
+  @Override
+  public SCMMetadataStore getScmMetadataStore() {
+    return null;
+  }
+
+  @Override
+  public SCMHAManager getScmHAManager() {
+    return null;
+  }
+
+  @Override
+  public SequenceIdGenerator getSequenceIdGen() {
+    return null;
+  }
+
   public DBStore getScmDBStore() {
     return dbStore;
   }
@@ -734,8 +1080,22 @@ public class ReconStorageContainerManagerFacade
   public ContainerSizeCountTask getContainerSizeCountTask() {
     return containerSizeCountTask;
   }
+
+  @VisibleForTesting
+  public ReconScmTask getContainerHealthTask() {
+    return containerHealthTask;
+  }
+
   @VisibleForTesting
   public ContainerCountBySizeDao getContainerCountBySizeDao() {
     return containerCountBySizeDao;
+  }
+
+  public ReconContext getReconContext() {
+    return reconContext;
+  }
+
+  public DataSource getDataSource() {
+    return dataSource;
   }
 }
