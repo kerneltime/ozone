@@ -27,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.io.ByteArrayInputStream;
 import java.net.URI;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
@@ -92,14 +93,30 @@ public class TestAWSSignatureProcessor {
     assertEquals(STREAMING_UNSIGNED_PAYLOAD_TRAILER, signatureInfo.getPayloadHash());
   }
 
+  @Test
+  public void testS3ExpressPayloadHashIsTheContentSha256Header() throws Exception {
+    // ListDirectoryBuckets is signed for the s3express service, which takes the payload line from the header, as s3.
+    SignatureInfo signatureInfo = parseSignature("http://s3g.example.com:9878/?max-directory-buckets=2", "s3express",
+        UNSIGNED_PAYLOAD);
+
+    assertEquals(UNSIGNED_PAYLOAD, signatureInfo.getPayloadHash());
+  }
+
   /** Parses a header-signed request sent now to {@code requestUri}, as the gateway receives it. */
   private static SignatureInfo parseSignature(String requestUri, String contentSha256) throws Exception {
+    return parseSignature(requestUri, "s3", contentSha256);
+  }
+
+  /** Parses a request with an empty body, signed now for {@code service}, as the gateway receives it. */
+  private static SignatureInfo parseSignature(String requestUri, String service, String contentSha256)
+      throws Exception {
     ZonedDateTime now = ZonedDateTime.now(ZoneOffset.UTC);
     String dateTime = StringToSignProducer.TIME_FORMATTER.format(now);
     MultivaluedMap<String, String> headers = new MultivaluedHashMap<>();
     headers.putSingle("Authorization", "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/"
-        + DATE_FORMATTER.format(now) + "/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;"
-        + "x-amz-date, Signature=fe5f80f77d5fa3beca038a248ff027d0445342fe2855ddc963176630326f1024");
+        + DATE_FORMATTER.format(now) + "/us-east-1/" + service + "/aws4_request, "
+        + "SignedHeaders=host;x-amz-content-sha256;x-amz-date, "
+        + "Signature=fe5f80f77d5fa3beca038a248ff027d0445342fe2855ddc963176630326f1024");
     headers.putSingle("Host", "s3g.example.com:9878");
     headers.putSingle("X-Amz-Content-Sha256", contentSha256);
     headers.putSingle("X-Amz-Date", dateTime);
@@ -110,6 +127,7 @@ public class TestAWSSignatureProcessor {
     when(context.getUriInfo()).thenReturn(uriInfo);
     when(context.getHeaders()).thenReturn(headers);
     when(context.getMethod()).thenReturn("GET");
+    when(context.getEntityStream()).thenReturn(new ByteArrayInputStream(new byte[0]));
 
     AWSSignatureProcessor processor = new AWSSignatureProcessor();
     processor.setContext(context);

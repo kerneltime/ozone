@@ -21,6 +21,7 @@ import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.ACCESS_DENIED;
 import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.MALFORMED_HEADER;
 import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.PAYLOAD_TOO_LARGE;
 import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.S3_AUTHINFO_CREATION_ERROR;
+import static org.apache.hadoop.ozone.s3.util.S3Consts.S3_EXPRESS_SERVICE;
 import static org.apache.hadoop.ozone.s3.util.S3Consts.UNSIGNED_PAYLOAD;
 import static org.apache.hadoop.ozone.s3.util.S3Consts.X_AMZ_CONTENT_SHA256;
 import static org.apache.hadoop.ozone.s3sts.S3STSConfigKeys.OZONE_S3G_STS_PAYLOAD_HASH_MAX_VALUE;
@@ -160,7 +161,9 @@ public class AWSSignatureProcessor implements SignatureProcessor {
     if (signatureInfo.getVersion() == Version.V2) {
       throw S3ErrorTable.newError(S3_AUTHINFO_CREATION_ERROR);
     }
-    if (signatureInfo.getService().equals("s3")) {
+    // S3 Express requests, such as ListDirectoryBuckets, are signed for the s3express service and take the payload hash
+    // from x-amz-content-sha256, as S3 requests do.
+    if (signatureInfo.getService().equals("s3") || signatureInfo.getService().equals(S3_EXPRESS_SERVICE)) {
       if (!signatureInfo.isSignPayload()) {
         // According to AWS Signature V4 documentation using Query Parameters
         // https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-query-string-auth.html
