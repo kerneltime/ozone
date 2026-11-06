@@ -17,8 +17,14 @@
 
 package org.apache.hadoop.ozone.s3;
 
+import static java.net.HttpURLConnection.HTTP_BAD_REQUEST;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.INVALID_ARGUMENT;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -29,8 +35,10 @@ import java.net.URI;
 import java.net.URLDecoder;
 import java.util.Arrays;
 import java.util.Collections;
+import javax.ws.rs.WebApplicationException;
 import javax.ws.rs.container.ContainerRequestContext;
 import javax.ws.rs.core.UriInfo;
+import org.apache.hadoop.ozone.s3.exception.OS3Exception;
 import org.apache.hadoop.ozone.s3.signature.StringToSignProducer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -79,6 +87,30 @@ class TestQueryStringFilter {
     assertEquals(canonicalQuery("prefix=a%2Bb"), canonicalQuery("prefix=a+b"));
     assertEquals(endpointValue(encoded.getUriInfo().getRequestUri(), "prefix"),
         endpointValue(rewrittenRequestUri(raw), "prefix"));
+  }
+
+  /** The canonical query signs every value of a repeated parameter, but an endpoint reads only the first one. */
+  @ParameterizedTest
+  @CsvSource(delimiter = '|', value = {
+      "partNumber=1&partNumber=2|partNumber",
+      "uploadId=a&uploadId=b|uploadId",
+      "list-type=2&prefix=a&prefix=b|prefix",
+      "prefix=a&pre%66ix=b|prefix",
+      "uploads&uploads=|uploads",
+      "a+b=1&a%2Bb=2|a+b"})
+  void aRepeatedParameterIsRefused(String query, String name) {
+    WebApplicationException e = assertThrows(WebApplicationException.class,
+        () -> new QueryStringFilter().filter(request(query)));
+
+    assertEquals(HTTP_BAD_REQUEST, e.getResponse().getStatus());
+    OS3Exception cause = assertInstanceOf(OS3Exception.class, e.getCause());
+    assertEquals(INVALID_ARGUMENT.getCode(), cause.getCode());
+    assertThat(cause.getErrorMessage()).isEqualTo("The query parameter " + name + " is repeated.");
+  }
+
+  @Test
+  void distinctParametersPass() {
+    assertDoesNotThrow(() -> new QueryStringFilter().filter(request("list-type=2&prefix=a&Prefix=b&uploads")));
   }
 
   private static ContainerRequestContext request(String rawQuery) {

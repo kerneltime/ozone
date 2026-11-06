@@ -17,12 +17,21 @@
 
 package org.apache.hadoop.ozone.s3;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.INVALID_ARGUMENT;
+import static org.apache.hadoop.ozone.s3.util.S3Utils.wrapOS3Exception;
+
 import java.net.URI;
+import java.net.URLDecoder;
+import java.util.HashSet;
+import java.util.Set;
 import javax.annotation.Priority;
 import javax.ws.rs.container.ContainerRequestContext;
 import javax.ws.rs.container.ContainerRequestFilter;
 import javax.ws.rs.container.PreMatching;
 import javax.ws.rs.ext.Provider;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.hadoop.ozone.s3.exception.S3ErrorTable;
 
 /**
  * Makes the query parameters that the endpoints read agree with the query that SigV4 signs.
@@ -31,6 +40,10 @@ import javax.ws.rs.ext.Provider;
  * with {@code prefix=a+b} would list the keys under {@code a b}, and a raw '+' could replace a {@code %2B} without
  * changing the signature. The filter encodes a raw '+' in the query as {@code %2B} before anything reads the query
  * parameters, so that both spellings run the request they sign.
+ *
+ * <p>The canonical query also signs every value of a repeated parameter, while an endpoint reads only the first one,
+ * so reordering the values of a signed {@code partNumber=1&partNumber=2} would change the part without changing the
+ * signature. S3 defines no query parameter that takes several values, so the filter refuses a repeated one.
  */
 @Provider
 @PreMatching
@@ -44,12 +57,36 @@ public class QueryStringFilter implements ContainerRequestFilter {
   public void filter(ContainerRequestContext context) {
     URI requestUri = context.getUriInfo().getRequestUri();
     String rawQuery = requestUri.getRawQuery();
-    if (rawQuery != null && rawQuery.indexOf('+') >= 0) {
+    if (rawQuery == null) {
+      return;
+    }
+    if (rawQuery.indexOf('+') >= 0) {
       // Replaces the query in the URI as sent: rebuilding the URI from its parts would re-encode the rest of it.
       String uri = requestUri.toString();
       int queryStart = uri.indexOf('?') + 1;
-      context.setRequestUri(context.getUriInfo().getBaseUri(), URI.create(uri.substring(0, queryStart)
-          + rawQuery.replace("+", "%2B") + uri.substring(queryStart + rawQuery.length())));
+      String query = rawQuery.replace("+", "%2B");
+      context.setRequestUri(context.getUriInfo().getBaseUri(),
+          URI.create(uri.substring(0, queryStart) + query + uri.substring(queryStart + rawQuery.length())));
+      rawQuery = query;
+    }
+    Set<String> names = new HashSet<>();
+    for (String parameter : StringUtils.split(rawQuery, '&')) {
+      int separator = parameter.indexOf('=');
+      String name = decode(separator < 0 ? parameter : parameter.substring(0, separator));
+      if (!names.add(name)) {
+        throw wrapOS3Exception(S3ErrorTable.newError(INVALID_ARGUMENT, requestUri.getRawPath())
+            .withMessage("The query parameter " + name + " is repeated."));
+      }
+    }
+  }
+
+  /** Decodes a parameter name as the endpoints read it; no raw '+' is left to become a space. */
+  private static String decode(String rawName) {
+    try {
+      return URLDecoder.decode(rawName, UTF_8);
+    } catch (IllegalArgumentException e) {
+      // A malformed escape: compare the name as sent.
+      return rawName;
     }
   }
 }
