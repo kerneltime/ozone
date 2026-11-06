@@ -65,6 +65,7 @@ public class Gateway extends GenericCli implements Callable<Void> {
   /** Servlets and static content on separate port. */
   private BaseHttpServer contentServer;
   private BaseHttpServer stsServer;
+  private StaticCredentialStore staticCredentials;
   private S3GatewayMetrics metrics;
   private S3GatewayVersionMetrics versionMetrics;
   private NettyMetrics nettyMetrics;
@@ -88,6 +89,9 @@ public class Gateway extends GenericCli implements Callable<Void> {
   public Void call() throws Exception {
     OzoneConfiguration ozoneConfiguration = getOzoneConf();
     OzoneConfigurationHolder.setConfiguration(ozoneConfiguration);
+    // Refuses to start when the credentials cannot be loaded: a gateway that cannot verify signatures serves nothing.
+    staticCredentials = StaticCredentialStore.load(OzoneConfigurationHolder.configuration());
+    StaticCredentialStoreHolder.set(staticCredentials);
     TracingUtil.installMdcContextStorage();
     TracingUtil.initTracing("S3gateway", OzoneConfigurationHolder.configuration());
     UserGroupInformation.setConfiguration(OzoneConfigurationHolder.configuration());
@@ -123,11 +127,14 @@ public class Gateway extends GenericCli implements Callable<Void> {
     httpServer.start();
     contentServer.start();
     stsServer.start();
+    if (staticCredentials != null) {
+      staticCredentials.start();
+    }
   }
 
   public void stop() throws Exception {
     LOG.info("Stopping Ozone S3 gateway");
-    IOUtils.closeQuietly(httpServer, contentServer, stsServer);
+    IOUtils.closeQuietly(httpServer, contentServer, stsServer, staticCredentials);
     jvmPauseMonitor.stop();
     S3GatewayMetrics.unRegister();
     if (versionMetrics != null) {

@@ -19,23 +19,33 @@ package org.apache.hadoop.ozone.s3;
 
 import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.ACCESS_DENIED;
 import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.INTERNAL_ERROR;
+import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.INVALID_ACCESS_KEY_ID;
 import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.S3_AUTHINFO_CREATION_ERROR;
+import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.SIGNATURE_DOES_NOT_MATCH;
 import static org.apache.hadoop.ozone.s3.util.S3Utils.wrapOS3Exception;
 
 import com.google.common.annotations.VisibleForTesting;
 import java.io.IOException;
+import java.util.Map;
 import javax.annotation.Priority;
 import javax.inject.Inject;
 import javax.ws.rs.container.ContainerRequestContext;
 import javax.ws.rs.container.ContainerRequestFilter;
 import javax.ws.rs.container.PreMatching;
 import javax.ws.rs.ext.Provider;
+import org.apache.hadoop.ozone.audit.AuditEventStatus;
+import org.apache.hadoop.ozone.audit.AuditLogger;
+import org.apache.hadoop.ozone.audit.AuditLoggerType;
+import org.apache.hadoop.ozone.audit.AuditMessage;
+import org.apache.hadoop.ozone.om.AWSV4AuthValidator;
 import org.apache.hadoop.ozone.s3.exception.OS3Exception;
 import org.apache.hadoop.ozone.s3.exception.S3ErrorTable;
+import org.apache.hadoop.ozone.s3.signature.AuthOperation;
 import org.apache.hadoop.ozone.s3.signature.SignatureInfo;
 import org.apache.hadoop.ozone.s3.signature.SignatureInfo.Version;
 import org.apache.hadoop.ozone.s3.signature.SignatureProcessor;
 import org.apache.hadoop.ozone.s3.signature.StringToSignProducer;
+import org.apache.hadoop.ozone.s3.util.AuditUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -54,11 +64,17 @@ public class AuthorizationFilter implements ContainerRequestFilter {
   private static final Logger LOG = LoggerFactory.getLogger(
       AuthorizationFilter.class);
 
+  private static final AuditLogger AUDIT = new AuditLogger(AuditLoggerType.S3GLOGGER);
+
   @Inject
   private SignatureProcessor signatureProcessor;
 
   @Inject
   private SignatureInfo signatureInfo;
+
+  /** Set when the gateway verifies signatures itself, with Ozone security disabled. */
+  @Inject
+  private StaticCredentialStore staticCredentials;
 
   @Override
   public void filter(ContainerRequestContext context) throws
@@ -80,6 +96,9 @@ public class AuthorizationFilter implements ContainerRequestFilter {
         LOG.debug("Malformed s3 header. awsAccessID: {}", awsAccessId);
         throw S3ErrorTable.newError(ACCESS_DENIED);
       }
+      if (staticCredentials != null) {
+        verifySignature(context);
+      }
     } catch (OS3Exception ex) {
       LOG.debug("Error during Client Creation: ", ex);
       throw wrapOS3Exception(ex);
@@ -89,6 +108,43 @@ public class AuthorizationFilter implements ContainerRequestFilter {
       LOG.debug("Error during Client Creation: ", e);
       throw wrapOS3Exception(S3ErrorTable.newError(INTERNAL_ERROR, e));
     }
+  }
+
+  /**
+   * With security disabled OM verifies no signature, so the gateway verifies it against its static credentials,
+   * before any endpoint runs.
+   */
+  private void verifySignature(ContainerRequestContext context) throws OS3Exception {
+    String secret = staticCredentials.getSecret(signatureInfo.getAwsAccessId());
+    S3ErrorTable error = null;
+    if (secret == null) {
+      error = INVALID_ACCESS_KEY_ID;
+    } else if (!AWSV4AuthValidator.validateRequest(signatureInfo.getStringToSign(), signatureInfo.getSignature(),
+        secret)) {
+      error = SIGNATURE_DOES_NOT_MATCH;
+    }
+    if (error != null) {
+      OS3Exception ex = S3ErrorTable.newError(error);
+      auditRefusal(context, ex);
+      throw ex;
+    }
+    // The chunk signatures of a streaming upload are verified with the same key.
+    signatureInfo.setSigningKey(AWSV4AuthValidator.getSigningKey(secret, signatureInfo.getStringToSign()));
+  }
+
+  private void auditRefusal(ContainerRequestContext context, OS3Exception error) {
+    Map<String, String> params = AuditUtils.getAuditParameters(context);
+    // A presigned request carries its signature, and any session token, as query parameters.
+    params.keySet().removeIf(name -> "X-Amz-Signature".equalsIgnoreCase(name)
+        || "X-Amz-Security-Token".equalsIgnoreCase(name));
+    AUDIT.logAuthFailure(new AuditMessage.Builder()
+        .setUser(signatureInfo.getAwsAccessId())
+        .atIp(AuditUtils.getClientIpAddress(context))
+        .forOperation(AuthOperation.fromContext(context))
+        .withParams(params)
+        .withResult(AuditEventStatus.FAILURE)
+        .withException(error)
+        .build());
   }
 
   @VisibleForTesting
@@ -104,6 +160,11 @@ public class AuthorizationFilter implements ContainerRequestFilter {
   @VisibleForTesting
   public SignatureInfo getSignatureInfo() {
     return signatureInfo;
+  }
+
+  @VisibleForTesting
+  public void setStaticCredentials(StaticCredentialStore staticCredentials) {
+    this.staticCredentials = staticCredentials;
   }
 
 }

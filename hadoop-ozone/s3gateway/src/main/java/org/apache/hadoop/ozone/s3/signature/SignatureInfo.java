@@ -66,6 +66,9 @@ public class SignatureInfo {
    */
   private String sessionToken = null;
 
+  /** SigV4 signing key the gateway derived after verifying the request, for its chunk signatures. */
+  private byte[] signingKey = null;
+
   public SignatureInfo() { }
 
   private SignatureInfo(Builder b) {
@@ -180,6 +183,14 @@ public class SignatureInfo {
 
   public void setSessionToken(String sessionToken) {
     this.sessionToken = sessionToken;
+  }
+
+  public byte[] getSigningKey() {
+    return signingKey == null ? null : signingKey.clone();
+  }
+
+  public void setSigningKey(byte[] signingKey) {
+    this.signingKey = signingKey == null ? null : signingKey.clone();
   }
 
   /**

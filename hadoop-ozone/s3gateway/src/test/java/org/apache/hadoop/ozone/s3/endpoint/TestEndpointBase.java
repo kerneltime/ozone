@@ -21,6 +21,8 @@ import static org.apache.hadoop.ozone.OzoneConfigKeys.OZONE_SECURITY_ENABLED_KEY
 import static org.apache.hadoop.ozone.om.exceptions.OMException.ResultCodes;
 import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.INVALID_ARGUMENT;
 import static org.apache.hadoop.ozone.s3.signature.SignatureTestUtils.signatureInfo;
+import static org.apache.hadoop.ozone.s3.signature.SignatureTestUtils.signedChunkedBody;
+import static org.apache.hadoop.ozone.s3.signature.SignatureTestUtils.signingKey;
 import static org.apache.hadoop.ozone.s3.util.S3Consts.CUSTOM_METADATA_HEADER_PREFIX;
 import static org.apache.hadoop.ozone.s3.util.S3Consts.LOCAL_LEASE_LOG_LIMIT_HEADER;
 import static org.apache.hadoop.ozone.s3.util.S3Consts.READ_CONSISTENCY_HEADER;
@@ -32,6 +34,7 @@ import static org.apache.hadoop.ozone.s3.util.S3Consts.UNSIGNED_PAYLOAD;
 import static org.apache.hadoop.ozone.s3.util.S3Consts.X_AMZ_CONTENT_SHA256;
 import static org.apache.hadoop.ozone.s3.util.S3Consts.X_AMZ_TRAILER;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -48,6 +51,7 @@ import java.util.stream.Stream;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.MultivaluedHashMap;
 import javax.ws.rs.core.MultivaluedMap;
+import org.apache.commons.io.IOUtils;
 import org.apache.hadoop.hdds.conf.OzoneConfiguration;
 import org.apache.hadoop.ozone.OzoneConsts;
 import org.apache.hadoop.ozone.OzoneManagerVersion;
@@ -61,6 +65,7 @@ import org.apache.hadoop.ozone.om.helpers.ReadConsistency;
 import org.apache.hadoop.ozone.s3.MultiDigestInputStream;
 import org.apache.hadoop.ozone.s3.exception.OS3Exception;
 import org.apache.hadoop.ozone.s3.exception.S3ErrorTable;
+import org.apache.hadoop.ozone.s3.signature.SignatureInfo;
 import org.apache.hadoop.ozone.s3.signature.SignatureTestUtils;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -456,6 +461,39 @@ public class TestEndpointBase {
         }
       }
       assertThat(body.available()).isEqualTo(payload.length);
+    }
+  }
+
+  /**
+   * With security off OM returns no signing key, but a gateway that verified the request against its static
+   * credentials derived one, and verifies the chunk signatures with it.
+   */
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void testChunkSignaturesUseTheGatewaysSigningKeyWhenSecurityIsOff(boolean tampered) throws Exception {
+    EndpointBase endpoint = new EndpointBase() { };
+    endpoint.setOzoneConfiguration(new OzoneConfiguration());
+    SignatureInfo info = signatureInfo();
+    info.setSigningKey(signingKey());
+    endpoint.setSignatureInfo(info);
+    HttpHeaders headers = mock(HttpHeaders.class);
+    when(headers.getHeaderString(X_AMZ_CONTENT_SHA256)).thenReturn(STREAMING_AWS4_HMAC_SHA256_PAYLOAD);
+    endpoint.setHeaders(headers);
+    String chunks = signedChunkedBody("body");
+    byte[] payload = (tampered ? chunks.replace("body", "bodx") : chunks).getBytes(StandardCharsets.UTF_8);
+
+    try (ByteArrayInputStream body = new ByteArrayInputStream(payload)) {
+      EndpointBase.S3ChunkInputStreamInfo chunked =
+          endpoint.getS3ChunkInputStreamInfo(body, payload.length, "4", "key");
+      endpoint.attachChunkValidator(chunked, "key", null);
+      try (MultiDigestInputStream stream = chunked.getMultiDigestInputStream()) {
+        if (tampered) {
+          OS3Exception ex = assertThrows(OS3Exception.class, () -> IOUtils.toByteArray(stream));
+          assertEquals(S3ErrorTable.SIGNATURE_DOES_NOT_MATCH.getCode(), ex.getCode());
+        } else {
+          assertArrayEquals("body".getBytes(StandardCharsets.UTF_8), IOUtils.toByteArray(stream));
+        }
+      }
     }
   }
 

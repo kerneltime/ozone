@@ -69,6 +69,8 @@ public class ProxyServer {
     // rejected with 400 by Jetty 12's default (strict) URI compliance.
     HttpConfiguration httpConfig = new HttpConfiguration();
     httpConfig.setUriCompliance(UriCompliance.LEGACY);
+    // Forward header values as received: SigV4 signs them, and Jetty's header cache would re-case common ones.
+    httpConfig.setHeaderCacheCaseSensitive(true);
     server = new Server();
     ServerConnector connector = new ServerConnector(server, new HttpConnectionFactory(httpConfig));
     connector.setPort(proxyPort);
@@ -80,6 +82,8 @@ public class ProxyServer {
     ServletHolder proxyHolder = new ServletHolder(proxyHandler);
 
     proxyHolder.setInitParameter("proxyTo", "");
+    // Forward the client's Host header, which SigV4 signs, as a load balancer in front of S3 Gateways does.
+    proxyHolder.setInitParameter("preserveHost", "true");
 
 
     context.addServlet(proxyHolder, "/*");

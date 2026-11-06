@@ -112,6 +112,9 @@ public final class S3GatewayMetrics implements Closeable, MetricsSource {
   private @Metric MutableCounterLong getObjectAttributesSuccess;
   private @Metric MutableCounterLong getObjectAttributesFailure;
 
+  @Metric(about = "Reloads of the static credentials file that kept the previous keys")
+  private MutableCounterLong staticCredentialsReloadFailure;
+
   // S3 Gateway Latency Metrics
   // BucketEndpoint
 
@@ -479,6 +482,7 @@ public final class S3GatewayMetrics implements Closeable, MetricsSource {
     getObjectAttributesSuccessLatencyNs.snapshot(recordBuilder, true);
     getObjectAttributesFailure.snapshot(recordBuilder, true);
     getObjectAttributesFailureLatencyNs.snapshot(recordBuilder, true);
+    staticCredentialsReloadFailure.snapshot(recordBuilder, true);
   }
 
   // INC and UPDATE
@@ -973,6 +977,14 @@ public final class S3GatewayMetrics implements Closeable, MetricsSource {
     long value = Time.monotonicNowNanos() - startNanos;
     metric.add(value);
     return value;
+  }
+
+  public void incStaticCredentialsReloadFailure() {
+    staticCredentialsReloadFailure.incr();
+  }
+
+  public long getStaticCredentialsReloadFailure() {
+    return staticCredentialsReloadFailure.value();
   }
 
   public static S3GatewayMetrics getMetrics() {

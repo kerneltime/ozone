@@ -940,8 +940,10 @@ public abstract class EndpointBase {
    *
    * <p>In secure mode a supporting OM returns the derived key for a signed upload, so
    * a missing key is treated as a server-side anomaly and the request is
-   * rejected rather than stored unverified. In non-secure mode there is no
-   * secret to verify against, so verification is skipped.
+   * rejected rather than stored unverified. In non-secure mode OM has no
+   * secret to verify against: the gateway uses the key it derived when it
+   * verified the request against its static credentials, and otherwise skips
+   * verification.
    */
   protected void attachChunkValidator(S3ChunkInputStreamInfo info, String keyPath, ByteBuffer derivedKey)
       throws OS3Exception {
@@ -960,7 +962,11 @@ public abstract class EndpointBase {
         throw internalError(keyPath,
             "chunk-signature verification requested but no derived key was returned");
       }
-      return;
+      byte[] gatewayKey = signatureInfo.getSigningKey();
+      if (gatewayKey == null) {
+        return;
+      }
+      derivedKey = ByteBuffer.wrap(gatewayKey);
     }
     ByteBuffer key = derivedKey.duplicate();
     byte[] signingKey = new byte[key.remaining()];

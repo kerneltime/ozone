@@ -296,6 +296,26 @@ public class TestPartUpload {
     assertNoParts(uploadID, keyName);
   }
 
+  /**
+   * With security off OM derives no signing key. When the gateway verified the request against its static
+   * credentials, it verifies the chunks with the key it derived itself, and stores no part on a mismatch.
+   */
+  @Test
+  public void testPartUploadVerifiesChunksWithTheGatewaysSigningKey() throws Exception {
+    String keyName = UUID.randomUUID().toString();
+    String content = "1234567890abcde";
+    rest.signatureInfo.setSigningKey(signingKey());
+    configureSignedChunkHeaders(content.length());
+    String uploadID = initiateMultipartUpload(rest, OzoneConsts.S3_BUCKET, keyName);
+
+    assertErrorResponse(S3ErrorTable.SIGNATURE_DOES_NOT_MATCH, () -> put(rest, OzoneConsts.S3_BUCKET, keyName, 1,
+        uploadID, signedChunkedBody(content).replace(content, "1234567890abXde")));
+    assertNoParts(uploadID, keyName);
+
+    assertSucceeds(() -> put(rest, OzoneConsts.S3_BUCKET, keyName, 1, uploadID, signedChunkedBody(content)));
+    assertContentLength(uploadID, keyName, content.length());
+  }
+
   @Test
   public void testPartUploadRejectsMissingDerivedKeyInSecureMode() throws Exception {
     String keyName = UUID.randomUUID().toString();

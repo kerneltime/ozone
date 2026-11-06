@@ -448,6 +448,23 @@ class TestObjectPut {
     assertKeyWasNotCommitted();
   }
 
+  /**
+   * With security off OM derives no signing key. When the gateway verified the request against its static
+   * credentials, it verifies the chunks with the key it derived itself, and stores nothing on a mismatch.
+   */
+  @Test
+  void testPutObjectVerifiesChunksWithTheGatewaysSigningKey() throws Exception {
+    objectEndpoint.signatureInfo.setSigningKey(signingKey());
+    configureSignedChunkHeaders(CONTENT.length());
+
+    assertErrorResponse(SIGNATURE_DOES_NOT_MATCH,
+        () -> putObject(signedChunkedBody(CONTENT).replace(CONTENT, "1123456789")));
+    assertKeyWasNotCommitted();
+
+    assertSucceeds(() -> putObject(signedChunkedBody(CONTENT)));
+    assertKeyContent(bucket, KEY_NAME, CONTENT);
+  }
+
   @Test
   void testPutObjectRejectsMissingDerivedKeyInSecureMode() {
     objectEndpoint.getOzoneConfiguration().setBoolean(OzoneConfigKeys.OZONE_SECURITY_ENABLED_KEY, true);

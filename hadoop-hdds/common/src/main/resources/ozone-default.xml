@@ -2128,6 +2128,29 @@
   </property>
 
   <property>
+    <name>ozone.s3g.static.credentials.file</name>
+    <value/>
+    <tag>OZONE, S3GATEWAY, SECURITY</tag>
+    <description>
+      File of S3 credentials the S3 Gateway verifies SigV4 signatures with when ozone.security.enabled is false: one
+      accessKeyId=secret per line, ignoring blank lines and lines starting with #. With the file set, the gateway
+      answers a request it cannot verify with 403 InvalidAccessKeyId or SignatureDoesNotMatch, and refuses to start
+      if the file is absent, empty or malformed, or if security is enabled. When it is not set, the default, the
+      gateway checks no signature itself. Replace the file in one step, by writing a new file and renaming it, so
+      that a reload never reads a partly written file.
+    </description>
+  </property>
+  <property>
+    <name>ozone.s3g.static.credentials.reload.interval</name>
+    <value>1m</value>
+    <tag>OZONE, S3GATEWAY, SECURITY</tag>
+    <description>
+      How often the S3 Gateway re-reads ozone.s3g.static.credentials.file. A file that is absent, empty or malformed
+      keeps the previous credentials. 0 disables reloading.
+    </description>
+  </property>
+
+  <property>
     <name>ozone.s3g.secret.http.enabled</name>
     <value>false</value>
     <tag>OZONE, S3GATEWAY</tag>

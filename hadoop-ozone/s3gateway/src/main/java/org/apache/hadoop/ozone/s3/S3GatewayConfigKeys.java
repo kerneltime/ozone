@@ -110,6 +110,12 @@ public final class S3GatewayConfigKeys {
       "ozone.s3g.standard.storage-class.use-client-default";
   public static final boolean OZONE_S3G_STANDARD_STORAGE_CLASS_USE_CLIENT_DEFAULT_DEFAULT = false;
 
+  /** File of {@code <accessKeyId>=<secret>} lines the gateway verifies SigV4 signatures with when security is off. */
+  public static final String OZONE_S3G_STATIC_CREDENTIALS_FILE_KEY = "ozone.s3g.static.credentials.file";
+  public static final String OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_KEY =
+      "ozone.s3g.static.credentials.reload.interval";
+  public static final String OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_DEFAULT = "1m";
+
   /**
    * Never constructed.
    */

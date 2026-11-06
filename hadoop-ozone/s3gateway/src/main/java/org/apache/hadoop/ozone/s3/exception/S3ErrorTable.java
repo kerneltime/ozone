@@ -125,6 +125,9 @@ public enum S3ErrorTable {
       "match the signature you provided. Check your key and signing method.",
       HTTP_FORBIDDEN),
 
+  INVALID_ACCESS_KEY_ID(
+      "InvalidAccessKeyId", "The access key ID you provided does not exist in our records.", HTTP_FORBIDDEN),
+
   EXPIRED_TOKEN(
       "ExpiredToken", "The provided token has expired.", HTTP_BAD_REQUEST),
 
