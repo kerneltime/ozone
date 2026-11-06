@@ -41,6 +41,7 @@ import static org.apache.hadoop.ozone.s3.util.S3Consts.RANGE_HEADER;
 import static org.apache.hadoop.ozone.s3.util.S3Consts.RANGE_HEADER_MATCH_PATTERN;
 import static org.apache.hadoop.ozone.s3.util.S3Consts.RANGE_HEADER_SUPPORTED_UNIT;
 import static org.apache.hadoop.ozone.s3.util.S3Consts.STORAGE_CLASS_HEADER;
+import static org.apache.hadoop.ozone.s3.util.S3Consts.STREAMING_AWS4_HMAC_SHA256_PAYLOAD;
 import static org.apache.hadoop.ozone.s3.util.S3Consts.STREAMING_AWS4_HMAC_SHA256_PAYLOAD_TRAILER;
 import static org.apache.hadoop.ozone.s3.util.S3Consts.STREAMING_UNSIGNED_PAYLOAD_TRAILER;
 import static org.apache.hadoop.ozone.s3.util.S3Consts.TAG_COUNT_HEADER;
@@ -87,6 +88,7 @@ import org.apache.hadoop.hdds.client.ECReplicationConfig;
 import org.apache.hadoop.hdds.client.ReplicationConfig;
 import org.apache.hadoop.hdds.scm.client.HddsClientUtils;
 import org.apache.hadoop.ozone.OzoneConsts;
+import org.apache.hadoop.ozone.OzoneSecurityUtil;
 import org.apache.hadoop.ozone.audit.AuditLogger.PerformanceStringBuilder;
 import org.apache.hadoop.ozone.audit.S3GAction;
 import org.apache.hadoop.ozone.client.OzoneBucket;
@@ -259,9 +261,14 @@ public class ObjectEndpoint extends ObjectOperationHandler {
       ) {
         context.setAction(S3GAction.CREATE_DIRECTORY);
         if (STREAMING_UNSIGNED_PAYLOAD_TRAILER.equals(amzContentSha256)
+            || STREAMING_AWS4_HMAC_SHA256_PAYLOAD.equals(amzContentSha256)
             || STREAMING_AWS4_HMAC_SHA256_PAYLOAD_TRAILER.equals(amzContentSha256)) {
-          // No key is opened for a directory: verify trailer framing and checksum without a chunk signing key.
+          // No key is opened for a directory, so OM derives no chunk signing key: verify the framing and the trailer
+          // checksum, and with security disabled the chunk signatures with the key the gateway derived, if any.
           S3ChunkInputStreamInfo info = getS3ChunkInputStreamInfo(body, length, amzDecodedLength, keyPath, false);
+          if (!OzoneSecurityUtil.isSecurityEnabled(getOzoneConfiguration())) {
+            attachChunkValidator(info, keyPath, null);
+          }
           multiDigestInputStream = info.getMultiDigestInputStream();
           validateContentLength(info.getEffectiveLength(), 0, keyPath).run();
           S3ObjectWriteGuard.verifyChunksComplete(multiDigestInputStream);

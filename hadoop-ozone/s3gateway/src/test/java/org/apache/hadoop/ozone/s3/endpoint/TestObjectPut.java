@@ -1254,6 +1254,31 @@ class TestObjectPut {
     assertThat(fsoBucket.getKey("dir/").isFile()).isFalse();
   }
 
+  /**
+   * An empty PUT that creates a directory opens no key, so OM derives no signing key for it. With security off, the
+   * gateway verifies the final chunk with the key it derived when it verified the request against its static
+   * credentials, and creates no directory when that signature is wrong.
+   */
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void testDirectoryCreationVerifiesChunksWithTheGatewaysSigningKey(boolean trailer) throws Exception {
+    objectEndpoint.signatureInfo.setSigningKey(signingKey());
+    configureSignedChunkHeaders(0);
+    if (trailer) {
+      when(headers.getHeaderString(X_AMZ_CONTENT_SHA256)).thenReturn(STREAMING_AWS4_HMAC_SHA256_PAYLOAD_TRAILER);
+      when(headers.getHeaderString(X_AMZ_TRAILER)).thenReturn("x-amz-checksum-crc32");
+    }
+    String body = trailer
+        ? signedChunkedBodyWithTrailer("", "x-amz-checksum-crc32", "AAAAAA==") : signedChunkedBody("");
+
+    assertErrorResponse(SIGNATURE_DOES_NOT_MATCH,
+        () -> put(objectEndpoint, FSO_BUCKET_NAME, "dir/", tamperFinalSignature(body)));
+    assertThatThrownBy(() -> fsoBucket.getKey("dir/")).isInstanceOf(IOException.class);
+
+    assertSucceeds(() -> put(objectEndpoint, FSO_BUCKET_NAME, "dir/", body));
+    assertThat(fsoBucket.getKey("dir/").isFile()).isFalse();
+  }
+
   @Test
   void testDirectoryCreationWithSignedTrailerOnOmWithoutDerivedKey() throws Exception {
     objectEndpoint.getOzoneConfiguration().setBoolean(OzoneConfigKeys.OZONE_SECURITY_ENABLED_KEY, true);
