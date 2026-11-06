@@ -3243,7 +3243,7 @@ public abstract class AbstractS3SDKV2Tests extends OzoneTestBase implements Clus
       PresignedCompleteMultipartUploadRequest presignedCompleteMultipartUploadRequest =
           presigner.presignCompleteMultipartUpload(completeMPUPresignRequest);
 
-      completeMPUWithHttpUrlConnection(presignedCompleteMultipartUploadRequest, completedParts);
+      completeMPUWithHttpUrlConnection(presignedCompleteMultipartUploadRequest);
 
       // verify upload result
       HeadObjectResponse headObjectResponse = s3Client.headObject(b -> b.bucket(BUCKET_NAME).key(keyName));
@@ -3318,12 +3318,11 @@ public abstract class AbstractS3SDKV2Tests extends OzoneTestBase implements Clus
       return completedParts;
     }
 
-    private void completeMPUWithHttpUrlConnection(PresignedCompleteMultipartUploadRequest request,
-                                                  List<CompletedPart> completedParts) throws IOException {
+    private void completeMPUWithHttpUrlConnection(PresignedCompleteMultipartUploadRequest request) throws IOException {
       HttpURLConnection connection = null;
       try {
-        String xmlPayload = buildCompleteMultipartUploadXml(completedParts);
-        byte[] payloadBytes = xmlPayload.getBytes(StandardCharsets.UTF_8);
+        // The body the request was presigned with: its length is signed.
+        byte[] payloadBytes = request.signedPayload().orElseThrow().asByteArray();
         connection = S3SDKTestUtils.openHttpURLConnection(request.url(), "POST", request.signedHeaders(), payloadBytes);
 
         int responseCode = connection.getResponseCode();
@@ -3376,12 +3375,13 @@ public abstract class AbstractS3SDKV2Tests extends OzoneTestBase implements Clus
       PresignedCompleteMultipartUploadRequest presignedCompleteMultipartUploadRequest =
           presigner.presignCompleteMultipartUpload(presignRequest);
 
-      String xmlPayload = buildCompleteMultipartUploadXml(completedParts);
-      byte[] payloadBytes = xmlPayload.getBytes(StandardCharsets.UTF_8);
+      // The body and headers the request was presigned with: its length and content type are signed.
+      byte[] payloadBytes = presignedCompleteMultipartUploadRequest.signedPayload().orElseThrow().asByteArray();
 
       SdkHttpRequest sdkHttpRequest = SdkHttpRequest.builder()
           .method(SdkHttpMethod.POST)
           .uri(presignedCompleteMultipartUploadRequest.url().toURI())
+          .headers(presignedCompleteMultipartUploadRequest.signedHeaders())
           .build();
 
       HttpExecuteRequest httpExecuteRequest = HttpExecuteRequest.builder()
@@ -3474,19 +3474,6 @@ public abstract class AbstractS3SDKV2Tests extends OzoneTestBase implements Clus
         uploadId = S3SDKTestUtils.extractUploadId(responseXml);
       }
       return uploadId;
-    }
-
-    private String buildCompleteMultipartUploadXml(List<CompletedPart> parts) {
-      StringBuilder xml = new StringBuilder();
-      xml.append("<CompleteMultipartUpload>\n");
-      for (CompletedPart part : parts) {
-        xml.append("  <Part>\n")
-            .append("    <PartNumber>").append(part.partNumber()).append("</PartNumber>\n")
-            .append("    <ETag>").append(stripQuotes(part.eTag())).append("</ETag>\n")
-            .append("  </Part>\n");
-      }
-      xml.append("</CompleteMultipartUpload>");
-      return xml.toString();
     }
 
     @Test

@@ -285,7 +285,8 @@ class TestS3SDKWithStaticCredentials extends OzoneS3SDKTests {
         V1 + "$PresignedUrlTests#testPresignedUrlMultipartUpload",
         "SDK v1 presigns a POST without a body with an empty query string, but the URL carries the query",
         V2 + "$PresignedUrlTests#testPresignedUrlMultipartUpload",
-        "SDK v2 presigns CompleteMultipartUpload over HTTP with a payload hash instead of UNSIGNED-PAYLOAD");
+        "Over plain HTTP, SDK v2 presigns CompleteMultipartUpload with the SHA-256 of its body as the payload hash,"
+            + " and sends that hash nowhere; a presigned request is verified with UNSIGNED-PAYLOAD");
 
     @Override
     public ConditionEvaluationResult evaluateExecutionCondition(ExtensionContext context) {
