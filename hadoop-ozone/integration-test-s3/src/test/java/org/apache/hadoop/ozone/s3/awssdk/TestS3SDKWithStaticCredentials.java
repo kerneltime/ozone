@@ -134,7 +134,7 @@ class TestS3SDKWithStaticCredentials extends OzoneS3SDKTests {
           .filter(line -> line.contains("op=AUTH(PUT /" + bucket + "/k)"))
           .collect(Collectors.joining("\n"));
       assertThat(refusals).contains("user=" + SDK_ACCESS_KEY, "user=UNKNOWNACCESSKEY", "ret=FAILURE")
-          .doesNotContain(WRONG_SECRET, SDK_SECRET, "Signature=")
+          .doesNotContain(WRONG_SECRET, SDK_SECRET, "Signature=", "ip=null")
           .doesNotContainPattern("[0-9a-f]{64}");
     }
   }

@@ -50,6 +50,13 @@ public class ClientIpFilter implements ContainerRequestFilter {
 
   @Override
   public void filter(ContainerRequestContext request) throws IOException {
+    String clientIp = getClientIp(httpServletRequest);
+    LOG.trace("Real Ip[{}]", clientIp);
+    request.getHeaders().putSingle(CLIENT_IP_HEADER, clientIp);
+  }
+
+  /** The address this filter records for the request. */
+  public static String getClientIp(HttpServletRequest httpServletRequest) {
     String clientIp = httpServletRequest.getHeader("x-real-ip");
 
     if (clientIp == null || clientIp.isEmpty()) {
@@ -62,8 +69,7 @@ public class ClientIpFilter implements ContainerRequestFilter {
       clientIp = (clientIp == null || clientIp.isEmpty()) ?
           httpServletRequest.getRemoteAddr() : clientIp;
     }
-    LOG.trace("Real Ip[{}]", clientIp);
-    request.getHeaders().putSingle(CLIENT_IP_HEADER, clientIp);
+    return clientIp;
   }
 
 }

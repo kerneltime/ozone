@@ -29,9 +29,11 @@ import java.io.IOException;
 import java.util.Map;
 import javax.annotation.Priority;
 import javax.inject.Inject;
+import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.container.ContainerRequestContext;
 import javax.ws.rs.container.ContainerRequestFilter;
 import javax.ws.rs.container.PreMatching;
+import javax.ws.rs.core.Context;
 import javax.ws.rs.ext.Provider;
 import org.apache.hadoop.ozone.audit.AuditEventStatus;
 import org.apache.hadoop.ozone.audit.AuditLogger;
@@ -75,6 +77,9 @@ public class AuthorizationFilter implements ContainerRequestFilter {
   /** Set when the gateway verifies signatures itself, with Ozone security disabled. */
   @Inject
   private StaticCredentialStore staticCredentials;
+
+  @Context
+  private HttpServletRequest httpServletRequest;
 
   @Override
   public void filter(ContainerRequestContext context) throws
@@ -139,7 +144,8 @@ public class AuthorizationFilter implements ContainerRequestFilter {
         || "X-Amz-Security-Token".equalsIgnoreCase(name));
     AUDIT.logAuthFailure(new AuditMessage.Builder()
         .setUser(signatureInfo.getAwsAccessId())
-        .atIp(AuditUtils.getClientIpAddress(context))
+        // ClientIpFilter, which sets the client_ip header, runs after this filter.
+        .atIp(ClientIpFilter.getClientIp(httpServletRequest))
         .forOperation(AuthOperation.fromContext(context))
         .withParams(params)
         .withResult(AuditEventStatus.FAILURE)
@@ -165,6 +171,11 @@ public class AuthorizationFilter implements ContainerRequestFilter {
   @VisibleForTesting
   public void setStaticCredentials(StaticCredentialStore staticCredentials) {
     this.staticCredentials = staticCredentials;
+  }
+
+  @VisibleForTesting
+  public void setHttpServletRequest(HttpServletRequest httpServletRequest) {
+    this.httpServletRequest = httpServletRequest;
   }
 
 }

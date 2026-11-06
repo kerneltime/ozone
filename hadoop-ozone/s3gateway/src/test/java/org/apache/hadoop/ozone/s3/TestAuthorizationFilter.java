@@ -56,6 +56,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.Collections;
 import java.util.stream.Stream;
+import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.WebApplicationException;
 import javax.ws.rs.container.ContainerRequestContext;
 import javax.ws.rs.core.MultivaluedHashMap;
@@ -82,6 +83,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 public class TestAuthorizationFilter {
 
   private AuthorizationFilter authorizationFilter = new AuthorizationFilter();
+  private final HttpServletRequest servletRequest = mock(HttpServletRequest.class);
 
   private static final String DATETIME = StringToSignProducer.TIME_FORMATTER.
       format(LocalDateTime.now(ZoneOffset.UTC));
@@ -362,6 +364,25 @@ public class TestAuthorizationFilter {
     }
   }
 
+  /**
+   * A refusal is audited with the address the request came from. The client_ip header is only set by a later filter,
+   * so here it is absent or whatever the caller sent.
+   */
+  @Test
+  void staticCredentialsAuditARefusalWithTheAddressItCameFrom() throws Exception {
+    when(servletRequest.getRemoteAddr()).thenReturn("192.0.2.10");
+    ContainerRequestContext context = headerSignedRequest(STATIC_ACCESS_KEY, "wrong-secret");
+    when(context.getHeaderString(ClientIpFilter.CLIENT_IP_HEADER)).thenReturn("203.0.113.66");
+    LogCapturer audit = LogCapturer.log4j2("S3GAudit");
+    audit.clearOutput();
+
+    try (StaticCredentialStore store = staticCredentials()) {
+      assertThrows(WebApplicationException.class, () -> filter(store, context));
+    }
+
+    assertThat(audit.getOutput()).contains("ip=192.0.2.10").doesNotContain("203.0.113.66");
+  }
+
   private StaticCredentialStore staticCredentials() throws Exception {
     Path file = tempDir.resolve("credentials");
     Files.write(file, Collections.singletonList(STATIC_ACCESS_KEY + "=" + STATIC_SECRET), UTF_8);
@@ -378,6 +399,7 @@ public class TestAuthorizationFilter {
     authorizationFilter.setSignatureParser(awsSignatureProcessor);
     authorizationFilter.setSignatureInfo(signatureInfo);
     authorizationFilter.setStaticCredentials(store);
+    authorizationFilter.setHttpServletRequest(servletRequest);
     authorizationFilter.filter(context);
     return signatureInfo;
   }
