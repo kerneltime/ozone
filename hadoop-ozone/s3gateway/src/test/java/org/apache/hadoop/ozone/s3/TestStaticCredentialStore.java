@@ -44,6 +44,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 /**
  * Tests loading and reloading the static credentials the S3 Gateway verifies signatures with.
@@ -120,17 +121,35 @@ class TestStaticCredentialStore {
     assertThat(e.getMessage()).contains(OZONE_S3G_STATIC_CREDENTIALS_FILE_KEY, OZONE_SECURITY_ENABLED_KEY);
   }
 
-  /** A negative interval would silently disable reloads, so that removing a key from the file never takes effect. */
-  @Test
-  void refusesANegativeReloadInterval() throws IOException {
+  /**
+   * A negative interval would silently disable reloads, so that removing a key from the file never takes effect. A
+   * conversion to milliseconds turns -1us and -1ns into 0, so they must be refused before it.
+   */
+  @ParameterizedTest
+  @ValueSource(strings = {"-1m", "-1us", "-1ns"})
+  void refusesANegativeReloadInterval(String interval) throws IOException {
     write("first=" + FIRST_SECRET);
     OzoneConfiguration conf = conf();
-    conf.set(OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_KEY, "-1m");
+    conf.set(OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_KEY, interval);
+
+    IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> StaticCredentialStore.load(conf));
+
+    assertThat(e.getMessage()).startsWith(OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_KEY
+        + " is " + interval + ": it must be 0, which disables reloading,");
+  }
+
+  /** Reloads are scheduled in milliseconds, which would turn a positive interval below 1ms into 0, disabling them. */
+  @ParameterizedTest
+  @ValueSource(strings = {"1ns", "1us", "999us"})
+  void refusesAReloadIntervalBelowOneMillisecond(String interval) throws IOException {
+    write("first=" + FIRST_SECRET);
+    OzoneConfiguration conf = conf();
+    conf.set(OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_KEY, interval);
 
     IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> StaticCredentialStore.load(conf));
 
     assertThat(e.getMessage()).isEqualTo(OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_KEY
-        + " is -1m: it must be 0, which disables reloading, or more");
+        + " is " + interval + ": it must be 0, which disables reloading, or at least 1ms");
   }
 
   @Test

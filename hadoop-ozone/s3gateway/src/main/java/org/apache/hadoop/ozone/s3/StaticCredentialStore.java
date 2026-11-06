@@ -31,6 +31,7 @@ import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Duration;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -39,6 +40,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import org.apache.hadoop.hdds.conf.ConfigurationSource;
+import org.apache.hadoop.hdds.conf.TimeDurationUtil;
 import org.apache.hadoop.ozone.OzoneSecurityUtil;
 import org.apache.hadoop.ozone.s3.metrics.S3GatewayMetrics;
 import org.slf4j.Logger;
@@ -84,13 +86,16 @@ public final class StaticCredentialStore implements Closeable {
       throw new IllegalArgumentException(OZONE_S3G_STATIC_CREDENTIALS_FILE_KEY + " is set while "
           + OZONE_SECURITY_ENABLED_KEY + " is true: with security enabled, OM verifies S3 signatures");
     }
-    long reloadIntervalMillis = conf.getTimeDuration(OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_KEY,
-        OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_DEFAULT, TimeUnit.MILLISECONDS);
-    if (reloadIntervalMillis < 0) {
-      throw new IllegalArgumentException(OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_KEY + " is "
-          + conf.getTrimmed(OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_KEY)
-          + ": it must be 0, which disables reloading, or more");
+    String reloadInterval = conf.getTrimmed(OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_KEY,
+        OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_DEFAULT);
+    // Checked exactly: converting to milliseconds first would turn -1us, or 1us, into 0, which disables reloading.
+    Duration interval = TimeDurationUtil.getDuration(OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_KEY, reloadInterval,
+        TimeUnit.MILLISECONDS);
+    if (interval.isNegative() || !interval.isZero() && interval.compareTo(Duration.ofMillis(1)) < 0) {
+      throw new IllegalArgumentException(OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_KEY + " is " + reloadInterval
+          + ": it must be 0, which disables reloading, or at least 1ms");
     }
+    long reloadIntervalMillis = interval.toMillis();
     Path file = Paths.get(fileName);
     Map<String, String> secrets = read(file);
     LOG.info("Verifying S3 signatures against {} access keys from {}", secrets.size(), file);
