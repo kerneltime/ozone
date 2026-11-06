@@ -2146,7 +2146,7 @@
     <tag>OZONE, S3GATEWAY, SECURITY</tag>
     <description>
       How often the S3 Gateway re-reads ozone.s3g.static.credentials.file. A file that is absent, empty or malformed
-      keeps the previous credentials. 0 disables reloading.
+      keeps the previous credentials. 0 disables reloading; the S3 Gateway refuses to start with a negative value.
     </description>
   </property>
 

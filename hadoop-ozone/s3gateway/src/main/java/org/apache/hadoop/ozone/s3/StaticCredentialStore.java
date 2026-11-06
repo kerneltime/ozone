@@ -84,10 +84,15 @@ public final class StaticCredentialStore implements Closeable {
       throw new IllegalArgumentException(OZONE_S3G_STATIC_CREDENTIALS_FILE_KEY + " is set while "
           + OZONE_SECURITY_ENABLED_KEY + " is true: with security enabled, OM verifies S3 signatures");
     }
-    Path file = Paths.get(fileName);
-    Map<String, String> secrets = read(file);
     long reloadIntervalMillis = conf.getTimeDuration(OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_KEY,
         OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_DEFAULT, TimeUnit.MILLISECONDS);
+    if (reloadIntervalMillis < 0) {
+      throw new IllegalArgumentException(OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_KEY + " is "
+          + conf.getTrimmed(OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_KEY)
+          + ": it must be 0, which disables reloading, or more");
+    }
+    Path file = Paths.get(fileName);
+    Map<String, String> secrets = read(file);
     LOG.info("Verifying S3 signatures against {} access keys from {}", secrets.size(), file);
     return new StaticCredentialStore(file, secrets, reloadIntervalMillis);
   }

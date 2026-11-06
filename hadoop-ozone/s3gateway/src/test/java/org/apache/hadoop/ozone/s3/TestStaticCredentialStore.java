@@ -120,6 +120,19 @@ class TestStaticCredentialStore {
     assertThat(e.getMessage()).contains(OZONE_S3G_STATIC_CREDENTIALS_FILE_KEY, OZONE_SECURITY_ENABLED_KEY);
   }
 
+  /** A negative interval would silently disable reloads, so that removing a key from the file never takes effect. */
+  @Test
+  void refusesANegativeReloadInterval() throws IOException {
+    write("first=" + FIRST_SECRET);
+    OzoneConfiguration conf = conf();
+    conf.set(OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_KEY, "-1m");
+
+    IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> StaticCredentialStore.load(conf));
+
+    assertThat(e.getMessage()).isEqualTo(OZONE_S3G_STATIC_CREDENTIALS_RELOAD_INTERVAL_KEY
+        + " is -1m: it must be 0, which disables reloading, or more");
+  }
+
   @Test
   void reloadSwapsToTheNewKeys() throws IOException {
     write("first=" + FIRST_SECRET, "second=" + SECOND_SECRET);
