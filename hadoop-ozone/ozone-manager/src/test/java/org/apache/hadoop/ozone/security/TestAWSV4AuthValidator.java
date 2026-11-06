@@ -18,17 +18,39 @@
 package org.apache.hadoop.ozone.security;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.mockStatic;
 
+import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Locale;
+import org.apache.commons.codec.binary.Hex;
 import org.apache.hadoop.ozone.om.AWSV4AuthValidator;
+import org.apache.ozone.test.GenericTestUtils;
+import org.apache.ozone.test.GenericTestUtils.LogCapturer;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.MockedStatic;
+import org.slf4j.event.Level;
 
 /**
  * Tests AWS V4 Auth Validator.
  */
 public class TestAWSV4AuthValidator {
+
+  private static final String STRING_TO_SIGN = "AWS4-HMAC-SHA256\n"
+      + "20150830T123600Z\n"
+      + "20150830/us-east-1/iam/aws4_request\n"
+      + "f536975d06c0309214f805bb90ccff089219ecd68b2577efef23edd43b7e1a59";
+  private static final String SIGNATURE = "5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7";
+  private static final String SECRET = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
 
   public static Collection<Object[]> data() {
     return Arrays.asList(new Object[][]{
@@ -75,5 +97,44 @@ public class TestAWSV4AuthValidator {
                                   String accessKey, Boolean testResult) {
     assertEquals(testResult, AWSV4AuthValidator.validateRequest(
         stringToSign, sign, accessKey));
+  }
+
+  /** The signature is hex, and hex digits may come in either case. */
+  @Test
+  public void testUpperCaseSignatureVerifies() {
+    assertTrue(AWSV4AuthValidator.validateRequest(STRING_TO_SIGN, SIGNATURE.toUpperCase(Locale.ROOT), SECRET));
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"",
+      "zz672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7",
+      "5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d",
+      "5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d70",
+      "5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d700"})
+  @NullSource
+  public void testMalformedSignatureIsRefusedWithoutException(String signature) {
+    assertFalse(AWSV4AuthValidator.validateRequest(STRING_TO_SIGN, signature, SECRET));
+  }
+
+  /** A comparison that stops at the first differing byte tells a caller how much of a forged signature is right. */
+  @Test
+  public void testSignaturesAreComparedInConstantTime() {
+    try (MockedStatic<MessageDigest> messageDigest = mockStatic(MessageDigest.class, CALLS_REAL_METHODS)) {
+      assertTrue(AWSV4AuthValidator.validateRequest(STRING_TO_SIGN, SIGNATURE, SECRET));
+      messageDigest.verify(() -> MessageDigest.isEqual(any(byte[].class), any(byte[].class)));
+    }
+  }
+
+  /** The signing key signs any request of its day, region and service, so it must not reach the log. */
+  @Test
+  public void testSigningKeyIsNotLogged() {
+    String signingKey = Hex.encodeHexString(AWSV4AuthValidator.getSigningKey(SECRET, STRING_TO_SIGN));
+    GenericTestUtils.setLogLevel(AWSV4AuthValidator.class, Level.DEBUG);
+    try (LogCapturer logs = LogCapturer.captureLogs(AWSV4AuthValidator.class)) {
+      AWSV4AuthValidator.getSigningKey(SECRET, STRING_TO_SIGN);
+      assertTrue(AWSV4AuthValidator.validateRequest(STRING_TO_SIGN, SIGNATURE, SECRET));
+
+      assertFalse(logs.getOutput().toLowerCase(Locale.ROOT).contains(signingKey), "the signing key was logged");
+    }
   }
 }

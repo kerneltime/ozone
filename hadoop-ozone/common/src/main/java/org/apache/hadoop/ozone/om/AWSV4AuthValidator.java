@@ -21,12 +21,11 @@ import java.nio.charset.StandardCharsets;
 import java.security.InvalidKeyException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.Locale;
 import javax.crypto.spec.SecretKeySpec;
 import org.apache.hadoop.ozone.security.HmacSha256;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.kerby.util.Hex;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * AWS v4 authentication payload validator. For more details refer to AWS
@@ -34,9 +33,6 @@ import org.slf4j.LoggerFactory;
  * sigv4-create-canonical-request.html.
  **/
 public final class AWSV4AuthValidator {
-
-  private static final Logger LOG =
-      LoggerFactory.getLogger(AWSV4AuthValidator.class);
 
   private AWSV4AuthValidator() {
   }
@@ -73,9 +69,6 @@ public final class AWSV4AuthValidator {
     byte[] kRegion = sign(kDate, regionName);
     byte[] kService = sign(kRegion, serviceName);
     byte[] kSigning = sign(kService, "aws4_request");
-    if (LOG.isDebugEnabled()) {
-      LOG.debug(Hex.encode(kSigning));
-    }
     return kSigning;
   }
 
@@ -83,6 +76,9 @@ public final class AWSV4AuthValidator {
       String userKey) {
     String expectedSignature = Hex.encode(sign(getSigningKey(userKey,
         strToSign), strToSign));
-    return expectedSignature.equals(signature);
+    // Constant time, so that how long the comparison takes does not tell how much of a forged signature is right.
+    // Hex digits may come in either case.
+    return signature != null && MessageDigest.isEqual(expectedSignature.getBytes(StandardCharsets.UTF_8),
+        signature.toLowerCase(Locale.ROOT).getBytes(StandardCharsets.UTF_8));
   }
 }
