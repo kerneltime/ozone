@@ -55,6 +55,11 @@ public class S3GatewayHttpServer extends BaseHttpServer {
   }
 
   @Override
+  protected boolean shouldPreserveHeaderValueCase() {
+    return true;
+  }
+
+  @Override
   protected String getHttpAddressKey() {
     return S3GatewayConfigKeys.OZONE_S3G_HTTP_ADDRESS_KEY;
   }

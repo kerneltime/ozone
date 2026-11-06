@@ -122,8 +122,9 @@ public class AWSSignatureProcessor implements SignatureProcessor {
 
     String payloadHash = getPayloadHash(headers, signatureInfo);
     signatureInfo.setPayloadHash(payloadHash);
+    // The path as sent: decoding it would turn an encoded slash in a key into a separator.
     signatureInfo.setUnfilteredURI(
-        context.getUriInfo().getRequestUri().getPath());
+        context.getUriInfo().getRequestUri().getRawPath());
     return signatureInfo;
   }
 
@@ -251,12 +252,14 @@ public class AWSSignatureProcessor implements SignatureProcessor {
       for (Entry<String, List<String>> headerEntry : rawHeaders.entrySet()) {
         if (!headerEntry.getValue().isEmpty()) {
           String headerKey = headerEntry.getKey();
+          // A header sent on several lines has one value per line, which SigV4 joins with commas.
+          String headerValue = String.join(",", headerEntry.getValue());
           if (headers.containsKey(headerKey)) {
             //multiple headers from the same type are combined
             headers.put(headerKey,
-                headers.get(headerKey) + "," + headerEntry.getValue().get(0));
+                headers.get(headerKey) + "," + headerValue);
           } else {
-            headers.put(headerKey, headerEntry.getValue().get(0));
+            headers.put(headerKey, headerValue);
           }
         }
       }

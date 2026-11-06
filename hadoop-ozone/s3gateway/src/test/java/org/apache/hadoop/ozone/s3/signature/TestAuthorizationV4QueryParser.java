@@ -317,7 +317,10 @@ public class TestAuthorizationV4QueryParser {
 
     final String stringToSign =
         StringToSignProducer.createSignatureBase(signatureInfo, "GET",
-            headers, queryParams);
+            headers, "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F" + CREDENTIAL_DATE
+                + "%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=" + DATETIME + "&X-Amz-Expires=86400"
+                + "&X-Amz-SignedHeaders=host&X-Amz-Signature="
+                + "aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404");
 
     MessageDigest md = MessageDigest.getInstance("SHA-256");
     md.update(canonicalRequest.getBytes(StandardCharsets.UTF_8));

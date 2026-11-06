@@ -17,12 +17,15 @@
 
 package org.apache.hadoop.ozone.s3;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CommonConfigurationKeysPublic;
 import org.apache.hadoop.hdds.conf.MutableConfigurationSource;
@@ -35,6 +38,8 @@ import org.apache.hadoop.security.authentication.server.KerberosAuthenticationHa
 import org.apache.ozone.test.GenericTestUtils.PortAllocator;
 import org.eclipse.jetty.ee8.servlet.FilterHolder;
 import org.eclipse.jetty.ee8.webapp.WebAppContext;
+import org.eclipse.jetty.server.Connector;
+import org.eclipse.jetty.server.HttpConnectionFactory;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -143,6 +148,33 @@ class TestS3GatewayHttpServers {
     } finally {
       UserGroupInformation.reset();
     }
+  }
+
+  /**
+   * SigV4 signs header values exactly as the client sent them, so the S3 connector must not hand the gateway Jetty's
+   * cached spelling of a common value, such as "text/plain; charset=utf-8" for "text/plain; charset=UTF-8". The web
+   * admin server verifies no signatures and keeps Jetty's default.
+   */
+  @Test
+  void s3ConnectorKeepsHeaderValueCase() throws Exception {
+    OzoneConfiguration conf = newConf();
+    conf.set(S3GatewayConfigKeys.OZONE_S3G_HTTP_ADDRESS_KEY, PortAllocator.localhostWithFreePort());
+    conf.set(S3GatewayConfigKeys.OZONE_S3G_WEBADMIN_HTTP_ADDRESS_KEY, PortAllocator.localhostWithFreePort());
+
+    try (ExposedS3GatewayHttpServer s3 = new ExposedS3GatewayHttpServer(conf);
+         ExposedS3GatewayWebAdminServer webAdmin = new ExposedS3GatewayWebAdminServer(conf)) {
+      assertThat(headerCacheCaseSensitivity(s3.context())).containsOnly(true);
+      assertThat(headerCacheCaseSensitivity(webAdmin.context())).containsOnly(false);
+    }
+  }
+
+  private static List<Boolean> headerCacheCaseSensitivity(WebAppContext context) {
+    List<Boolean> result = new ArrayList<>();
+    for (Connector connector : context.getServer().getConnectors()) {
+      result.add(connector.getConnectionFactory(HttpConnectionFactory.class).getHttpConfiguration()
+          .isHeaderCacheCaseSensitive());
+    }
+    return result;
   }
 
   private OzoneConfiguration newConf() {

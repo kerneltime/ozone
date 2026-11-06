@@ -330,6 +330,18 @@ public class TestHttpServer2 {
   }
 
   /**
+   * By default Jetty 12 hands the servlet its cached spelling of a common header value that matches the received one
+   * ignoring case, so "text/plain; charset=UTF-8" arrives as "text/plain; charset=utf-8". With preserveHeaderValueCase
+   * -- the S3 Gateway mode, as SigV4 signs header values as sent -- the value arrives exactly as sent.
+   */
+  @Test
+  public void testHeaderValueCasePreservedWhenRequested() throws Exception {
+    assertEquals("text/plain; charset=UTF-8", echoedContentType(true, "text/plain; charset=UTF-8"));
+    assertEquals("Text/Plain", echoedContentType(true, "Text/Plain"));
+    assertEquals("text/plain; charset=utf-8", echoedContentType(false, "text/plain; charset=UTF-8"));
+  }
+
+  /**
    * Every default servlet must answer on a running server. hadoop-common's
    * JMXJsonServlet and ConfServlet route their admin access check through
    * org.apache.hadoop.http.HttpServer2, which cannot be loaded on a Jetty 12
@@ -481,6 +493,42 @@ public class TestHttpServer2 {
       String statusLine = reader.readLine();
       assertNotNull(statusLine, "no response for " + target);
       return Integer.parseInt(statusLine.split(" ")[1]);
+    }
+  }
+
+  /** Sends a request with the given Content-Type and returns the value the servlet received. */
+  private static String echoedContentType(boolean preserveHeaderValueCase, String contentType) throws Exception {
+    HttpServer2 server = new HttpServer2.Builder()
+        .setConf(new OzoneConfiguration())
+        .setName("test")
+        .addEndpoint(URI.create("http://localhost:0"))
+        .preserveHeaderValueCase(preserveHeaderValueCase)
+        .build();
+    server.addServlet("echo", "/echo/*", EchoContentTypeServlet.class);
+    server.start();
+    try {
+      URL url = new URL("http://localhost:" + server.getConnectorAddress(0).getPort() + "/echo/x");
+      HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+      conn.setConnectTimeout(5000);
+      conn.setReadTimeout(5000);
+      conn.setRequestProperty("Content-Type", contentType);
+      try (BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(),
+          StandardCharsets.ISO_8859_1))) {
+        return reader.readLine();
+      } finally {
+        conn.disconnect();
+      }
+    } finally {
+      server.stop();
+    }
+  }
+
+  /** Servlet that answers with the Content-Type header it received. */
+  public static class EchoContentTypeServlet extends HttpServlet {
+    @Override
+    protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+      resp.setStatus(HttpServletResponse.SC_OK);
+      resp.getWriter().write(req.getHeader("Content-Type"));
     }
   }
 

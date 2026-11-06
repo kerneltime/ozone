@@ -301,6 +301,7 @@ public final class HttpServer2 implements FilterContainer {
     private boolean skipDefaultApps;
     private boolean allowAmbiguousUri;
     private boolean allowEncodedDotSegments;
+    private boolean preserveHeaderValueCase;
 
     public Builder setName(String serverName) {
       this.name = serverName;
@@ -535,6 +536,16 @@ public final class HttpServer2 implements FilterContainer {
       return this;
     }
 
+    /**
+     * Hand header values to the application exactly as received. By default Jetty 12 replaces a value that matches
+     * one of its cached header fields ignoring case with the cached spelling, e.g. "text/plain; charset=UTF-8" with
+     * "text/plain; charset=utf-8". The S3 Gateway needs the value as sent, because SigV4 signs it.
+     */
+    public Builder preserveHeaderValueCase(boolean value) {
+      this.preserveHeaderValueCase = value;
+      return this;
+    }
+
     public HttpServer2 build() throws IOException {
       Objects.requireNonNull(name, "name is not set");
       Preconditions.checkState(!endpoints.isEmpty(), "No endpoints specified");
@@ -575,6 +586,7 @@ public final class HttpServer2 implements FilterContainer {
       httpConfig.setRequestHeaderSize(requestHeaderSize);
       httpConfig.setResponseHeaderSize(responseHeaderSize);
       httpConfig.setSendServerVersion(false);
+      httpConfig.setHeaderCacheCaseSensitive(preserveHeaderValueCase);
       if (allowEncodedDotSegments) {
         httpConfig.setUriCompliance(OZONE_S3_URI_COMPLIANCE);
       } else if (allowAmbiguousUri) {

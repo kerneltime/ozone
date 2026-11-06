@@ -159,6 +159,7 @@ public abstract class BaseHttpServer implements AutoCloseable {
 
       builder.allowAmbiguousUri(shouldAllowAmbiguousUri());
       builder.allowEncodedDotSegments(shouldAllowEncodedDotSegments());
+      builder.preserveHeaderValueCase(shouldPreserveHeaderValueCase());
 
       httpServer = builder.build();
 
@@ -589,6 +590,14 @@ public abstract class BaseHttpServer implements AutoCloseable {
    * default.
    */
   protected boolean shouldAllowEncodedDotSegments() {
+    return false;
+  }
+
+  /**
+   * Override to hand header values to the application exactly as received, instead of Jetty's cached spelling of a
+   * common value. Needed by the S3 Gateway, which verifies SigV4 signatures over the header values as sent.
+   */
+  protected boolean shouldPreserveHeaderValueCase() {
     return false;
   }
 

@@ -18,12 +18,18 @@
 package org.apache.hadoop.ozone.s3.signature;
 
 import static org.apache.hadoop.ozone.s3.endpoint.EndpointTestUtils.assertErrorResponse;
+import static org.apache.hadoop.ozone.s3.signature.SignatureProcessor.DATE_FORMATTER;
+import static org.apache.hadoop.ozone.s3.util.S3Consts.STREAMING_UNSIGNED_PAYLOAD_TRAILER;
+import static org.apache.hadoop.ozone.s3.util.S3Consts.UNSIGNED_PAYLOAD;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.net.URI;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import javax.ws.rs.container.ContainerRequestContext;
 import javax.ws.rs.core.MultivaluedHashMap;
 import javax.ws.rs.core.MultivaluedMap;
@@ -58,6 +64,56 @@ public class TestAWSSignatureProcessor {
 
     assertTrue(headers.containsKey(HeaderPreprocessor.CONTENT_TYPE));
     assertEquals("", headers.get(HeaderPreprocessor.CONTENT_TYPE));
+  }
+
+  @Test
+  public void testRepeatedHeaderValuesAreJoinedWithCommas() {
+    MultivaluedMap<String, String> rawHeaders = new MultivaluedHashMap<>();
+    rawHeaders.addAll("My-Header1", "value4", "value1", "value3", "value2");
+
+    AWSSignatureProcessor.LowerCaseKeyStringMap headers =
+        AWSSignatureProcessor.LowerCaseKeyStringMap.fromHeaderMap(rawHeaders);
+
+    assertEquals("value4,value1,value3,value2", headers.get("my-header1"));
+  }
+
+  @Test
+  public void testUnfilteredUriKeepsEncodedSlash() throws Exception {
+    SignatureInfo signatureInfo = parseSignature("http://s3g.example.com:9878/bucket/dir%2Ffile", UNSIGNED_PAYLOAD);
+
+    assertEquals("/bucket/dir%2Ffile", signatureInfo.getUnfilteredURI());
+  }
+
+  @Test
+  public void testStreamingUnsignedPayloadTrailerIsThePayloadHash() throws Exception {
+    SignatureInfo signatureInfo = parseSignature("http://s3g.example.com:9878/bucket/key",
+        STREAMING_UNSIGNED_PAYLOAD_TRAILER);
+
+    assertEquals(STREAMING_UNSIGNED_PAYLOAD_TRAILER, signatureInfo.getPayloadHash());
+  }
+
+  /** Parses a header-signed request sent now to {@code requestUri}, as the gateway receives it. */
+  private static SignatureInfo parseSignature(String requestUri, String contentSha256) throws Exception {
+    ZonedDateTime now = ZonedDateTime.now(ZoneOffset.UTC);
+    String dateTime = StringToSignProducer.TIME_FORMATTER.format(now);
+    MultivaluedMap<String, String> headers = new MultivaluedHashMap<>();
+    headers.putSingle("Authorization", "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/"
+        + DATE_FORMATTER.format(now) + "/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;"
+        + "x-amz-date, Signature=fe5f80f77d5fa3beca038a248ff027d0445342fe2855ddc963176630326f1024");
+    headers.putSingle("Host", "s3g.example.com:9878");
+    headers.putSingle("X-Amz-Content-Sha256", contentSha256);
+    headers.putSingle("X-Amz-Date", dateTime);
+    UriInfo uriInfo = mock(UriInfo.class);
+    when(uriInfo.getRequestUri()).thenReturn(new URI(requestUri));
+    when(uriInfo.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
+    ContainerRequestContext context = mock(ContainerRequestContext.class);
+    when(context.getUriInfo()).thenReturn(uriInfo);
+    when(context.getHeaders()).thenReturn(headers);
+    when(context.getMethod()).thenReturn("GET");
+
+    AWSSignatureProcessor processor = new AWSSignatureProcessor();
+    processor.setContext(context);
+    return processor.parseSignature();
   }
 
   @Test

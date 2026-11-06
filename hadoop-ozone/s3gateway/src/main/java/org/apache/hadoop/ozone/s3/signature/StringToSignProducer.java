@@ -22,7 +22,6 @@ import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.newError;
 import static org.apache.hadoop.ozone.s3.util.S3Consts.X_AMZ_CONTENT_SHA256;
 
 import com.google.common.annotations.VisibleForTesting;
-import java.io.UnsupportedEncodingException;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -38,9 +37,9 @@ import java.util.stream.Collectors;
 import javax.ws.rs.container.ContainerRequestContext;
 import javax.ws.rs.core.MultivaluedMap;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.hadoop.ozone.s3.exception.OS3Exception;
 import org.apache.hadoop.ozone.s3.signature.AWSSignatureProcessor.LowerCaseKeyStringMap;
-import org.apache.hadoop.ozone.s3.util.S3Utils;
 import org.apache.kerby.util.Hex;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,8 +56,8 @@ public final class StringToSignProducer {
   private static final String NEWLINE = "\n";
   public static final String HOST = "host";
 
-  private static final String[] URL_ENCODE_SEARCH_CHARS = new String[] {"+", "*", "%7E"};
-  private static final String[] URL_ENCODE_REPLACE_CHARS = new String[] {"%20", "%2A", "~"};
+  private static final String X_AMZ_SIGNATURE = "X-Amz-Signature";
+  private static final char[] HEX_DIGITS = "0123456789ABCDEF".toCharArray();
   public static final DateTimeFormatter TIME_FORMATTER =
       DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'")
           .withZone(ZoneOffset.UTC);
@@ -73,8 +72,7 @@ public final class StringToSignProducer {
     return createSignatureBase(signatureInfo,
         context.getMethod(),
         LowerCaseKeyStringMap.fromHeaderMap(context.getHeaders()),
-        fromMultiValueToSingleValueMap(
-            context.getUriInfo().getQueryParameters()));
+        context.getUriInfo().getRequestUri().getRawQuery());
   }
 
   @VisibleForTesting
@@ -82,7 +80,7 @@ public final class StringToSignProducer {
       SignatureInfo signatureInfo,
       String method,
       LowerCaseKeyStringMap headers,
-      Map<String, String> queryParams
+      String rawQuery
   ) throws Exception {
     StringBuilder strToSign = new StringBuilder();
     // According to AWS sigv4 documentation, authorization header should be
@@ -115,7 +113,7 @@ public final class StringToSignProducer {
         uri,
         signatureInfo.getSignedHeaders(),
         headers,
-        queryParams,
+        rawQuery,
         signatureInfo.getPayloadHash());
     strToSign.append(hash(canonicalRequest));
     if (LOG.isDebugEnabled()) {
@@ -148,17 +146,13 @@ public final class StringToSignProducer {
       String uri,
       String signedHeaders,
       Map<String, String> headers,
-      Map<String, String> queryParams,
+      String rawQuery,
       String payloadHash
   ) throws OS3Exception {
 
-    List<String> encParts = new ArrayList<>();
-    for (String p : StringUtils.splitPreserveAllTokens(uri, '/')) {
-      encParts.add(urlEncode(p));
-    }
-    String canonicalUri = join("/", encParts);
+    String canonicalUri = canonicalUri(uri);
 
-    String canonicalQueryStr = getQueryParamString(queryParams);
+    String canonicalQueryStr = canonicalQuery(rawQuery);
 
     StringBuilder canonicalHeaders = new StringBuilder();
 
@@ -166,11 +160,8 @@ public final class StringToSignProducer {
       canonicalHeaders.append(header.toLowerCase())
           .append(':');
       if (headers.containsKey(header)) {
-        String headerValue = headers.get(header);
-        if (header.equals("content-type")) {
-          headerValue = headerValue.toLowerCase();
-        }
-        canonicalHeaders.append(headerValue)
+        // SigV4 trims the value and collapses runs of whitespace, but keeps the case of the value.
+        canonicalHeaders.append(StringUtils.normalizeSpace(headers.get(header)))
             .append(NEWLINE);
       } else {
         LOG.error("Header " + header + " not present in "
@@ -190,53 +181,81 @@ public final class StringToSignProducer {
   }
   
   /**
-   * String join that also works with empty strings.
-   *
-   * @return joined string
+   * S3 signs the path as the client sent it, encoded once: a percent-encoded octet, such as %2F in a key, stays
+   * encoded, with upper-case hex digits, and any other octet that is neither unreserved nor '/' is percent-encoded.
    */
-  private static String join(String glue, List<String> parts) {
-    StringBuilder result = new StringBuilder();
-    boolean addSeparator = false;
-    for (String p : parts) {
-      if (addSeparator) {
-        result.append(glue);
+  private static String canonicalUri(String rawPath) {
+    byte[] bytes = rawPath.getBytes(UTF_8);
+    StringBuilder result = new StringBuilder(bytes.length);
+    for (int i = 0; i < bytes.length; i++) {
+      if (isPercentEncodedOctet(bytes, i)) {
+        appendPercentEncoded(result, decodeOctet(bytes, i));
+        i += 2;
+      } else if (bytes[i] == '/') {
+        result.append('/');
+      } else {
+        appendUriEncoded(result, bytes[i] & 0xFF);
       }
-      result.append(p);
-      addSeparator = true;
     }
     return result.toString();
   }
 
-  private static String urlEncode(String str) {
-    try {
-      return StringUtils.replaceEach(S3Utils.urlEncode(str), URL_ENCODE_SEARCH_CHARS, URL_ENCODE_REPLACE_CHARS);
-    } catch (UnsupportedEncodingException e) {
-      throw new RuntimeException(e);
+  /**
+   * Every query parameter, each value of a repeated one included, sorted by encoded name and then by encoded value,
+   * without the signature of a presigned request.
+   */
+  private static String canonicalQuery(String rawQuery) {
+    if (StringUtils.isEmpty(rawQuery)) {
+      return "";
     }
+    List<Pair<String, String>> params = new ArrayList<>();
+    for (String param : StringUtils.split(rawQuery, '&')) {
+      int separator = param.indexOf('=');
+      String name = canonicalQueryComponent(separator < 0 ? param : param.substring(0, separator));
+      if (!name.equals(X_AMZ_SIGNATURE)) {
+        params.add(Pair.of(name, canonicalQueryComponent(separator < 0 ? "" : param.substring(separator + 1))));
+      }
+    }
+    Collections.sort(params);
+    return params.stream().map(p -> p.getLeft() + '=' + p.getRight()).collect(Collectors.joining("&"));
   }
 
-  private static String getQueryParamString(
-      Map<String, String> queryMap
-  ) {
-    List<String> params = new ArrayList<>(queryMap.keySet());
-
-    // Sort by name, then by value
-    Collections.sort(params, (o1, o2) -> o1.equals(o2) ?
-        queryMap.get(o1).compareTo(queryMap.get(o2)) :
-        o1.compareTo(o2));
-
-    StringBuilder result = new StringBuilder();
-    for (String p : params) {
-      if (!p.equals("X-Amz-Signature")) {
-        if (result.length() > 0) {
-          result.append('&');
-        }
-        result.append(urlEncode(p))
-            .append('=')
-            .append(urlEncode(queryMap.get(p)));
+  /** Percent-decodes a query parameter name or value, where '+' is a literal plus, and encodes it as SigV4 does. */
+  private static String canonicalQueryComponent(String rawValue) {
+    byte[] bytes = rawValue.getBytes(UTF_8);
+    StringBuilder result = new StringBuilder(bytes.length);
+    for (int i = 0; i < bytes.length; i++) {
+      if (isPercentEncodedOctet(bytes, i)) {
+        appendUriEncoded(result, decodeOctet(bytes, i));
+        i += 2;
+      } else {
+        appendUriEncoded(result, bytes[i] & 0xFF);
       }
     }
     return result.toString();
+  }
+
+  private static boolean isPercentEncodedOctet(byte[] bytes, int i) {
+    return bytes[i] == '%' && i + 2 < bytes.length
+        && Character.digit(bytes[i + 1], 16) >= 0 && Character.digit(bytes[i + 2], 16) >= 0;
+  }
+
+  private static int decodeOctet(byte[] bytes, int i) {
+    return Character.digit(bytes[i + 1], 16) << 4 | Character.digit(bytes[i + 2], 16);
+  }
+
+  /** Appends an unreserved octet (RFC 3986) as is, and any other octet percent-encoded. */
+  private static void appendUriEncoded(StringBuilder result, int octet) {
+    if (octet >= 'A' && octet <= 'Z' || octet >= 'a' && octet <= 'z' || octet >= '0' && octet <= '9'
+        || octet == '-' || octet == '.' || octet == '_' || octet == '~') {
+      result.append((char) octet);
+    } else {
+      appendPercentEncoded(result, octet);
+    }
+  }
+
+  private static void appendPercentEncoded(StringBuilder result, int octet) {
+    result.append('%').append(HEX_DIGITS[octet >> 4]).append(HEX_DIGITS[octet & 0x0F]);
   }
 
   /**
