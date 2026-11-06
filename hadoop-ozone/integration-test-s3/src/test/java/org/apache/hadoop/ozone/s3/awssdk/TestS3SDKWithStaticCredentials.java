@@ -156,6 +156,24 @@ class TestS3SDKWithStaticCredentials extends OzoneS3SDKTests {
     }
   }
 
+  /** SigV4 signs a raw '+' in the query as {@code %2B}, so both spellings must list the keys under a literal plus. */
+  @Test
+  void aPlusInTheQueryIsALiteralPlusHoweverItIsSent() throws Exception {
+    String bucket = "static-credentials-plus";
+    try (S3Client valid = client(SDK_ACCESS_KEY, SDK_SECRET)) {
+      valid.createBucket(b -> b.bucket(bucket));
+      valid.putObject(b -> b.bucket(bucket).key("a+b/plus"), RequestBody.fromString("v"));
+      valid.putObject(b -> b.bucket(bucket).key("a b/space"), RequestBody.fromString("v"));
+    }
+
+    assertThat(signedGet(bucket, "list-type=2&prefix=a+b", "list-type=2&prefix=a%2Bb"))
+        .startsWith("200\n").contains("<Key>a+b/plus</Key>").doesNotContain("<Key>a b/space</Key>");
+    assertThat(signedGet(bucket, "list-type=2&prefix=a%2Bb", "list-type=2&prefix=a%2Bb"))
+        .startsWith("200\n").contains("<Key>a+b/plus</Key>").doesNotContain("<Key>a b/space</Key>");
+    assertThat(signedGet(bucket, "list-type=2&prefix=a%20b", "list-type=2&prefix=a%20b"))
+        .startsWith("200\n").contains("<Key>a b/space</Key>").doesNotContain("<Key>a+b/plus</Key>");
+  }
+
   @Test
   void aReloadSwapsTheKeys() throws Exception {
     try (S3Client kept = client(KEPT_ACCESS_KEY, KEPT_SECRET);
@@ -275,6 +293,43 @@ class TestS3SDKWithStaticCredentials extends OzoneS3SDKTests {
           .map(method -> REASONS.get(method.getDeclaringClass().getName() + "#" + method.getName()))
           .map(ConditionEvaluationResult::disabled)
           .orElse(ConditionEvaluationResult.enabled("signed as sent"));
+    }
+  }
+
+  /**
+   * GETs {@code /bucket?rawQuery}, signed as SigV4 specifies with {@code canonicalQuery}, the canonical form of the
+   * query written out by hand.
+   *
+   * @return the status code, a newline and the response body
+   */
+  private String signedGet(String bucket, String rawQuery, String canonicalQuery) throws Exception {
+    String address = getCluster().getConf().get(OZONE_S3G_HTTP_ADDRESS_KEY);
+    URL url = new URL("http://" + address + "/" + bucket + "?" + rawQuery);
+    String dateTime = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").format(ZonedDateTime.now(ZoneOffset.UTC));
+    String scope = dateTime.substring(0, 8) + "/us-east-1/s3/aws4_request";
+    byte[] signingKey = hmac(hmac(hmac(hmac(("AWS4" + SDK_SECRET).getBytes(UTF_8), dateTime.substring(0, 8)),
+        "us-east-1"), "s3"), "aws4_request");
+    String signedHeaders = "host;x-amz-content-sha256;x-amz-date";
+    String canonicalRequest = "GET\n/" + bucket + "\n" + canonicalQuery + "\n"
+        + "host:" + url.getHost() + ":" + url.getPort() + "\n"
+        + "x-amz-content-sha256:UNSIGNED-PAYLOAD\n"
+        + "x-amz-date:" + dateTime + "\n\n"
+        + signedHeaders + "\nUNSIGNED-PAYLOAD";
+    String signature = Hex.encodeHexString(hmac(signingKey,
+        "AWS4-HMAC-SHA256\n" + dateTime + "\n" + scope + "\n" + DigestUtils.sha256Hex(canonicalRequest)));
+
+    HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+    connection.setRequestProperty("x-amz-content-sha256", "UNSIGNED-PAYLOAD");
+    connection.setRequestProperty("x-amz-date", dateTime);
+    connection.setRequestProperty("Authorization", "AWS4-HMAC-SHA256 Credential=" + SDK_ACCESS_KEY + "/" + scope
+        + ", SignedHeaders=" + signedHeaders + ", Signature=" + signature);
+    try {
+      int status = connection.getResponseCode();
+      try (InputStream response = status < 400 ? connection.getInputStream() : connection.getErrorStream()) {
+        return status + "\n" + (response == null ? "" : IOUtils.toString(response, UTF_8));
+      }
+    } finally {
+      connection.disconnect();
     }
   }
 

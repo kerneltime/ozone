@@ -28,6 +28,7 @@ import org.glassfish.jersey.server.ResourceConfig;
 public class Application extends ResourceConfig {
   public Application() {
     packages("org.apache.hadoop.ozone.s3sts");
+    register(org.apache.hadoop.ozone.s3.QueryStringFilter.class);
     register(org.apache.hadoop.ozone.s3.AuthorizationFilter.class);
     register(org.apache.hadoop.ozone.s3.ClientIpFilter.class);
     register(OSTSExceptionMapper.class);
