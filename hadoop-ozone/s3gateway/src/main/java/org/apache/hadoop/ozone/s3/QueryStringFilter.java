@@ -74,10 +74,15 @@ public class QueryStringFilter implements ContainerRequestFilter {
       int separator = parameter.indexOf('=');
       String name = decode(separator < 0 ? parameter : parameter.substring(0, separator));
       if (!names.add(name)) {
-        throw wrapOS3Exception(S3ErrorTable.newError(INVALID_ARGUMENT, requestUri.getRawPath())
-            .withMessage("The query parameter " + name + " is repeated."));
+        throw repeatedParameter(name, requestUri.getRawPath());
       }
     }
+  }
+
+  /** The error that refuses a repeated parameter, in the S3 error format. */
+  protected RuntimeException repeatedParameter(String name, String resource) {
+    return wrapOS3Exception(S3ErrorTable.newError(INVALID_ARGUMENT, resource)
+        .withMessage("The query parameter " + name + " is repeated."));
   }
 
   /** Decodes a parameter name as the endpoints read it; no raw '+' is left to become a space. */
