@@ -18,11 +18,14 @@
 package org.apache.hadoop.ozone.s3;
 
 import static org.apache.hadoop.ozone.s3.S3GatewayConfigKeys.OZONE_S3G_HTTP_ADDRESS_KEY;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import javax.enterprise.inject.spi.Bean;
+import javax.enterprise.inject.spi.BeanManager;
 import javax.xml.parsers.DocumentBuilderFactory;
 import org.apache.hadoop.ozone.MiniOzoneCluster;
 import org.apache.hadoop.ozone.s3sts.S3STSConfigKeys;
@@ -42,6 +45,10 @@ import org.w3c.dom.Element;
 class TestQueryStringErrors extends ClusterForTests<MiniOzoneCluster> {
 
   private final String stsAddress = PortAllocator.localhostWithFreePort();
+  private final S3GatewayService gateway = new S3GatewayService(conf -> {
+    conf.setBoolean(S3STSConfigKeys.OZONE_S3G_STS_HTTP_ENABLED_KEY, true);
+    conf.set(S3STSConfigKeys.OZONE_S3G_STS_HTTP_ADDRESS_KEY, stsAddress);
+  }, OZONE_S3G_HTTP_ADDRESS_KEY);
 
   @BeforeAll
   void beforeAll() throws Exception {
@@ -56,11 +63,20 @@ class TestQueryStringErrors extends ClusterForTests<MiniOzoneCluster> {
   @Override
   protected MiniOzoneCluster createCluster() throws Exception {
     return newClusterBuilder()
-        .addService(new S3GatewayService(conf -> {
-          conf.setBoolean(S3STSConfigKeys.OZONE_S3G_STS_HTTP_ENABLED_KEY, true);
-          conf.set(S3STSConfigKeys.OZONE_S3G_STS_HTTP_ADDRESS_KEY, stsAddress);
-        }, OZONE_S3G_HTTP_ADDRESS_KEY))
+        .addService(gateway)
         .build();
+  }
+
+  /**
+   * The S3 application asks CDI for its QueryStringFilter. Only the S3 filter may match: if the STS subclass matched
+   * too, Jersey could take either one, and the HTTP checks below could pass by chance.
+   */
+  @Test
+  void theS3ApplicationResolvesTheS3QueryStringFilter() {
+    BeanManager beanManager = gateway.getGateway().getHttpServer().getBeanManager();
+
+    assertThat(beanManager.getBeans(QueryStringFilter.class)).extracting(Bean::getBeanClass)
+        .containsExactly(QueryStringFilter.class);
   }
 
   @Test

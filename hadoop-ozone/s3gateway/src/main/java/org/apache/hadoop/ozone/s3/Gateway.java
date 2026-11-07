@@ -177,4 +177,9 @@ public class Gateway extends GenericCli implements Callable<Void> {
     return this.httpServer.getHttpsAddress();
   }
 
+  @VisibleForTesting
+  S3GatewayHttpServer getHttpServer() {
+    return httpServer;
+  }
+
 }

@@ -48,6 +48,10 @@ public class S3GatewayService implements MiniOzoneCluster.Service {
     this.httpAddressKey = httpAddressKey;
   }
 
+  Gateway getGateway() {
+    return s3g;
+  }
+
   @Override
   public void start(OzoneConfiguration conf) throws Exception {
     Preconditions.assertNull(s3g, "S3 Gateway already started");

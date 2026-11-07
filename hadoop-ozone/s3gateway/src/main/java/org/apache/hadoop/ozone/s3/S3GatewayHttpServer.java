@@ -17,7 +17,9 @@
 
 package org.apache.hadoop.ozone.s3;
 
+import com.google.common.annotations.VisibleForTesting;
 import java.io.IOException;
+import javax.enterprise.inject.spi.BeanManager;
 import org.apache.hadoop.hdds.conf.MutableConfigurationSource;
 import org.apache.hadoop.hdds.server.http.BaseHttpServer;
 
@@ -57,6 +59,13 @@ public class S3GatewayHttpServer extends BaseHttpServer {
   @Override
   protected boolean shouldPreserveHeaderValueCase() {
     return true;
+  }
+
+  /** The bean manager of this server's CDI container, which Weld's servlet integration keeps in the context. */
+  @VisibleForTesting
+  BeanManager getBeanManager() {
+    return (BeanManager) getWebAppContext().getServletContext()
+        .getAttribute("org.jboss.weld.environment.servlet." + BeanManager.class.getName());
   }
 
   @Override
