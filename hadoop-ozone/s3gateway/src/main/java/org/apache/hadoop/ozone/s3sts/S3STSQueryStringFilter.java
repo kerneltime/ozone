@@ -20,6 +20,7 @@ package org.apache.hadoop.ozone.s3sts;
 import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.STS_VALIDATION_ERROR;
 
 import javax.annotation.Priority;
+import javax.enterprise.inject.Typed;
 import javax.ws.rs.container.PreMatching;
 import javax.ws.rs.ext.Provider;
 import org.apache.hadoop.ozone.s3.QueryStringFilter;
@@ -28,10 +29,14 @@ import org.apache.hadoop.ozone.s3.exception.OSTSException;
 /**
  * The {@link QueryStringFilter} of the STS endpoint. It refuses a repeated parameter with an {@link OSTSException},
  * which the STS exception mapper writes in the STS error format that STS clients parse.
+ *
+ * <p>Its CDI bean type is only this class. Otherwise a lookup of {@link QueryStringFilter}, which the S3 endpoint
+ * makes, could resolve to this subclass and answer S3 clients in the STS format.
  */
 @Provider
 @PreMatching
 @Priority(QueryStringFilter.PRIORITY)
+@Typed(S3STSQueryStringFilter.class)
 public class S3STSQueryStringFilter extends QueryStringFilter {
 
   @Override

@@ -17,6 +17,7 @@
 
 package org.apache.hadoop.ozone.s3;
 
+import static org.apache.hadoop.ozone.s3.S3GatewayConfigKeys.OZONE_S3G_HTTP_ADDRESS_KEY;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.io.InputStream;
@@ -34,11 +35,11 @@ import org.junit.jupiter.api.TestInstance;
 import org.w3c.dom.Element;
 
 /**
- * Checks that the STS endpoint of the S3 Gateway answers a request it refuses before any endpoint runs in the STS
- * error format, from which STS clients read the error code.
+ * Checks that each listener of the S3 Gateway refuses a repeated query parameter, before any endpoint runs, in its own
+ * error format, from which its clients read the error code.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class TestS3STSErrorResponses extends ClusterForTests<MiniOzoneCluster> {
+class TestQueryStringErrors extends ClusterForTests<MiniOzoneCluster> {
 
   private final String stsAddress = PortAllocator.localhostWithFreePort();
 
@@ -58,27 +59,43 @@ class TestS3STSErrorResponses extends ClusterForTests<MiniOzoneCluster> {
         .addService(new S3GatewayService(conf -> {
           conf.setBoolean(S3STSConfigKeys.OZONE_S3G_STS_HTTP_ENABLED_KEY, true);
           conf.set(S3STSConfigKeys.OZONE_S3G_STS_HTTP_ADDRESS_KEY, stsAddress);
-        }, null))
+        }, OZONE_S3G_HTTP_ADDRESS_KEY))
         .build();
   }
 
   @Test
-  void aRepeatedParameterIsRefusedInTheStsErrorFormat() throws Exception {
-    URL url = new URL("http://" + stsAddress + "/?Action=AssumeRole&Action=GetCallerIdentity&Version=2011-06-15");
-    HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+  void theS3ListenerRefusesARepeatedParameterInTheS3ErrorFormat() throws Exception {
+    // The gateway publishes its address under this host's name, which need not be reachable from the host itself, and
+    // listens on every interface.
+    String address = getCluster().getConf().get(OZONE_S3G_HTTP_ADDRESS_KEY);
+    Element error = refusal("http://127.0.0.1" + address.substring(address.lastIndexOf(':')) + "/?prefix=a&prefix=b");
+
+    assertEquals("Error", error.getTagName());
+    assertEquals("InvalidArgument", text(error, "Code"));
+    assertEquals("The query parameter prefix is repeated.", text(error, "Message"));
+  }
+
+  @Test
+  void theStsListenerRefusesARepeatedParameterInTheStsErrorFormat() throws Exception {
+    Element response =
+        refusal("http://" + stsAddress + "/?Action=AssumeRole&Action=GetCallerIdentity&Version=2011-06-15");
+
+    assertEquals("ErrorResponse", response.getTagName());
+    assertEquals("Sender", text(response, "Type"));
+    assertEquals("ValidationError", text(response, "Code"));
+    assertEquals("The query parameter Action is repeated.", text(response, "Message"));
+  }
+
+  /** GETs {@code url}, expects a 400, and returns the root element of the error document. */
+  private static Element refusal(String url) throws Exception {
+    HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
     try {
       assertEquals(400, connection.getResponseCode());
-      Element response;
       try (InputStream body = connection.getErrorStream()) {
         DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
         factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-        response = factory.newDocumentBuilder().parse(body).getDocumentElement();
+        return factory.newDocumentBuilder().parse(body).getDocumentElement();
       }
-
-      assertEquals("ErrorResponse", response.getTagName());
-      assertEquals("Sender", text(response, "Type"));
-      assertEquals("ValidationError", text(response, "Code"));
-      assertEquals("The query parameter Action is repeated.", text(response, "Message"));
     } finally {
       connection.disconnect();
     }
