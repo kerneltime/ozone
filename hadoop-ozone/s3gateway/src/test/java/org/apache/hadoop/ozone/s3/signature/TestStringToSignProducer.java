@@ -141,12 +141,8 @@ public class TestStringToSignProducer {
         arguments("/bucket//key/", "/bucket//key/"),
         arguments("/bucket/a/.././b", "/bucket/a/.././b"),
         arguments("bucket/key", "bucket/key"),
-        // The path is the one sent: %2F is an encoded slash in a key, %252F a literal "%2F". An encoded octet stays
-        // encoded, with upper-case hex digits.
-        arguments("/bucket/a%2Fb", "/bucket/a%2Fb"),
-        arguments("/bucket/a%252Fb", "/bucket/a%252Fb"),
-        arguments("/bucket/a%2fb", "/bucket/a%2Fb"),
-        arguments("/bucket/%7Ekey", "/bucket/%7Ekey"),
+        // A literal %2F in the decoded path corresponds to %252F in the wire path.
+        arguments("/bucket/a%2Fb", "/bucket/a%252Fb"),
         arguments("/bucket/雪/😀", "/bucket/%E9%9B%AA/%F0%9F%98%80"),
         arguments("/bucket/?#", "/bucket/%3F%23")
     );
@@ -294,8 +290,8 @@ public class TestStringToSignProducer {
   }
 
   /**
-   * The S3 inputs where the canonical request used to depart from SigV4, one case each and then all together. The
-   * expected canonical request follows the SigV4 rules; each signature was computed independently from it.
+   * S3 inputs the canonical request has to get right, one case each and then all together. The expected canonical
+   * request follows the SigV4 rules; each signature was computed independently from it.
    */
   private static Stream<Arguments> s3CanonicalisationInputs() {
     return Stream.of(
@@ -308,10 +304,10 @@ public class TestStringToSignProducer {
         arguments("GET", "/bucket?a=2&a=1", new String[0],
             "GET\n/bucket\na=1&a=2\n" + S3_BASE_HEADERS + "\n" + S3_BASE_SIGNED + "\nUNSIGNED-PAYLOAD",
             "8dce7f6df7578812f61aa80c9658397d32a0921597e383d57058830b40f48db9"),
-        // An encoded slash in a key stays encoded: it is part of the key, not a path separator.
+        // S3 decodes the path before it encodes it, so an encoded slash in a key is signed as a slash.
         arguments("GET", "/bucket/dir%2Ffile", new String[0],
-            "GET\n/bucket/dir%2Ffile\n\n" + S3_BASE_HEADERS + "\n" + S3_BASE_SIGNED + "\nUNSIGNED-PAYLOAD",
-            "c9b221067c9fcc72c7133b4d9a8bf5832b8ffc8fe12e9b030a2bd41adb819073"),
+            "GET\n/bucket/dir/file\n\n" + S3_BASE_HEADERS + "\n" + S3_BASE_SIGNED + "\nUNSIGNED-PAYLOAD",
+            "c1050cbd023688008280d906df59aae8aef801a32813f9b880e3fb4389b0b17f"),
         // A raw "+" in a query value is a literal plus, which SigV4 encodes as %2B.
         arguments("GET", "/bucket?prefix=a+b&list-type=2", new String[0],
             "GET\n/bucket\nlist-type=2&prefix=a%2Bb\n" + S3_BASE_HEADERS + "\n" + S3_BASE_SIGNED
@@ -320,10 +316,10 @@ public class TestStringToSignProducer {
         arguments("PUT", "/bucket/dir%2Ffile?prefix=a+b&a=2&a=1",
             new String[] {"Content-Type", "text/plain; charset=UTF-8", "X-Amz-Meta-A", "one", "X-Amz-Meta-A", "two",
                 "X-Amz-Meta-B", "x  y"},
-            "PUT\n/bucket/dir%2Ffile\na=1&a=2&prefix=a%2Bb\ncontent-type:text/plain; charset=UTF-8\n" + S3_BASE_HEADERS
+            "PUT\n/bucket/dir/file\na=1&a=2&prefix=a%2Bb\ncontent-type:text/plain; charset=UTF-8\n" + S3_BASE_HEADERS
                 + "x-amz-meta-a:one,two\nx-amz-meta-b:x y\n\ncontent-type;" + S3_BASE_SIGNED
                 + ";x-amz-meta-a;x-amz-meta-b\nUNSIGNED-PAYLOAD",
-            "c271d2770704fd9f886146d1e1fc305f6c22809972f0bdea6fbf0a5acc698eec")
+            "c06e189842b75bbc6f7538fc3498ba2f0f02824cd982841ec4418985544296f2")
     );
   }
 
@@ -355,7 +351,7 @@ public class TestStringToSignProducer {
     return headers;
   }
 
-  /** Builds the string to sign for a request the gateway received at {@code requestUri}, with the path as sent. */
+  /** Builds the string to sign for a request the gateway received at {@code requestUri}, with the path decoded. */
   private String stringToSign(String method, String requestUri, MultivaluedMap<String, String> headers,
       String signedHeaders, String scope, String payloadHash) throws Exception {
     URI uri = new URI(requestUri);
@@ -365,7 +361,7 @@ public class TestStringToSignProducer {
         .setCredentialScope(scope)
         .setSignedHeaders(signedHeaders)
         .setPayloadHash(payloadHash)
-        .setUnfilteredURI(uri.getRawPath())
+        .setUnfilteredURI(uri.getPath())
         .build();
     return StringToSignProducer.createSignatureBase(signatureInfo,
         setupContext(uri, method, headers, decodedQuery(uri.getRawQuery())));

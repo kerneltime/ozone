@@ -31,6 +31,7 @@ import java.io.ByteArrayInputStream;
 import java.net.URI;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
+import java.util.Collections;
 import javax.ws.rs.container.ContainerRequestContext;
 import javax.ws.rs.core.MultivaluedHashMap;
 import javax.ws.rs.core.MultivaluedMap;
@@ -38,6 +39,8 @@ import javax.ws.rs.core.UriInfo;
 import org.apache.hadoop.ozone.s3.HeaderPreprocessor;
 import org.apache.hadoop.ozone.s3.exception.S3ErrorTable;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 /**
  * Tests for {@link AWSSignatureProcessor}.
@@ -78,11 +81,30 @@ public class TestAWSSignatureProcessor {
     assertEquals("value4,value1,value3,value2", headers.get("my-header1"));
   }
 
-  @Test
-  public void testUnfilteredUriKeepsEncodedSlash() throws Exception {
-    SignatureInfo signatureInfo = parseSignature("http://s3g.example.com:9878/bucket/dir%2Ffile", UNSIGNED_PAYLOAD);
+  /**
+   * S3 decodes the path and percent-encodes it once: every octet but the unreserved ones and '/', in upper-case hex.
+   * The first seven canonical paths are the ones S3 used for these paths; the last three paths are already canonical.
+   */
+  @ParameterizedTest
+  @CsvSource({
+      "/B/logs/%2Fa.txt, /B/logs//a.txt",
+      "/B/logs/%2Fb.txt, /B/logs//b.txt",
+      "/B/logs//c.txt, /B/logs//c.txt",
+      "/B/logs/%7Ed.txt, /B/logs/~d.txt",
+      "/B/logs/%7Ee.txt, /B/logs/~e.txt",
+      "/B/logs/a%2bf.txt, /B/logs/a%2Bf.txt",
+      "/B/logs/a%2bg.txt, /B/logs/a%2Bg.txt",
+      "/b/k, /b/k",
+      "/b/a%20b, /b/a%20b",
+      "/b/caf%C3%A9, /b/caf%C3%A9"
+  })
+  public void testCanonicalPathIsTheDecodedPathEncodedOnce(String path, String canonicalPath) throws Exception {
+    SignatureInfo signatureInfo = parseSignature("http://s3g.example.com:9878" + path, UNSIGNED_PAYLOAD);
 
-    assertEquals("/bucket/dir%2Ffile", signatureInfo.getUnfilteredURI());
+    String canonicalRequest = StringToSignProducer.buildCanonicalRequest("GET", signatureInfo.getUnfilteredURI(),
+        "host", Collections.singletonMap("host", "s3g.example.com:9878"), null, UNSIGNED_PAYLOAD);
+
+    assertEquals(canonicalPath, canonicalRequest.split("\n")[1]);
   }
 
   @Test

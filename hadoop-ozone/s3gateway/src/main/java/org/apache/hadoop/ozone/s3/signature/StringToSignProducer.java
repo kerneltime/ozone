@@ -22,6 +22,7 @@ import static org.apache.hadoop.ozone.s3.exception.S3ErrorTable.newError;
 import static org.apache.hadoop.ozone.s3.util.S3Consts.X_AMZ_CONTENT_SHA256;
 
 import com.google.common.annotations.VisibleForTesting;
+import java.io.UnsupportedEncodingException;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -40,6 +41,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.tuple.Pair;
 import org.apache.hadoop.ozone.s3.exception.OS3Exception;
 import org.apache.hadoop.ozone.s3.signature.AWSSignatureProcessor.LowerCaseKeyStringMap;
+import org.apache.hadoop.ozone.s3.util.S3Utils;
 import org.apache.kerby.util.Hex;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -56,6 +58,8 @@ public final class StringToSignProducer {
   private static final String NEWLINE = "\n";
   public static final String HOST = "host";
 
+  private static final String[] URL_ENCODE_SEARCH_CHARS = new String[] {"+", "*", "%7E"};
+  private static final String[] URL_ENCODE_REPLACE_CHARS = new String[] {"%20", "%2A", "~"};
   private static final String X_AMZ_SIGNATURE = "X-Amz-Signature";
   private static final char[] HEX_DIGITS = "0123456789ABCDEF".toCharArray();
   public static final DateTimeFormatter TIME_FORMATTER =
@@ -150,7 +154,11 @@ public final class StringToSignProducer {
       String payloadHash
   ) throws OS3Exception {
 
-    String canonicalUri = canonicalUri(uri);
+    List<String> encParts = new ArrayList<>();
+    for (String p : StringUtils.splitPreserveAllTokens(uri, '/')) {
+      encParts.add(urlEncode(p));
+    }
+    String canonicalUri = join("/", encParts);
 
     String canonicalQueryStr = canonicalQuery(rawQuery);
 
@@ -181,23 +189,29 @@ public final class StringToSignProducer {
   }
   
   /**
-   * S3 signs the path as the client sent it, encoded once: a percent-encoded octet, such as %2F in a key, stays
-   * encoded, with upper-case hex digits, and any other octet that is neither unreserved nor '/' is percent-encoded.
+   * String join that also works with empty strings.
+   *
+   * @return joined string
    */
-  private static String canonicalUri(String rawPath) {
-    byte[] bytes = rawPath.getBytes(UTF_8);
-    StringBuilder result = new StringBuilder(bytes.length);
-    for (int i = 0; i < bytes.length; i++) {
-      if (isPercentEncodedOctet(bytes, i)) {
-        appendPercentEncoded(result, decodeOctet(bytes, i));
-        i += 2;
-      } else if (bytes[i] == '/') {
-        result.append('/');
-      } else {
-        appendUriEncoded(result, bytes[i] & 0xFF);
+  private static String join(String glue, List<String> parts) {
+    StringBuilder result = new StringBuilder();
+    boolean addSeparator = false;
+    for (String p : parts) {
+      if (addSeparator) {
+        result.append(glue);
       }
+      result.append(p);
+      addSeparator = true;
     }
     return result.toString();
+  }
+
+  private static String urlEncode(String str) {
+    try {
+      return StringUtils.replaceEach(S3Utils.urlEncode(str), URL_ENCODE_SEARCH_CHARS, URL_ENCODE_REPLACE_CHARS);
+    } catch (UnsupportedEncodingException e) {
+      throw new RuntimeException(e);
+    }
   }
 
   /**

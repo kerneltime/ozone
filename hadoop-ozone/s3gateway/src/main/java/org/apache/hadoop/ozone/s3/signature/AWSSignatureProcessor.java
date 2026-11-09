@@ -123,9 +123,9 @@ public class AWSSignatureProcessor implements SignatureProcessor {
 
     String payloadHash = getPayloadHash(headers, signatureInfo);
     signatureInfo.setPayloadHash(payloadHash);
-    // The path as sent: decoding it would turn an encoded slash in a key into a separator.
+    // S3 decodes the path before it encodes it for the canonical request, so %2F in a key is signed as '/'.
     signatureInfo.setUnfilteredURI(
-        context.getUriInfo().getRequestUri().getRawPath());
+        context.getUriInfo().getRequestUri().getPath());
     return signatureInfo;
   }
 

@@ -281,10 +281,6 @@ class TestS3SDKWithStaticCredentials extends OzoneS3SDKTests {
     private static final String V1 = AbstractS3SDKV1Tests.class.getName();
     private static final String V2 = AbstractS3SDKV2Tests.class.getName();
     private static final Map<String, String> REASONS = Map.of(
-        V1 + "#testPutDoubleSlashPrefixObject",
-        "SDK v1 sends the key //dir1 as /%2F/dir1 but signs ///dir1. The gateway keeps %2F as sent, so that a request"
-            + " signed with the path exactly as sent verifies; whether to accept the decoded path, instead or as well,"
-            + " is an open decision",
         V1 + "$PresignedUrlTests#testPresignedUrlMultipartUpload",
         "SDK v1 presigns a POST without a body with an empty query string, but the URL carries the query",
         V2 + "$PresignedUrlTests#testPresignedUrlMultipartUpload",
