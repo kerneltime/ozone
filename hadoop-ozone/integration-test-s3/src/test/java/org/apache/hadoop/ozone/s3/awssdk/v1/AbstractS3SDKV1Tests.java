@@ -1408,6 +1408,30 @@ public abstract class AbstractS3SDKV1Tests extends OzoneTestBase implements Clus
     assertEquals(content.length(), object.getObjectMetadata().getContentLength());
   }
 
+  /**
+   * An OBS bucket keeps a key with an empty path segment exactly as written, as S3 does. SDK v1 sends the key
+   * {@code logs//a.txt} as {@code logs/%2Fa.txt}, but signs the path with both slashes.
+   */
+  @Test
+  public void testPutDoubleSlashObjectInObjectStoreBucket() throws IOException {
+    final String bucketName = getBucketName();
+    final String keyName = "logs//a.txt";
+    final String content = "bar";
+    try (OzoneClient ozoneClient = cluster.newClient()) {
+      ozoneClient.getObjectStore().getS3Volume().createBucket(bucketName,
+          BucketArgs.newBuilder().setBucketLayout(BucketLayout.OBJECT_STORE).build());
+    }
+
+    s3Client.putObject(bucketName, keyName, content);
+
+    List<String> listedKeys = s3Client.listObjects(bucketName).getObjectSummaries().stream()
+        .map(S3ObjectSummary::getKey).collect(Collectors.toList());
+    assertEquals(Collections.singletonList(keyName), listedKeys);
+    try (S3Object object = s3Client.getObject(bucketName, keyName)) {
+      assertEquals(content, IOUtils.toString(object.getObjectContent(), StandardCharsets.UTF_8));
+    }
+  }
+
   @Test
   public void testPutObjectEmpty() throws Exception {
     final String bucketName = getBucketName();
